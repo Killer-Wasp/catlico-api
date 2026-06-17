@@ -1,0 +1,32 @@
+[project]
+name = "catlico-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "alembic>=1.18.4",
+    "asyncpg>=0.31.0",
+    "fastapi[standard]>=0.136.3",
+    "greenlet>=3.5.1",
+    "pyjwt>=2.10.1",
+    "pwdlib[bcrypt]>=0.2.1",
+    "sqlmodel>=0.0.38",
+    "fsspec>=2026.4.0",
+    "s3fs>=2026.4.0",
+    "anyio>=4.13.0",
+    "cryptography>=49.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+    "moto[s3,server]>=5.2.2",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]

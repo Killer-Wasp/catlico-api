@@ -1,0 +1,205 @@
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import func, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
+
+from app.crud.audit import record_audit
+from app.crud.case_share import list_non_owner_org_ids
+from app.crud.organisation_link import get_link
+from app.models.case_share import CaseShare
+from app.models.log import Log
+from app.models.organisation_link import AutoShareMode
+from app.models.task import (
+    TASK_TERMINAL_STATUSES,
+    Task,
+    TaskCreate,
+    TaskStatus,
+    TaskUpdate,
+)
+from app.models.task_share import TaskShare
+
+
+async def get_task(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
+    """Returns the task only if it exists and is not soft-deleted."""
+    task = await session.get(Task, task_id)
+    if task is None or task.deleted_at is not None:
+        return None
+    return task
+
+
+async def list_tasks_for_case(
+    session: AsyncSession,
+    case_id: int,
+    *,
+    organisation_id: str,
+    is_owner: bool,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[Task], int]:
+    base = select(Task).where(Task.case_id == case_id, Task.deleted_at.is_(None))
+    if not is_owner:
+        base = base.join(TaskShare, TaskShare.task_id == Task.id).where(
+            TaskShare.organisation_id == organisation_id
+        )
+
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = (await session.execute(count_stmt)).scalar_one()
+
+    # Order per-group so `order` is scoped within a group, not globally across the case.
+    stmt = (
+        base.order_by(Task.group, Task.order, Task.created_at)
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all()), total
+
+
+async def list_groups_for_case(
+    session: AsyncSession,
+    case_id: int,
+    *,
+    organisation_id: str,
+    is_owner: bool,
+) -> list[str]:
+    """Distinct non-empty task group names visible to the caller's org — for UI autocomplete."""
+    base = (
+        select(Task.group)
+        .where(
+            Task.case_id == case_id,
+            Task.deleted_at.is_(None),
+            Task.group != "",
+        )
+        .distinct()
+    )
+    if not is_owner:
+        base = base.join(TaskShare, TaskShare.task_id == Task.id).where(
+            TaskShare.organisation_id == organisation_id
+        )
+    result = await session.execute(base.order_by(Task.group))
+    return list(result.scalars().all())
+
+
+async def create_task(
+    session: AsyncSession,
+    task_in: TaskCreate,
+    *,
+    case_id: int,
+    organisation_id: str,
+    created_by: str,
+) -> Task:
+    task = Task(
+        case_id=case_id,
+        organisation_id=organisation_id,
+        title=task_in.title,
+        group=task_in.group,
+        description=task_in.description,
+        assignee_id=task_in.assignee_id,
+        order=task_in.order,
+        start_date=task_in.start_date,
+        due_date=task_in.due_date,
+        created_by=created_by,
+    )
+    session.add(task)
+    await session.flush()
+
+    # Auto-share fan-out: for each non-owner org on the case, look up the directed
+    # organisation_link from creator-org → target-org. If task_sharing=autoShare,
+    # create a task_share row in the same transaction.
+    target_org_ids = await list_non_owner_org_ids(session, case_id)
+    # Also include the case-owner orgs that are NOT the creator org (owner sees by default,
+    # but if creator is a non-owner, owner needs explicit share to see).
+    owner_orgs = await session.execute(
+        select(CaseShare.organisation_id).where(
+            CaseShare.case_id == case_id,
+            CaseShare.is_owner == True,  # noqa: E712
+        )
+    )
+    candidate_orgs = set(target_org_ids) | set(owner_orgs.scalars().all())
+    candidate_orgs.discard(organisation_id)
+
+    for target_org_id in candidate_orgs:
+        link = await get_link(session, organisation_id, target_org_id)
+        if link is None or link.task_sharing != AutoShareMode.auto_share:
+            continue
+        session.add(
+            TaskShare(
+                task_id=task.id,
+                organisation_id=target_org_id,
+                created_by=created_by,
+            )
+        )
+
+    await session.flush()
+    await record_audit(
+        session,
+        action="create",
+        obj=task,
+        context_type="case",
+        context_id=str(case_id),
+        actor=created_by,
+        details={"title": task.title, "group": task.group},
+    )
+    return task
+
+
+async def update_task(
+    session: AsyncSession, task: Task, task_in: TaskUpdate, updated_by: str
+) -> Task:
+    update_data = task_in.model_dump(exclude_unset=True)
+
+    # Auto-manage end_date on status transitions: set it when entering a terminal
+    # state, clear it on re-open. Transition legality is validated in the handler.
+    if "status" in update_data:
+        new_status: TaskStatus = update_data["status"]
+        if new_status in TASK_TERMINAL_STATUSES and task.status not in TASK_TERMINAL_STATUSES:
+            update_data["end_date"] = datetime.now(UTC)
+        elif new_status not in TASK_TERMINAL_STATUSES and task.status in TASK_TERMINAL_STATUSES:
+            update_data["end_date"] = None
+
+    changes = {
+        field: [getattr(task, field, None), new]
+        for field, new in update_data.items()
+        if field not in ("updated_at", "updated_by")
+        and getattr(task, field, None) != new
+    }
+    update_data["updated_at"] = datetime.now(UTC)
+    update_data["updated_by"] = updated_by
+    task.sqlmodel_update(update_data)
+    session.add(task)
+    await session.flush()
+    if changes:
+        await record_audit(
+            session,
+            action="update",
+            obj=task,
+            context_type="case",
+            context_id=str(task.case_id),
+            actor=updated_by,
+            details=changes,
+        )
+    return task
+
+
+async def delete_task(session: AsyncSession, task: Task, deleted_by: str) -> None:
+    """Soft delete: mark the task deleted and cascade the flag to its logs."""
+    now = datetime.now(UTC)
+    task.deleted_at = now
+    task.deleted_by = deleted_by
+    session.add(task)
+    await session.execute(
+        update(Log)
+        .where(Log.task_id == task.id, Log.deleted_at.is_(None))
+        .values(deleted_at=now, deleted_by=deleted_by)
+    )
+    await session.flush()
+    await record_audit(
+        session,
+        action="delete",
+        obj=task,
+        context_type="case",
+        context_id=str(task.case_id),
+        actor=deleted_by,
+    )

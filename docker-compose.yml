@@ -1,0 +1,67 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: catlico
+      POSTGRES_PASSWORD: catlico
+      POSTGRES_DB: catlico
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # SeaweedFS with the S3 gateway enabled. `server -s3` brings up master, volume,
+  # filer and the S3 API on :8333 in one process — fine for dev.
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    command: >
+      sh -ec 'cat > /etc/seaweedfs/s3.json <<EOF
+      {
+        "identities": [
+          {
+            "name": "'"$$SEAWEEDFS_IDENTITY_NAME"'",
+            "credentials": [
+              {
+                "accessKey": "'"$$SEAWEEDFS_S3_ACCESS_KEY"'",
+                "secretKey": "'"$$SEAWEEDFS_S3_SECRET_KEY"'"
+              }
+            ],
+            "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+          }
+        ]
+      }
+      EOF
+      weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=1024'
+    environment:
+      SEAWEEDFS_IDENTITY_NAME: catlico
+      SEAWEEDFS_S3_ACCESS_KEY: catlico
+      SEAWEEDFS_S3_SECRET_KEY: catlico-secret
+    ports:
+      - "8333:8333"   # S3 API
+      - "8888:8888"   # filer
+      - "9333:9333"   # master
+    volumes:
+      - seaweed_data:/data
+
+  api:
+    build: .
+    depends_on:
+      - db
+      - seaweedfs
+    environment:
+      POSTGRES_SERVER: db
+      POSTGRES_USER: catlico
+      POSTGRES_PASSWORD: catlico
+      POSTGRES_DB: catlico
+      # Blob storage -> SeaweedFS S3 gateway
+      STORAGE_PROTOCOL: s3
+      STORAGE_ROOT: catlico            # bucket name
+      S3_ENDPOINT_URL: http://seaweedfs:8333
+      S3_ACCESS_KEY: catlico
+      S3_SECRET_KEY: catlico-secret
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
+  seaweed_data:

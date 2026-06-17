@@ -1,0 +1,197 @@
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import OrgContext, SuperAdminUser, require_permission
+from app.core.db import get_session
+from app.crud import organisation as org_crud
+from app.crud import organisation_member as member_crud
+from app.crud import role as role_crud
+from app.crud.audit import record_audit
+from app.models.organisation import OrganisationCreate, OrganisationPublic, OrganisationUpdate
+from app.models.organisation_member import (
+    OrganisationMemberCreate,
+    OrganisationMemberPublic,
+    OrganisationMemberUpdate,
+)
+
+router = APIRouter(prefix="/organisations", tags=["organisations"])
+
+
+@router.get("/", response_model=list[OrganisationPublic])
+async def list_organisations(
+    _: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+) -> list[OrganisationPublic]:
+    return await org_crud.get_organisations(session, skip=skip, limit=limit)
+
+
+@router.post("/", response_model=OrganisationPublic, status_code=status.HTTP_201_CREATED)
+async def create_organisation(
+    current_user: SuperAdminUser,
+    org_in: OrganisationCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OrganisationPublic:
+    existing = await org_crud.get_organisation(session, org_in.id)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Organisation '{org_in.id}' already exists",
+        )
+    org = await org_crud.create_organisation(session, org_in, created_by=str(current_user.id))
+    await record_audit(
+        session,
+        action="create",
+        obj=org,
+        actor=str(current_user.id),
+        details={"id": org.id, "name": org.name},
+    )
+    return org
+
+
+@router.get("/{organisation_id}", response_model=OrganisationPublic)
+async def get_organisation(
+    ctx: Annotated[OrgContext, require_permission("read:organisation")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OrganisationPublic:
+    org = await org_crud.get_organisation(session, ctx.organisation_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organisation not found")
+    return org
+
+
+@router.patch("/{organisation_id}", response_model=OrganisationPublic)
+async def update_organisation(
+    org_in: OrganisationUpdate,
+    ctx: Annotated[OrgContext, require_permission("write:organisation")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OrganisationPublic:
+    org = await org_crud.get_organisation(session, ctx.organisation_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organisation not found")
+    org = await org_crud.update_organisation(
+        session, org, org_in, updated_by=str(ctx.user.id)
+    )
+    await record_audit(
+        session,
+        action="update",
+        obj=org,
+        actor=str(ctx.user.id),
+        details=org_in.model_dump(exclude_unset=True),
+    )
+    return org
+
+
+@router.delete("/{organisation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_organisation(
+    current_user: SuperAdminUser,
+    organisation_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    org = await org_crud.get_organisation(session, organisation_id)
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organisation not found")
+    await record_audit(session, action="delete", obj=org, actor=str(current_user.id))
+    await org_crud.delete_organisation(session, org)
+
+
+# --- Members ---
+
+@router.get("/{organisation_id}/members", response_model=list[OrganisationMemberPublic])
+async def list_members(
+    ctx: Annotated[OrgContext, require_permission("read:user")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[OrganisationMemberPublic]:
+    return await member_crud.get_members(session, ctx.organisation_id)
+
+
+@router.post(
+    "/{organisation_id}/members",
+    response_model=OrganisationMemberPublic,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_member(
+    member_in: OrganisationMemberCreate,
+    ctx: Annotated[OrgContext, require_permission("write:user")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OrganisationMemberPublic:
+    existing = await member_crud.get_member(session, member_in.user_id, ctx.organisation_id)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User is already a member of this organisation",
+        )
+    role = await role_crud.get_role(session, member_in.role_id)
+    if not role:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    member = await member_crud.add_member(
+        session, ctx.organisation_id, member_in, created_by=str(ctx.user.id)
+    )
+    await record_audit(
+        session,
+        action="create",
+        obj=member,
+        context_type="organisation",
+        context_id=ctx.organisation_id,
+        actor=str(ctx.user.id),
+        details={"user_id": str(member.user_id), "role_id": str(member.role_id)},
+    )
+    return member
+
+
+@router.patch(
+    "/{organisation_id}/members/{member_user_id}",
+    response_model=OrganisationMemberPublic,
+)
+async def update_member(
+    member_user_id: uuid.UUID,
+    member_in: OrganisationMemberUpdate,
+    ctx: Annotated[OrgContext, require_permission("write:user")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OrganisationMemberPublic:
+    member = await member_crud.get_member(session, member_user_id, ctx.organisation_id)
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    role = await role_crud.get_role(session, member_in.role_id)
+    if not role:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    member = await member_crud.update_member(
+        session, member, member_in, updated_by=str(ctx.user.id)
+    )
+    await record_audit(
+        session,
+        action="update",
+        obj=member,
+        context_type="organisation",
+        context_id=ctx.organisation_id,
+        actor=str(ctx.user.id),
+        details={"role_id": str(member.role_id)},
+    )
+    return member
+
+
+@router.delete(
+    "/{organisation_id}/members/{member_user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_member(
+    member_user_id: uuid.UUID,
+    ctx: Annotated[OrgContext, require_permission("write:user")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    member = await member_crud.get_member(session, member_user_id, ctx.organisation_id)
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    await record_audit(
+        session,
+        action="delete",
+        obj=member,
+        context_type="organisation",
+        context_id=ctx.organisation_id,
+        actor=str(ctx.user.id),
+    )
+    await member_crud.remove_member(session, member)
