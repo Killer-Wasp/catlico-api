@@ -116,6 +116,18 @@ class CasePublic(SQLModel):
     updated_at: datetime | None
 
 
+class CaseListFacets(SQLModel):
+    """Filterable values present across an org's case list, for the list view's
+    filter dropdowns."""
+
+    #: Distinct assignee emails on the org's cases.
+    assignees: list[str] = []
+    #: Whether any case is unassigned (offers the "Unassigned" filter option).
+    unassigned: bool = False
+    #: Distinct tag strings on the org's cases.
+    tags: list[str] = []
+
+
 class CaseUpdate(SQLModel):
     title: str | None = None
     description: str | None = Field(default=None, description=MARKDOWN_NOTE)

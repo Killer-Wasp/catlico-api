@@ -1,7 +1,16 @@
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -35,6 +44,7 @@ from app.models.audit import AuditPublic
 from app.models.case_ import (
     Case,
     CaseCreate,
+    CaseListFacets,
     CaseMergeRequest,
     CasePublic,
     CaseStatus,
@@ -93,19 +103,37 @@ async def list_cases(
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
-    status_filter: CaseStatus | None = None,
-    assignee_id: uuid.UUID | None = None,
-    severity: int | None = None,
+    status_filter: Annotated[list[CaseStatus] | None, Query()] = None,
+    severity: Annotated[list[int] | None, Query()] = None,
+    assignee: Annotated[list[str] | None, Query()] = None,
+    tag: Annotated[list[str] | None, Query()] = None,
+    title: Annotated[list[str] | None, Query()] = None,
+    case_q: Annotated[list[str] | None, Query()] = None,
+    sort: Annotated[str, Query()] = "id",
+    order: Annotated[str, Query()] = "desc",
 ) -> Page[CasePublic]:
+    """Filterable, sortable, paginated case list. Filters are OR-within /
+    AND-across (e.g. status in {Open, Resolved} AND severity in {3, 4}). The
+    `assignee` list takes assignee emails plus the literal `Unassigned`; `tag`,
+    `title` and `case_q` match by tag string, title substring and case-number
+    substring respectively. `sort` ∈ {id, created, updated}, `order` ∈ {asc, desc}."""
     _require_perm(ctx, "read:case")
+    filters = case_crud.CaseListFilter.from_params(
+        statuses=[s.value for s in status_filter] if status_filter else None,
+        severities=severity,
+        assignees=assignee,
+        tags=tag,
+        titles=title,
+        case_queries=case_q,
+        sort=sort,
+        order=order,
+    )
     cases, total = await case_crud.list_cases_for_org(
         session,
         ctx.organisation_id,
         skip=skip,
         limit=limit,
-        status_filter=status_filter.value if status_filter else None,
-        assignee_id=assignee_id,
-        severity=severity,
+        filters=filters,
     )
     flagged = await flag_crud.flagged_ids(
         session, FlagEntityType.case, [str(c.id) for c in cases], ctx.organisation_id
@@ -143,6 +171,17 @@ async def list_cases(
         skip=skip,
         limit=limit,
     )
+
+
+@router.get("/filters", response_model=CaseListFacets)
+async def list_case_filters(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CaseListFacets:
+    """Distinct assignee/tag values across the org's cases for the list view's
+    filter dropdowns. Declared before `/{case_id}` so the literal path wins."""
+    _require_perm(ctx, "read:case")
+    return await case_crud.case_list_facets(session, ctx.organisation_id)
 
 
 @router.post("/", response_model=CasePublic, status_code=status.HTTP_201_CREATED)

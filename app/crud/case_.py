@@ -1,7 +1,8 @@
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import String, and_, cast, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -10,6 +11,7 @@ from app.models.alert import Alert
 from app.models.case_ import (
     Case,
     CaseCreate,
+    CaseListFacets,
     CaseResolutionStatus,
     CaseStatus,
     CaseUpdate,
@@ -21,8 +23,9 @@ from app.models.enrichment import EnrichmentJob, ReportTag
 from app.models.flag import Flag, FlagEntityType
 from app.models.log import Log
 from app.models.observable import Observable, ObservableShare
-from app.models.tag import Tagging, TaggableType
+from app.models.tag import Tag, Tagging, TaggableType, parse_tag, tag_to_string
 from app.models.task import Task
+from app.models.user import User
 
 
 class MergeError(Exception):
@@ -43,14 +46,122 @@ async def get_case(session: AsyncSession, case_id: int) -> Case | None:
     return case
 
 
-def _list_filter(stmt, status_filter, assignee_id, severity):
-    if status_filter is not None:
-        stmt = stmt.where(Case.status == status_filter)
-    if assignee_id is not None:
-        stmt = stmt.where(Case.assignee_id == assignee_id)
-    if severity is not None:
-        stmt = stmt.where(Case.severity == severity)
+# Sort key → orderable column. "updated" coalesces to created_at so cases that
+# were never updated still sort sensibly. Anything else falls back to id.
+_SORT_COLUMNS = {
+    "id": Case.id,
+    "created": Case.created_at,
+    "updated": func.coalesce(Case.updated_at, Case.created_at),
+}
+
+#: Assignee filter sentinel meaning "no assignee" (assignee_id IS NULL). Mirrors
+#: the UI's "Unassigned" token, which can be selected alongside real assignees.
+UNASSIGNED = "Unassigned"
+
+
+@dataclass(frozen=True)
+class CaseListFilter:
+    """Server-side filter + sort spec for the case list. Every collection is
+    OR-within / AND-across: e.g. (status in {Open, Resolved}) AND (severity in
+    {3, 4}). Empty collections impose no constraint."""
+
+    statuses: tuple[str, ...] = ()
+    severities: tuple[int, ...] = ()
+    #: Assignee emails to match (resolved to user ids via a subquery).
+    assignee_emails: tuple[str, ...] = ()
+    #: Also match unassigned cases (assignee_id IS NULL).
+    include_unassigned: bool = False
+    #: Tag strings; a case matches if it carries any of them.
+    tags: tuple[str, ...] = ()
+    #: Case-insensitive title substrings; a case matches any.
+    titles: tuple[str, ...] = ()
+    #: Case-number substrings matched against the (stringified) id.
+    case_queries: tuple[str, ...] = ()
+    sort: str = "id"
+    order: str = "desc"
+
+    @classmethod
+    def from_params(
+        cls,
+        *,
+        statuses: list[str] | None = None,
+        severities: list[int] | None = None,
+        assignees: list[str] | None = None,
+        tags: list[str] | None = None,
+        titles: list[str] | None = None,
+        case_queries: list[str] | None = None,
+        sort: str = "id",
+        order: str = "desc",
+    ) -> "CaseListFilter":
+        """Build a filter from raw query params, splitting the `assignees` list
+        into real emails and the `Unassigned` sentinel."""
+        assignees = assignees or []
+        emails = tuple(a for a in assignees if a != UNASSIGNED)
+        return cls(
+            statuses=tuple(statuses or ()),
+            severities=tuple(severities or ()),
+            assignee_emails=emails,
+            include_unassigned=UNASSIGNED in assignees,
+            tags=tuple(tags or ()),
+            titles=tuple(t for t in (titles or ()) if t.strip()),
+            case_queries=tuple(
+                c.lstrip("#").strip() for c in (case_queries or []) if c.strip()
+            ),
+            sort=sort,
+            order=order,
+        )
+
+
+def _apply_case_filters(stmt, f: CaseListFilter):
+    if f.statuses:
+        stmt = stmt.where(Case.status.in_(f.statuses))
+    if f.severities:
+        stmt = stmt.where(Case.severity.in_(f.severities))
+
+    assignee_conds = []
+    if f.assignee_emails:
+        assignee_conds.append(
+            Case.assignee_id.in_(
+                select(User.id).where(User.email.in_(f.assignee_emails))
+            )
+        )
+    if f.include_unassigned:
+        assignee_conds.append(Case.assignee_id.is_(None))
+    if assignee_conds:
+        stmt = stmt.where(or_(*assignee_conds))
+
+    if f.tags:
+        tag_conds = []
+        for raw in f.tags:
+            try:
+                ns, pred, val = parse_tag(raw)
+            except ValueError:
+                continue
+            tag_conds.append(
+                and_(Tag.namespace == ns, Tag.predicate == pred, Tag.value == val)
+            )
+        if tag_conds:
+            tagged = (
+                select(Tagging.taggable_id)
+                .join(Tag, Tag.id == Tagging.tag_id)
+                .where(Tagging.taggable_type == TaggableType.case, or_(*tag_conds))
+            )
+            stmt = stmt.where(cast(Case.id, String).in_(tagged))
+
+    if f.titles:
+        stmt = stmt.where(or_(*[Case.title.ilike(f"%{q}%") for q in f.titles]))
+    if f.case_queries:
+        stmt = stmt.where(
+            or_(*[cast(Case.id, String).ilike(f"%{q}%") for q in f.case_queries])
+        )
     return stmt
+
+
+def _apply_case_order(stmt, f: CaseListFilter):
+    col = _SORT_COLUMNS.get(f.sort, Case.id)
+    direction = col.asc() if f.order == "asc" else col.desc()
+    # Tie-break on id (desc) so pages stay stable when the sort column has ties.
+    return stmt.order_by(direction, Case.id.desc())
 
 
 async def list_cases_for_org(
@@ -59,10 +170,9 @@ async def list_cases_for_org(
     *,
     skip: int = 0,
     limit: int = 100,
-    status_filter: str | None = None,
-    assignee_id: uuid.UUID | None = None,
-    severity: int | None = None,
+    filters: CaseListFilter | None = None,
 ) -> tuple[list[Case], int]:
+    filters = filters or CaseListFilter()
     base = (
         select(Case)
         .join(CaseShare, CaseShare.case_id == Case.id)
@@ -71,14 +181,70 @@ async def list_cases_for_org(
             Case.deleted_at.is_(None),
         )
     )
-    base = _list_filter(base, status_filter, assignee_id, severity)
+    base = _apply_case_filters(base, filters)
 
     count_stmt = select(func.count()).select_from(base.subquery())
     total = (await session.execute(count_stmt)).scalar_one()
 
-    stmt = base.order_by(Case.id.desc()).offset(skip).limit(limit)
+    stmt = _apply_case_order(base, filters).offset(skip).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all()), total
+
+
+async def case_list_facets(
+    session: AsyncSession, organisation_id: str
+) -> CaseListFacets:
+    """Distinct assignee emails and tag strings present on the org's (non-deleted)
+    cases, plus whether any case is unassigned. Powers the list view's filter
+    dropdowns so they offer values across the whole result set, not just one page."""
+    org_cases = (
+        select(Case.id, Case.assignee_id)
+        .join(CaseShare, CaseShare.case_id == Case.id)
+        .where(
+            CaseShare.organisation_id == organisation_id,
+            Case.deleted_at.is_(None),
+        )
+        .subquery()
+    )
+
+    emails = list(
+        (
+            await session.execute(
+                select(User.email)
+                .join(org_cases, org_cases.c.assignee_id == User.id)
+                .distinct()
+                .order_by(User.email)
+            )
+        ).scalars()
+    )
+    unassigned = bool(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(org_cases)
+                .where(org_cases.c.assignee_id.is_(None))
+            )
+        ).scalar_one()
+    )
+    tag_rows = (
+        (
+            await session.execute(
+                select(Tag)
+                .join(Tagging, Tagging.tag_id == Tag.id)
+                .join(org_cases, cast(org_cases.c.id, String) == Tagging.taggable_id)
+                .where(Tagging.taggable_type == TaggableType.case)
+                .distinct()
+                .order_by(Tag.namespace, Tag.predicate, Tag.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return CaseListFacets(
+        assignees=emails,
+        unassigned=unassigned,
+        tags=[tag_to_string(t) for t in tag_rows],
+    )
 
 
 async def create_case(
