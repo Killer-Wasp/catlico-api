@@ -28,6 +28,38 @@ async def test_create_task_no_autoshare(session, org_a, builtin_roles, analyst_a
     )
     assert task.case_id == case.id
     assert task.organisation_id == org_a.id
+    assert task.public_id == f"T-{case.id}-1"
+
+
+async def test_task_public_id_increments_without_reusing_deleted_sequence(
+    session, org_a, builtin_roles, analyst_a
+):
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="case"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    first = await task_crud.create_task(
+        session,
+        TaskCreate(title="first"),
+        case_id=case.id,
+        organisation_id=org_a.id,
+        created_by=str(analyst_a.id),
+    )
+    await task_crud.delete_task(session, first, deleted_by=str(analyst_a.id))
+
+    second = await task_crud.create_task(
+        session,
+        TaskCreate(title="second"),
+        case_id=case.id,
+        organisation_id=org_a.id,
+        created_by=str(analyst_a.id),
+    )
+
+    assert first.public_id == f"T-{case.id}-1"
+    assert second.public_id == f"T-{case.id}-2"
 
 
 async def test_create_task_autoshare_fans_out(

@@ -4,6 +4,7 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import delete, select
 
+from app.crud.task import allocate_task_public_ids
 from app.models.case_template import (
     CaseTemplate,
     CaseTemplateCreate,
@@ -149,9 +150,11 @@ async def scaffold_tasks_into_case(
 ) -> int:
     """Create the template's tasks on the new case (in-transaction). Returns the count."""
     tasks = await list_template_tasks(session, template_id)
-    for t in tasks:
+    public_ids = await allocate_task_public_ids(session, case_id, count=len(tasks))
+    for public_id, t in zip(public_ids, tasks, strict=True):
         session.add(
             Task(
+                public_id=public_id,
                 case_id=case_id,
                 organisation_id=organisation_id,
                 title=t.title,

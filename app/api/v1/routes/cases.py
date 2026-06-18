@@ -28,6 +28,8 @@ from app.crud import organisation_member as member_crud
 from app.crud import role as role_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
+from app.crud import user as user_crud
+from app.crud import task as task_crud
 from app.models.attachment import AttachmentOwnerType
 from app.models.audit import AuditPublic
 from app.models.case_ import (
@@ -36,6 +38,7 @@ from app.models.case_ import (
     CaseMergeRequest,
     CasePublic,
     CaseStatus,
+    CaseTaskSummary,
     CaseUpdate,
 )
 from app.models.comment import CommentCreate, CommentEntityType, CommentPublic
@@ -111,13 +114,31 @@ async def list_cases(
         session, CustomFieldEntityType.case, [str(c.id) for c in cases]
     )
     lineage = await case_crud.lineage_for_many(session, [c.id for c in cases])
-    return Page(
-        items=[
-            _case_public(
-                c, str(c.id) in flagged, cfs.get(str(c.id), {}), lineage.get(c.id)
+    tags_map = await tag_crud.tags_for_many(
+        session, TaggableType.case, [str(c.id) for c in cases]
+    )
+    emails = await user_crud.emails_for_ids(
+        session, list({c.assignee_id for c in cases if c.assignee_id})
+    )
+    tasks_map = await task_crud.summaries_for_cases(session, [c.id for c in cases])
+
+    def _public(c: Case) -> CasePublic:
+        pub = _case_public(c, str(c.id) in flagged, cfs.get(str(c.id), {}), lineage.get(c.id))
+        pub.tags = tags_map.get(str(c.id), [])
+        pub.assignee_email = emails.get(c.assignee_id) if c.assignee_id else None
+        pub.tasks = [
+            CaseTaskSummary(
+                id=t.id,
+                public_id=t.public_id,
+                title=t.title,
+                status=t.status,
             )
-            for c in cases
-        ],
+            for t in tasks_map.get(c.id, [])
+        ]
+        return pub
+
+    return Page(
+        items=[_public(c) for c in cases],
         total=total,
         skip=skip,
         limit=limit,

@@ -44,6 +44,28 @@ async def list_tag_strings_for(
     return [tag_to_string(t) for t in await list_tags_for(session, taggable_type, taggable_id)]
 
 
+async def tags_for_many(
+    session: AsyncSession, taggable_type: TaggableType, taggable_ids: list[str]
+) -> dict[str, list[str]]:
+    """Bulk variant of list_tag_strings_for: tag strings keyed by taggable_id.
+    One query for a whole page of entities (avoids N+1 in list endpoints)."""
+    if not taggable_ids:
+        return {}
+    result = await session.execute(
+        select(Tagging.taggable_id, Tag)
+        .join(Tag, Tag.id == Tagging.tag_id)
+        .where(
+            Tagging.taggable_type == taggable_type,
+            Tagging.taggable_id.in_(taggable_ids),
+        )
+        .order_by(Tag.namespace, Tag.predicate, Tag.value)
+    )
+    out: dict[str, list[str]] = {}
+    for taggable_id, tag in result.all():
+        out.setdefault(taggable_id, []).append(tag_to_string(tag))
+    return out
+
+
 async def set_tags(
     session: AsyncSession,
     taggable_type: TaggableType,

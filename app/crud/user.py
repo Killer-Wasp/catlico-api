@@ -28,6 +28,18 @@ async def get_users(session: AsyncSession, skip: int = 0, limit: int = 100) -> l
     return list(result.scalars().all())
 
 
+async def emails_for_ids(
+    session: AsyncSession, user_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """Bulk id → email lookup. Used to resolve assignees for a page of cases."""
+    if not user_ids:
+        return {}
+    result = await session.execute(
+        select(User.id, User.email).where(User.id.in_(user_ids))
+    )
+    return {uid: email for uid, email in result.all()}
+
+
 async def create_user(session: AsyncSession, user_in: UserCreate) -> User:
     db_user = User(
         email=_normalize_email(str(user_in.email)),

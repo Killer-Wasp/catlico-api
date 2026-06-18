@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -7,6 +8,21 @@ from app.core.configs import settings
 engine = create_async_engine(settings.SQLALCHEMY_DATABASE_URI, echo=settings.DB_ECHO)
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+def run_migrations() -> None:
+    """Apply Alembic migrations up to head.
+
+    Synchronous: Alembic's env.py spins up its own event loop, so this must run
+    off the main loop — call it via ``asyncio.to_thread`` from async contexts.
+    The alembic.ini path is resolved absolutely so it works regardless of cwd.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    ini_path = Path(__file__).resolve().parents[2] / "alembic.ini"
+    cfg = Config(str(ini_path))
+    command.upgrade(cfg, "head")
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
@@ -65,3 +81,7 @@ async def init_db(session: AsyncSession) -> None:
             session.add(ObservableType(name=type_name, is_attachment=is_attachment))
     await session.commit()
     await ensure_default_superadmin(session)
+    if settings.ENVIRONMENT == "local":
+        from app.core.seed import seed_local_demo_data
+
+        await seed_local_demo_data(session)

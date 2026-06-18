@@ -6,6 +6,7 @@ from typing import Any
 from sqlmodel import Field, SQLModel
 
 from app.models.common import MARKDOWN_NOTE, SoftDeleteMixin, TimestampMixin
+from app.models.task import TaskStatus
 
 
 class CaseStatus(str, Enum):
@@ -72,6 +73,16 @@ class CaseMergeRequest(SQLModel):
     case: CaseCreate
 
 
+class CaseTaskSummary(SQLModel):
+    """Slim task projection embedded in a case for list views: enough for a
+    client to compute progress (done/total) without fetching full tasks."""
+
+    id: uuid.UUID
+    public_id: str
+    title: str
+    status: TaskStatus
+
+
 class CasePublic(SQLModel):
     id: int
     title: str
@@ -82,6 +93,15 @@ class CasePublic(SQLModel):
     status: CaseStatus
     flagged: bool = False
     assignee_id: uuid.UUID | None
+    #: Assignee's email, resolved from assignee_id by a batched lookup at read
+    #: time (None when unassigned). Lets list clients show a name without an
+    #: extra round-trip per row.
+    assignee_email: str | None = None
+    #: Tag strings, populated by a batched lookup at read time.
+    tags: list[str] = []
+    #: Task statuses, populated by a batched lookup at read time. The client
+    #: derives done/total from these.
+    tasks: list[CaseTaskSummary] = []
     start_date: datetime | None
     end_date: datetime | None
     summary: str | None

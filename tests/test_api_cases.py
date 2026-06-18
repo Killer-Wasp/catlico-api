@@ -314,6 +314,8 @@ async def test_multiorg_autoshare_task_visible(
         },
     )
     assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["public_id"] == f"T-{case.id}-1"
 
     # org-b should see the task in the case's task list
     response = await client.get(
@@ -324,5 +326,7 @@ async def test_multiorg_autoshare_task_visible(
         },
     )
     assert response.status_code == 200
-    titles = [t["title"] for t in response.json()["items"]]
+    items = response.json()["items"]
+    titles = [t["title"] for t in items]
     assert titles == ["investigate"]
+    assert items[0]["public_id"] == f"T-{case.id}-1"

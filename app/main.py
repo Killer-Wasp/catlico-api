@@ -4,11 +4,12 @@ from contextlib import asynccontextmanager, suppress
 
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.main import api_router
 from app.core.configs import settings
 from app.core.context import RequestIdMiddleware
-from app.core.db import AsyncSessionLocal, init_db
+from app.core.db import AsyncSessionLocal, init_db, run_migrations
 from app.crud.audit import dispatch_pending_outbox
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,11 @@ async def _outbox_poller() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_settings()
+    if settings.ENVIRONMENT == "local":
+        # Local dev convenience: bring the schema to head automatically so
+        # `make dev` works on a fresh checkout without a manual `make migrate`.
+        logger.info("ENVIRONMENT=local — applying Alembic migrations to head")
+        await asyncio.to_thread(run_migrations)
     async with AsyncSessionLocal() as session:
         await init_db(session)
     poller = asyncio.create_task(_outbox_poller())
@@ -68,6 +74,15 @@ app = FastAPI(
     redoc_url=_redoc_url,
     openapi_url=_openapi_url,
 )
+
+if settings.all_cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.all_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.add_middleware(RequestIdMiddleware)
 app.include_router(api_router, prefix="/api/v1")

@@ -8,6 +8,7 @@ from sqlmodel import select
 from app.crud.audit import record_audit
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
+from app.models.case_ import Case
 from app.models.case_share import CaseShare
 from app.models.log import Log
 from app.models.organisation_link import AutoShareMode
@@ -19,6 +20,58 @@ from app.models.task import (
     TaskUpdate,
 )
 from app.models.task_share import TaskShare
+
+
+def _public_id_sequence(public_id: str | None, case_id: int) -> int | None:
+    prefix = f"T-{case_id}-"
+    if public_id is None or not public_id.startswith(prefix):
+        return None
+    sequence = public_id.removeprefix(prefix)
+    if not sequence.isdecimal():
+        return None
+    return int(sequence)
+
+
+async def allocate_task_public_ids(
+    session: AsyncSession, case_id: int, *, count: int = 1
+) -> list[str]:
+    if count < 1:
+        return []
+
+    await session.execute(select(Case.id).where(Case.id == case_id).with_for_update())
+    result = await session.execute(select(Task.public_id).where(Task.case_id == case_id))
+    max_sequence = max(
+        (
+            sequence
+            for public_id in result.scalars().all()
+            if (sequence := _public_id_sequence(public_id, case_id)) is not None
+        ),
+        default=0,
+    )
+
+    return [
+        f"T-{case_id}-{sequence}"
+        for sequence in range(max_sequence + 1, max_sequence + count + 1)
+    ]
+
+
+async def summaries_for_cases(
+    session: AsyncSession, case_ids: list[int]
+) -> dict[int, list[Task]]:
+    """Bulk: non-deleted tasks grouped by case_id. One query for a page of
+    cases — the list endpoint embeds these so clients derive their own
+    done/total without an extra round-trip per case."""
+    if not case_ids:
+        return {}
+    result = await session.execute(
+        select(Task)
+        .where(Task.case_id.in_(case_ids), Task.deleted_at.is_(None))
+        .order_by(Task.case_id, Task.group, Task.order, Task.created_at)
+    )
+    out: dict[int, list[Task]] = {}
+    for task in result.scalars().all():
+        out.setdefault(task.case_id, []).append(task)
+    return out
 
 
 async def get_task(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
@@ -91,6 +144,7 @@ async def create_task(
     created_by: str,
 ) -> Task:
     task = Task(
+        public_id=(await allocate_task_public_ids(session, case_id))[0],
         case_id=case_id,
         organisation_id=organisation_id,
         title=task_in.title,

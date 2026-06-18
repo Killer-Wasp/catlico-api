@@ -35,6 +35,7 @@ class Task(TimestampMixin, SoftDeleteMixin, table=True):
     __tablename__ = "task"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    public_id: str = Field(index=True, unique=True)
     case_id: int = Field(foreign_key="case_.id", index=True, ondelete="CASCADE")
     organisation_id: str = Field(
         foreign_key="organisation.id", index=True, ondelete="RESTRICT"
@@ -65,6 +66,7 @@ class TaskCreate(SQLModel):
 
 class TaskPublic(SQLModel):
     id: uuid.UUID
+    public_id: str
     case_id: int
     organisation_id: str
     title: str

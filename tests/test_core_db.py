@@ -1,5 +1,12 @@
-from app.core.db import ensure_default_superadmin
+from sqlmodel import select
+
+from app.core.db import ensure_default_superadmin, init_db
 from app.crud.user import get_user_by_email
+from app.models.audit import Audit
+from app.models.case_ import Case
+from app.models.comment import Comment
+from app.models.observable import Observable
+from app.models.task import Task
 from app.models.user import User
 
 
@@ -38,3 +45,57 @@ async def test_ensure_default_superadmin_rotates_password_when_changed(session, 
     updated = await get_user_by_email(session, "root@example.com")
     assert updated is not None
     assert updated.hashed_password != old_hash
+
+
+async def test_init_db_skips_demo_case_seed_outside_local(session, monkeypatch):
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+
+    await init_db(session)
+
+    cases = (await session.execute(select(Case))).scalars().all()
+    assert cases == []
+
+
+async def test_init_db_seeds_demo_case_once_in_local(session, monkeypatch):
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "ENVIRONMENT", "local")
+
+    await init_db(session)
+    await init_db(session)
+
+    cases = (await session.execute(select(Case))).scalars().all()
+    assert [case.title for case in cases] == [
+        "OAuth consent grant — privileged account compromise"
+    ]
+    case = cases[0]
+
+    tasks = (
+        await session.execute(select(Task).where(Task.case_id == case.id))
+    ).scalars().all()
+    observables = (
+        await session.execute(select(Observable).where(Observable.case_id == case.id))
+    ).scalars().all()
+    comments = (
+        await session.execute(
+            select(Comment).where(
+                Comment.entity_type == "case",
+                Comment.entity_id == str(case.id),
+            )
+        )
+    ).scalars().all()
+    activity = (
+        await session.execute(
+            select(Audit).where(
+                Audit.context_type == "case",
+                Audit.context_id == str(case.id),
+            )
+        )
+    ).scalars().all()
+
+    assert len(tasks) >= 4
+    assert len(observables) >= 4
+    assert len(comments) >= 2
+    assert len(activity) >= 1
