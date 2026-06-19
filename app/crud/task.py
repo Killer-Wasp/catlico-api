@@ -1,11 +1,12 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.audit import record_audit
+from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
 from app.models.case_ import Case
@@ -97,17 +98,10 @@ async def list_tasks_for_case(
             TaskShare.organisation_id == organisation_id
         )
 
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_stmt)).scalar_one()
-
     # Order per-group so `order` is scoped within a group, not globally across the case.
-    stmt = (
-        base.order_by(Task.group, Task.order, Task.created_at)
-        .offset(skip)
-        .limit(limit)
+    return await paginate(
+        session, base, Task.group, Task.order, Task.created_at, skip=skip, limit=limit
     )
-    result = await session.execute(stmt)
-    return list(result.scalars().all()), total
 
 
 async def list_groups_for_case(

@@ -1,11 +1,11 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.audit import record_audit
+from app.crud.pagination import paginate
 from app.models.comment import Comment, CommentCreate, CommentEntityType, CommentUpdate
 
 
@@ -34,11 +34,7 @@ async def list_comments(
         Comment.entity_id == entity_id,
         Comment.deleted_at.is_(None),
     )
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_stmt)).scalar_one()
-    stmt = base.order_by(Comment.created_at).offset(skip).limit(limit)
-    result = await session.execute(stmt)
-    return list(result.scalars().all()), total
+    return await paginate(session, base, Comment.created_at, skip=skip, limit=limit)
 
 
 async def create_comment(

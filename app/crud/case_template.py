@@ -1,9 +1,9 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import delete, select
 
+from app.crud.pagination import paginate
 from app.crud.task import allocate_task_public_ids
 from app.models.case_template import (
     CaseTemplate,
@@ -49,9 +49,7 @@ async def list_templates(
         CaseTemplate.organisation_id == organisation_id,
         CaseTemplate.deleted_at.is_(None),
     )
-    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
-    stmt = base.order_by(CaseTemplate.name).offset(skip).limit(limit)
-    return list((await session.execute(stmt)).scalars().all()), total
+    return await paginate(session, base, CaseTemplate.name, skip=skip, limit=limit)
 
 
 async def list_template_tasks(

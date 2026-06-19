@@ -11,10 +11,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import get_request_id
+from app.crud.pagination import paginate
 from app.models.audit import Audit, AuditOutbox
 
 # Keys whose values must never be written to an audit row. Match is by exact key
@@ -162,12 +163,4 @@ async def list_case_activity(
     )
     base = select(Audit).where(cond)
 
-    total = (
-        await session.execute(select(func.count()).select_from(base.subquery()))
-    ).scalar_one()
-    rows = (
-        (await session.execute(base.order_by(Audit.id.desc()).offset(skip).limit(limit)))
-        .scalars()
-        .all()
-    )
-    return list(rows), total
+    return await paginate(session, base, Audit.id.desc(), skip=skip, limit=limit)

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.audit import record_audit
+from app.crud.pagination import paginate
 from app.models.log import Log, LogCreate, LogUpdate
 from app.models.task import Task
 
@@ -33,17 +34,14 @@ async def list_logs_for_task(
 ) -> tuple[list[Log], int]:
     base = select(Log).where(Log.task_id == task_id, Log.deleted_at.is_(None))
 
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_stmt)).scalar_one()
-
     # Timeline order is by the analyst-set event time, falling back to entry time.
-    stmt = (
-        base.order_by(func.coalesce(Log.occurred_at, Log.created_at))
-        .offset(skip)
-        .limit(limit)
+    return await paginate(
+        session,
+        base,
+        func.coalesce(Log.occurred_at, Log.created_at),
+        skip=skip,
+        limit=limit,
     )
-    result = await session.execute(stmt)
-    return list(result.scalars().all()), total
 
 
 async def create_log(

@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.audit import record_audit
+from app.crud.pagination import paginate
 from app.models.alert import Alert, AlertCreate, AlertStatus, AlertUpdate
 
 
@@ -60,12 +60,7 @@ async def list_alerts_for_org(
     if severity is not None:
         base = base.where(Alert.severity == severity)
 
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_stmt)).scalar_one()
-
-    stmt = base.order_by(Alert.id.desc()).offset(skip).limit(limit)
-    result = await session.execute(stmt)
-    return list(result.scalars().all()), total
+    return await paginate(session, base, Alert.id.desc(), skip=skip, limit=limit)
 
 
 async def ingest_alert(

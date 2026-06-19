@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.audit import record_audit
+from app.crud.pagination import paginate
 from app.models.alert import Alert
 from app.models.case_ import (
     Case,
@@ -157,11 +158,11 @@ def _apply_case_filters(stmt, f: CaseListFilter):
     return stmt
 
 
-def _apply_case_order(stmt, f: CaseListFilter):
+def _case_order_by(f: CaseListFilter):
     col = _SORT_COLUMNS.get(f.sort, Case.id)
     direction = col.asc() if f.order == "asc" else col.desc()
     # Tie-break on id (desc) so pages stay stable when the sort column has ties.
-    return stmt.order_by(direction, Case.id.desc())
+    return direction, Case.id.desc()
 
 
 async def list_cases_for_org(
@@ -183,12 +184,9 @@ async def list_cases_for_org(
     )
     base = _apply_case_filters(base, filters)
 
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_stmt)).scalar_one()
-
-    stmt = _apply_case_order(base, filters).offset(skip).limit(limit)
-    result = await session.execute(stmt)
-    return list(result.scalars().all()), total
+    return await paginate(
+        session, base, *_case_order_by(filters), skip=skip, limit=limit
+    )
 
 
 async def case_list_facets(

@@ -1,11 +1,11 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.audit import record_audit
+from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
 from app.models.case_share import CaseShare
@@ -83,12 +83,7 @@ async def list_observables_for_case(
             ObservableShare, ObservableShare.observable_id == Observable.id
         ).where(ObservableShare.organisation_id == organisation_id)
 
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_stmt)).scalar_one()
-
-    stmt = base.order_by(Observable.created_at).offset(skip).limit(limit)
-    result = await session.execute(stmt)
-    return list(result.scalars().all()), total
+    return await paginate(session, base, Observable.created_at, skip=skip, limit=limit)
 
 
 async def list_observables_for_alert(
@@ -101,11 +96,7 @@ async def list_observables_for_alert(
     base = select(Observable).where(
         Observable.alert_id == alert_id, Observable.deleted_at.is_(None)
     )
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await session.execute(count_stmt)).scalar_one()
-    stmt = base.order_by(Observable.created_at).offset(skip).limit(limit)
-    result = await session.execute(stmt)
-    return list(result.scalars().all()), total
+    return await paginate(session, base, Observable.created_at, skip=skip, limit=limit)
 
 
 async def _fan_out_shares(
