@@ -29,3 +29,16 @@ from app.models.tag import Tag, Tagging  # noqa: F401
 from app.models.task import Task  # noqa: F401
 from app.models.task_share import TaskShare  # noqa: F401
 from app.models.user import User  # noqa: F401
+
+from sqlalchemy import DateTime as _DateTime  # noqa: E402
+from sqlmodel import SQLModel as _SQLModel  # noqa: E402
+
+# All timestamps in this app are UTC instants produced by datetime.now(UTC) (tz-
+# aware). Force every DateTime column to be timezone-aware (Postgres timestamptz)
+# so those values bind correctly — asyncpg rejects an aware value into a naive
+# column. Applied once here, after every table is registered, so no field (now or
+# future) can silently regress to a naive column.
+for _table in _SQLModel.metadata.tables.values():
+    for _col in _table.columns:
+        if isinstance(_col.type, _DateTime):
+            _col.type.timezone = True

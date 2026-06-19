@@ -36,7 +36,7 @@ def upgrade() -> None:
         sa.Column('context_id', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column('actor', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.Column('details', sa.JSON(), nullable=True),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
     op.create_index(op.f('ix_audit_request_id'), 'audit', ['request_id'], unique=False)
@@ -49,9 +49,9 @@ def upgrade() -> None:
         sa.Column('audit_id', sa.Integer(), nullable=False),
         sa.Column('topic', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.Column('payload', sa.JSON(), nullable=False),
-        sa.Column('delivered_at', sa.DateTime(), nullable=True),
+        sa.Column('delivered_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('attempts', sa.Integer(), nullable=False),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(['audit_id'], ['audit.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('audit_id', 'topic', name='uq_audit_outbox_audit_topic'),

@@ -11,7 +11,7 @@ The TheHive4 docs inform design decisions (data model concepts, permission model
 ## Stack
 
 - **Python 3.14**, **FastAPI**, **SQLModel** (SQLAlchemy + Pydantic), **Alembic**
-- **PostgreSQL** in production, **SQLite** for local dev. Tenant isolation is enforced in the application layer (query-level `case_share`/`membership` joins), not via Postgres RLS — this keeps dev (SQLite) and prod (Postgres) behaviour identical, since SQLite has no RLS.
+- **PostgreSQL** everywhere — dev, test, and prod all run on Postgres (via Docker) for parity; there is no SQLite fallback. Tenant isolation is enforced in the application layer (query-level `case_share`/`membership` joins), not via Postgres RLS.
 - **JWT** (PyJWT) + **bcrypt** (pwdlib) for auth
 - **uv** for dependency management; **pytest + pytest-asyncio** for tests
 
@@ -71,7 +71,7 @@ Not built yet (in the target domain model but absent from code): **CustomField**
 # Install deps
 uv sync
 
-# Run dev server (SQLite by default)
+# Run dev server (needs Postgres — run `make db` first)
 uvicorn app.main:app --reload
 
 # Run tests
@@ -82,7 +82,7 @@ alembic revision --autogenerate -m "description"
 alembic upgrade head
 ```
 
-PostgreSQL: set `POSTGRES_SERVER`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` in `.env` (or `DATABASE_URL` directly). Tenant isolation is enforced in application queries (every read/write goes through a `case_share`/`membership` join) — not Postgres RLS, so the same isolation guarantees hold on SQLite in dev.
+PostgreSQL is required: set `POSTGRES_SERVER`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` in `.env` (or `DATABASE_URL` directly), or run `make db` to start the docker-compose Postgres. Startup fails fast if no database is configured. Tests spin a throwaway Postgres via testcontainers (Docker required). Tenant isolation is enforced in application queries (every read/write goes through a `case_share`/`membership` join), not Postgres RLS.
 
 ## Key conventions
 

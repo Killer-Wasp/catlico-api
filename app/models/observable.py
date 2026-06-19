@@ -47,7 +47,6 @@ class Observable(TimestampMixin, SoftDeleteMixin, table=True):
             "observable_type",
             "data",
             unique=True,
-            sqlite_where=text("deleted_at IS NULL AND case_id IS NOT NULL"),
             postgresql_where=text("deleted_at IS NULL AND case_id IS NOT NULL"),
         ),
     )

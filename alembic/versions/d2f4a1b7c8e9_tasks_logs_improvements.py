@@ -27,25 +27,25 @@ def upgrade() -> None:
     """Upgrade schema."""
     op.create_table(
         'flag',
-        sa.Column('entity_type', sa.Enum('case', 'task', name='flagentitytype'), nullable=False),
+        sa.Column('entity_type', sa.Enum('case', 'task', 'alert', name='flagentitytype'), nullable=False),
         sa.Column('entity_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.Column('organisation_id', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('created_by', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.ForeignKeyConstraint(['organisation_id'], ['organisation.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('entity_type', 'entity_id', 'organisation_id'),
     )
 
     with op.batch_alter_table('task', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('due_date', sa.DateTime(), nullable=True))
-        batch_op.add_column(sa.Column('deleted_at', sa.DateTime(), nullable=True))
+        batch_op.add_column(sa.Column('due_date', sa.DateTime(timezone=True), nullable=True))
+        batch_op.add_column(sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True))
         batch_op.add_column(sa.Column('deleted_by', sqlmodel.sql.sqltypes.AutoString(), nullable=True))
         batch_op.create_index(batch_op.f('ix_task_deleted_at'), ['deleted_at'], unique=False)
         batch_op.drop_column('flag')
 
     with op.batch_alter_table('log', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('occurred_at', sa.DateTime(), nullable=True))
-        batch_op.add_column(sa.Column('deleted_at', sa.DateTime(), nullable=True))
+        batch_op.add_column(sa.Column('occurred_at', sa.DateTime(timezone=True), nullable=True))
+        batch_op.add_column(sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True))
         batch_op.add_column(sa.Column('deleted_by', sqlmodel.sql.sqltypes.AutoString(), nullable=True))
         batch_op.create_index(batch_op.f('ix_log_deleted_at'), ['deleted_at'], unique=False)
 

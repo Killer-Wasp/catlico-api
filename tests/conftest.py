@@ -1,25 +1,150 @@
+import asyncio
+import atexit
+import json
+import os
+import shutil
+import subprocess
+import time
 from collections.abc import AsyncGenerator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
+from sqlalchemy.pool import NullPool
+from testcontainers.postgres import PostgresContainer
 
-import app.models  # noqa: F401 — registers all table models with SQLModel metadata
-from app.core.db import get_session
-from app.core.security import TokenPayload, create_access_token
-from app.crud.organisation import create_organisation
-from app.crud.organisation_member import add_member
-from app.crud.role import upsert_builtin_role
-from app.crud.user import create_user
-from app.main import app
-from app.models.organisation import OrganisationCreate
-from app.models.organisation_member import OrganisationMemberCreate
-from app.models.role import BUILTIN_ROLES
-from app.models.user import UserCreate
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+def _ensure_docker_host() -> None:
+    """Point the Docker SDK at the daemon. The SDK only checks DOCKER_HOST and the
+    default socket, so on setups that use a non-default socket (Rancher Desktop,
+    Colima, ...) fall back to the active `docker context` endpoint."""
+    if os.environ.get("DOCKER_HOST") or os.path.exists("/var/run/docker.sock"):
+        return
+    docker = shutil.which("docker")
+    if not docker:
+        return
+    try:
+        out = subprocess.check_output([docker, "context", "inspect"], text=True)
+        os.environ["DOCKER_HOST"] = json.loads(out)[0]["Endpoints"]["docker"]["Host"]
+    except Exception:
+        pass
+
+
+# --- Postgres test container -------------------------------------------------
+# Spin up a throwaway Postgres *before* any app module is imported, so the
+# required DATABASE_URL is set before app.core.db builds its engine. Tests run
+# against the same engine as dev/prod — no SQLite — and the schema is built by
+# the real Alembic migration chain, so the migrations themselves get exercised.
+_ensure_docker_host()
+# Reap the container ourselves (atexit) instead of via Ryuk, which is brittle when
+# the daemon socket lives at a non-default path. atexit (vs pytest_sessionfinish)
+# also covers a failure during conftest import, so the container can't leak.
+os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
+_PG = PostgresContainer("postgres:16", driver="asyncpg")
+_PG.start()
+atexit.register(_PG.stop)
+_DB_URL = _PG.get_connection_url()
+os.environ["DATABASE_URL"] = _DB_URL
+
+
+async def _probe(url: str) -> None:
+    eng = create_async_engine(url, poolclass=NullPool)
+    try:
+        async with eng.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    finally:
+        await eng.dispose()
+
+
+def _wait_for_db(url: str, timeout: float = 30.0) -> None:
+    """testcontainers' readiness probe can return before Postgres actually accepts
+    connections (the async driver has no sync wait), so block until a real query
+    succeeds before running migrations."""
+    deadline = time.monotonic() + timeout
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            asyncio.run(_probe(url))
+            return
+        except Exception as exc:  # noqa: BLE001 — retry any connection error
+            last = exc
+            time.sleep(0.25)
+    raise RuntimeError(f"Postgres not ready after {timeout}s: {last}")
+
+
+_wait_for_db(_DB_URL)
+
+# App imports must come after DATABASE_URL is set above.
+import app.models  # noqa: E402, F401 — registers all table models with SQLModel metadata
+from app.core.db import get_session, run_migrations  # noqa: E402
+from app.core.security import TokenPayload, create_access_token  # noqa: E402
+from app.crud.organisation import create_organisation  # noqa: E402
+from app.crud.organisation_member import add_member  # noqa: E402
+from app.crud.role import upsert_builtin_role  # noqa: E402
+from app.crud.user import create_user  # noqa: E402
+from app.main import app  # noqa: E402
+from app.models.organisation import OrganisationCreate  # noqa: E402
+from app.models.organisation_member import OrganisationMemberCreate  # noqa: E402
+from app.models.role import BUILTIN_ROLES  # noqa: E402
+from app.models.user import UserCreate  # noqa: E402
+
+# Build the schema once via the real migrations, then capture the table list used
+# to reset state between tests.
+run_migrations()
+
+
+async def _list_tables() -> list[str]:
+    eng = create_async_engine(_DB_URL, poolclass=NullPool)
+    try:
+        async with eng.connect() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+                )
+            )
+            return [r[0] for r in rows]
+    finally:
+        await eng.dispose()
+
+
+# observable_type holds built-in reference data that production seeds via init_db
+# and that nothing mutates at runtime. Seed it once and keep it across tests
+# (exclude it from truncation) so observable FKs resolve — mirrors prod.
+_TABLES = [t for t in asyncio.run(_list_tables()) if t != "observable_type"]
+_TRUNCATE_SQL = (
+    "TRUNCATE " + ", ".join(f'"{t}"' for t in _TABLES) + " RESTART IDENTITY CASCADE"
+)
+
+
+async def _seed_reference_data() -> None:
+    from app.models.observable import BUILTIN_OBSERVABLE_TYPES, ObservableType
+
+    eng = create_async_engine(_DB_URL, poolclass=NullPool)
+    try:
+        async with async_sessionmaker(eng, expire_on_commit=False)() as s:
+            for name, is_attachment in BUILTIN_OBSERVABLE_TYPES.items():
+                s.add(ObservableType(name=name, is_attachment=is_attachment))
+            await s.commit()
+    finally:
+        await eng.dispose()
+
+
+asyncio.run(_seed_reference_data())
+
+
+@pytest.fixture(autouse=True)
+async def _reset_db() -> AsyncGenerator[None, None]:
+    """Reset every table after each test for isolation. The schema (built once by
+    the migrations) persists; only row data is wiped."""
+    yield
+    eng = create_async_engine(_DB_URL, poolclass=NullPool)
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text(_TRUNCATE_SQL))
+    finally:
+        await eng.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -32,16 +157,12 @@ def encryption_key(monkeypatch):
 
 
 @pytest.fixture
-async def engine():
-    _engine = create_async_engine(
-        TEST_DATABASE_URL,
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with _engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
-    yield _engine
-    await _engine.dispose()
+async def engine() -> AsyncGenerator:
+    # NullPool: no connection is reused across tests, so asyncpg connections never
+    # leak across pytest-asyncio's per-test event loops.
+    eng = create_async_engine(_DB_URL, poolclass=NullPool)
+    yield eng
+    await eng.dispose()
 
 
 @pytest.fixture
@@ -56,7 +177,15 @@ async def client(session, tmp_path) -> AsyncGenerator[AsyncClient, None]:
     from app.core.storage import BlobStorage, get_storage
 
     async def override_get_session():
+        # Commit on success so separate verification sessions observe the writes
+        # (on Postgres, uncommitted writes aren't visible across sessions). We
+        # deliberately do NOT roll back on error: the app pre-checks conflicts and
+        # never lets an IntegrityError reach the session, so failures are
+        # app-level HTTPExceptions that leave the transaction usable. Rolling back
+        # this *shared* test session would expire the test's ORM objects and break
+        # later attribute access. On error the commit below is simply skipped.
         yield session
+        await session.commit()
 
     # Isolated local blob storage per test — no SeaweedFS/S3 needed in CI.
     test_storage = BlobStorage("local", str(tmp_path / "blobs"))
@@ -120,13 +249,11 @@ async def builtin_roles(session):
 
 
 @pytest.fixture
-async def observable_types(session):
-    """Seed built-in observable types."""
-    from app.models.observable import BUILTIN_OBSERVABLE_TYPES, ObservableType
+def observable_types():
+    """Built-in observable types are pre-seeded once and persist across tests (see
+    _seed_reference_data); this fixture just exposes the mapping."""
+    from app.models.observable import BUILTIN_OBSERVABLE_TYPES
 
-    for name, is_attachment in BUILTIN_OBSERVABLE_TYPES.items():
-        session.add(ObservableType(name=name, is_attachment=is_attachment))
-    await session.commit()
     return BUILTIN_OBSERVABLE_TYPES
 
 

@@ -86,8 +86,8 @@ async def claim_work(
     max_attempts: int,
 ) -> list[EnrichmentJob]:
     """Lease up to `limit` runnable jobs. Picks queued jobs and leased jobs whose
-    lease has expired; uses SKIP LOCKED on Postgres so concurrent analyzer polls
-    never grab the same row."""
+    lease has expired; uses SELECT ... FOR UPDATE SKIP LOCKED so concurrent
+    analyzer polls never grab the same row."""
     now = datetime.now(UTC)
     stmt = select(EnrichmentJob).where(
         or_(
@@ -101,8 +101,7 @@ async def claim_work(
     if connector_names:
         stmt = stmt.where(EnrichmentJob.connector_name.in_(connector_names))
     stmt = stmt.order_by(EnrichmentJob.queued_at).limit(limit)
-    if session.bind.dialect.name == "postgresql":
-        stmt = stmt.with_for_update(skip_locked=True)
+    stmt = stmt.with_for_update(skip_locked=True)
 
     candidates = list((await session.execute(stmt)).scalars().all())
     leased: list[EnrichmentJob] = []

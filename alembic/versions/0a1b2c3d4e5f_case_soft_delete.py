@@ -22,7 +22,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.add_column('case_', sa.Column('deleted_at', sa.DateTime(), nullable=True))
+    op.add_column('case_', sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True))
     op.add_column(
         'case_',
         sa.Column('deleted_by', sqlmodel.sql.sqltypes.AutoString(), nullable=True),

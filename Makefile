@@ -1,14 +1,18 @@
-.PHONY: dev install test migrate migration
+.PHONY: dev db install test migrate migration
 
-# Start the dev server with auto-reload (SQLite by default)
-dev:
+# Start a local Postgres (and SeaweedFS) in the background
+db:
+	docker compose up -d db seaweedfs
+
+# Start the dev server with auto-reload. Requires Postgres — run `make db` first.
+dev: db
 	uv run uvicorn app.main:app --reload
 
 # Sync dependencies (including dev group)
 install:
 	uv sync
 
-# Run the test suite
+# Run the test suite. Spins a throwaway Postgres via testcontainers; needs Docker.
 test:
 	uv run pytest
 

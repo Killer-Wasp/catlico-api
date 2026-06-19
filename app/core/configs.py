@@ -39,7 +39,9 @@ class Settings(BaseSettings):
             self.FRONTEND_HOST
         ]
 
-    # PostgreSQL — optional; if unset, falls back to SQLite
+    # PostgreSQL connection — required. Either set DATABASE_URL directly, or set
+    # POSTGRES_SERVER + POSTGRES_USER (+ the rest). Postgres is the only supported
+    # engine; dev, test, and prod all run on it for parity.
     POSTGRES_SERVER: str | None = None
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str | None = None
@@ -128,7 +130,10 @@ class Settings(BaseSettings):
                     path=self.POSTGRES_DB,
                 )
             )
-        return "sqlite+aiosqlite:///./dev.db"
+        raise ValueError(
+            "No database configured. Set DATABASE_URL, or POSTGRES_SERVER + "
+            "POSTGRES_USER (e.g. run `docker compose up -d db`). Postgres is required."
+        )
 
 
 settings = Settings()

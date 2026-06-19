@@ -27,7 +27,7 @@ def upgrade() -> None:
         'case_merge',
         sa.Column('source_case_id', sa.Integer(), nullable=False),
         sa.Column('target_case_id', sa.Integer(), nullable=False),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('created_by', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.ForeignKeyConstraint(['source_case_id'], ['case_.id'], ondelete='CASCADE'),
         sa.ForeignKeyConstraint(['target_case_id'], ['case_.id'], ondelete='CASCADE'),

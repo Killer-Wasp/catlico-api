@@ -18,7 +18,7 @@ target_metadata = SQLModel.metadata
 
 def _sync_url(url: str) -> str:
     """Strip async driver suffix for offline (SQL-script) mode."""
-    return url.replace("+asyncpg", "").replace("+aiosqlite", "")
+    return url.replace("+asyncpg", "")
 
 
 def run_migrations_offline() -> None:

@@ -39,7 +39,6 @@ class Alert(TimestampMixin, SoftDeleteMixin, table=True):
             "source_ref",
             "organisation_id",
             unique=True,
-            sqlite_where=text("deleted_at IS NULL"),
             postgresql_where=text("deleted_at IS NULL"),
         ),
     )
