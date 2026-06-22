@@ -9,6 +9,7 @@ from app.models.organisation_member import (
     OrganisationMemberUpdate,
 )
 from app.models.role import RolePermission
+from app.models.user import User
 
 
 async def get_member(
@@ -25,13 +26,16 @@ async def get_member(
 
 async def get_members(
     session: AsyncSession, organisation_id: str
-) -> list[OrganisationMember]:
+) -> list[tuple[OrganisationMember, str]]:
+    """Org members paired with their email (joined from User), for member lists
+    and @-mention pickers."""
     result = await session.execute(
-        select(OrganisationMember).where(
-            OrganisationMember.organisation_id == organisation_id
-        )
+        select(OrganisationMember, User.email)
+        .join(User, User.id == OrganisationMember.user_id)
+        .where(OrganisationMember.organisation_id == organisation_id)
+        .order_by(User.email)
     )
-    return list(result.scalars().all())
+    return [(member, email) for member, email in result.all()]
 
 
 async def get_user_organisations(

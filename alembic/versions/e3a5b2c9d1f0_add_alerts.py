@@ -67,7 +67,6 @@ def upgrade() -> None:
         'alert',
         ['type', 'source', 'source_ref', 'organisation_id'],
         unique=True,
-        sqlite_where=sa.text('deleted_at IS NULL'),
         postgresql_where=sa.text('deleted_at IS NULL'),
     )
 

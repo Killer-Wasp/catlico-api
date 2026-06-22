@@ -78,9 +78,15 @@ class Settings(BaseSettings):
     # Dedup window: an enrich request reuses a successful job younger than this
     # instead of re-dispatching. force_refresh overrides.
     CONNECTOR_CACHE_TTL_SECONDS: int = 86400
-    # How long a claimed job stays leased before it can be re-handed to another
-    # analyzer poll.
+    # Fallback lease for jobs whose connector didn't declare a runtime, and the
+    # default the lease is derived from.
     ANALYZER_LEASE_SECONDS: int = 300
+    # Upper bound on a per-connector lease so a misbehaving connector can't hold a
+    # job for hours. The effective lease is clamped to this.
+    ANALYZER_LEASE_SECONDS_MAX: int = 3600
+    # Slack added to a connector's declared runtime when leasing, so the worker
+    # kills and reports a timed-out job before its lease expires (no double-run).
+    ANALYZER_LEASE_GRACE_SECONDS: int = 30
     # Give up after this many lease attempts and mark the job failed.
     ANALYZER_MAX_ATTEMPTS: int = 3
 

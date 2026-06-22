@@ -105,7 +105,7 @@ commits) — naturally all-or-nothing.
 - `SELECT ... FOR UPDATE` on all source cases **ordered by `id` asc** (deadlock-free across
   overlapping merges). On Postgres this also blocks concurrent child inserts (their FK
   `FOR KEY SHARE` on the parent case conflicts with our `FOR UPDATE`), so nothing sneaks in
-  between count and move. SQLite (tests) serializes anyway.
+  between count and move.
 - **Re-validate under lock.** A source is ineligible (aborts the whole merge) if:
   already `duplicated`/merged-away, soft-deleted, a different owner org, or the set has <2
   distinct cases. `resolved` (closed) cases **are** mergeable.

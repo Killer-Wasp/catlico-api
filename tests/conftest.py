@@ -34,8 +34,8 @@ def _ensure_docker_host() -> None:
 # --- Postgres test container -------------------------------------------------
 # Spin up a throwaway Postgres *before* any app module is imported, so the
 # required DATABASE_URL is set before app.core.db builds its engine. Tests run
-# against the same engine as dev/prod — no SQLite — and the schema is built by
-# the real Alembic migration chain, so the migrations themselves get exercised.
+# against the same engine as dev/prod, and the schema is built by the real
+# Alembic migration chain, so the migrations themselves get exercised.
 _ensure_docker_host()
 # Reap the container ourselves (atexit) instead of via Ryuk, which is brittle when
 # the daemon socket lives at a non-default path. atexit (vs pytest_sessionfinish)

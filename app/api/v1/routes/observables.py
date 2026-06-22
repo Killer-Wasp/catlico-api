@@ -17,6 +17,7 @@ from app.crud import observable as obs_crud
 from app.crud import tag as tag_crud
 from app.crud.case_share import get_share
 from app.models.attachment import AttachmentOwnerType
+from app.models.common import Page
 from app.models.enrichment import (
     EnrichmentJobPublic,
     EnrichmentOverview,
@@ -84,6 +85,31 @@ def _require(perm: str, perms: set[str]) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {perm}",
         )
+
+
+@router.get("/", response_model=Page[ObservablePublic])
+async def list_observables(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+) -> Page[ObservablePublic]:
+    """Global observable list for the active org: case observables on cases it owns
+    (owner sees all) plus observables explicitly shared to it, and observables on alerts
+    it owns. Tenant isolation rides the same case_share / observable_share /
+    alert-ownership joins as the per-item visibility check; newest first."""
+    if "read:observable" not in ctx.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing permission: read:observable",
+        )
+    obs, total = await obs_crud.list_observables_for_org(
+        session,
+        organisation_id=ctx.organisation_id,
+        skip=skip,
+        limit=limit,
+    )
+    return Page(items=obs, total=total, skip=skip, limit=limit)
 
 
 @router.get("/{observable_id}", response_model=ObservablePublic)

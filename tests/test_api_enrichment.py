@@ -26,7 +26,7 @@ def _analyzer_h(secret):
 
 async def _register(client, secret, *connectors):
     return await client.post(
-        "/api/v1/analyzer/register",
+        "/api/internal/analyzer/register",
         json={"connectors": list(connectors)},
         headers=_analyzer_h(secret),
     )

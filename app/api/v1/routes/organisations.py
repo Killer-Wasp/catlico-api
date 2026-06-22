@@ -9,15 +9,26 @@ from app.core.db import get_session
 from app.crud import organisation as org_crud
 from app.crud import organisation_member as member_crud
 from app.crud import role as role_crud
+from app.crud import user as user_crud
 from app.crud.audit import record_audit
 from app.models.organisation import OrganisationCreate, OrganisationPublic, OrganisationUpdate
 from app.models.organisation_member import (
+    OrganisationMember,
     OrganisationMemberCreate,
     OrganisationMemberPublic,
     OrganisationMemberUpdate,
 )
 
 router = APIRouter(prefix="/organisations", tags=["organisations"])
+
+
+def _member_public(member: OrganisationMember, email: str) -> OrganisationMemberPublic:
+    return OrganisationMemberPublic.model_validate({**member.model_dump(), "email": email})
+
+
+async def _member_email(session: AsyncSession, member: OrganisationMember) -> str:
+    user = await user_crud.get_user_by_id(session, member.user_id)
+    return user.email if user else ""
 
 
 @router.get("/", response_model=list[OrganisationPublic])
@@ -106,7 +117,8 @@ async def list_members(
     ctx: Annotated[OrgContext, require_permission("read:user")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[OrganisationMemberPublic]:
-    return await member_crud.get_members(session, ctx.organisation_id)
+    rows = await member_crud.get_members(session, ctx.organisation_id)
+    return [_member_public(member, email) for member, email in rows]
 
 
 @router.post(
@@ -140,7 +152,7 @@ async def add_member(
         actor=str(ctx.user.id),
         details={"user_id": str(member.user_id), "role_id": str(member.role_id)},
     )
-    return member
+    return _member_public(member, await _member_email(session, member))
 
 
 @router.patch(
@@ -171,7 +183,7 @@ async def update_member(
         actor=str(ctx.user.id),
         details={"role_id": str(member.role_id)},
     )
-    return member
+    return _member_public(member, await _member_email(session, member))
 
 
 @router.delete(

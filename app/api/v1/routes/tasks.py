@@ -11,7 +11,9 @@ from app.crud import flag as flag_crud
 from app.crud import log as log_crud
 from app.crud import organisation_member as member_crud
 from app.crud import task as task_crud
+from app.crud import user as user_crud
 from app.crud.case_share import get_share
+from app.models.case_ import Case
 from app.models.common import Page
 from app.models.flag import FlagEntityType
 from app.models.log import LogCreate, LogPublic
@@ -20,9 +22,11 @@ from app.models.task import (
     TASK_STATUS_TRANSITIONS,
     Task,
     TaskPublic,
+    TaskQueuePublic,
     TaskUpdate,
 )
 from app.models.task_share import TaskShare
+from app.models.user import User
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -31,6 +35,21 @@ def _task_public(task: Task, flagged: bool) -> TaskPublic:
     pub = TaskPublic.model_validate(task, from_attributes=True)
     pub.flagged = flagged
     return pub
+
+
+def _task_queue_public(
+    task: Task,
+    *,
+    flagged: bool,
+    case: Case,
+    assignee_email: str | None,
+) -> TaskQueuePublic:
+    return TaskQueuePublic(
+        **_task_public(task, flagged).model_dump(),
+        case_title=case.title,
+        case_severity=case.severity,
+        assignee_email=assignee_email,
+    )
 
 
 async def _resolve_task_visibility(
@@ -76,6 +95,61 @@ def _require(perm: str, perms: set[str]) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {perm}",
         )
+
+
+@router.get("/", response_model=Page[TaskQueuePublic])
+async def list_tasks(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+) -> Page[TaskQueuePublic]:
+    _require("read:task", ctx.permissions)
+    tasks, total = await task_crud.list_tasks_for_org(
+        session, organisation_id=ctx.organisation_id, skip=skip, limit=limit
+    )
+
+    flagged = await flag_crud.flagged_ids(
+        session, FlagEntityType.task, [str(t.id) for t in tasks], ctx.organisation_id
+    )
+    case_ids = {task.case_id for task in tasks}
+    case_rows = (
+        (await session.execute(select(Case).where(Case.id.in_(case_ids))))
+        .scalars()
+        .all()
+        if case_ids
+        else []
+    )
+    cases_by_id = {case.id: case for case in case_rows}
+
+    assignee_ids = {task.assignee_id for task in tasks if task.assignee_id is not None}
+    user_rows = (
+        (await session.execute(select(User).where(User.id.in_(assignee_ids))))
+        .scalars()
+        .all()
+        if assignee_ids
+        else []
+    )
+    users_by_id = {user.id: user for user in user_rows}
+
+    return Page(
+        items=[
+            _task_queue_public(
+                task,
+                flagged=str(task.id) in flagged,
+                case=cases_by_id[task.case_id],
+                assignee_email=(
+                    users_by_id[task.assignee_id].email
+                    if task.assignee_id in users_by_id
+                    else None
+                ),
+            )
+            for task in tasks
+        ],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.get("/{task_id}", response_model=TaskPublic)

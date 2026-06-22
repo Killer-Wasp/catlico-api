@@ -70,7 +70,6 @@ def upgrade() -> None:
         'observable',
         ['case_id', 'observable_type', 'data'],
         unique=True,
-        sqlite_where=sa.text('deleted_at IS NULL AND case_id IS NOT NULL'),
         postgresql_where=sa.text('deleted_at IS NULL AND case_id IS NOT NULL'),
     )
 

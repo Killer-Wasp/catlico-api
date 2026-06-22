@@ -83,6 +83,15 @@ class TaskPublic(SQLModel):
     updated_at: datetime | None
 
 
+class TaskQueuePublic(TaskPublic):
+    """A task plus the case + assignee context the global task queue renders,
+    so the cross-case list needs no per-row round-trips."""
+
+    case_title: str
+    case_severity: int
+    assignee_email: str | None = None
+
+
 class TaskUpdate(SQLModel):
     title: str | None = None
     group: str | None = None

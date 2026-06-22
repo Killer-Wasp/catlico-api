@@ -28,6 +28,9 @@ class OrganisationMemberPublic(SQLModel):
     organisation_id: str
     role_id: uuid.UUID
     created_at: datetime
+    #: The member's email, joined from User — lets clients show/mention a member
+    #: without an extra lookup per row.
+    email: str
 
 
 class OrganisationMemberUpdate(SQLModel):

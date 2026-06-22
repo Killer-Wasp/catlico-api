@@ -6,6 +6,14 @@ db:
 
 # Start the dev server with auto-reload. Requires Postgres — run `make db` first.
 dev: db
+	set -a; \
+	[ ! -f .env ] || . ./.env; \
+	: "$${POSTGRES_SERVER:=localhost}"; \
+	: "$${POSTGRES_PORT:=5432}"; \
+	: "$${POSTGRES_USER:=catlico}"; \
+	: "$${POSTGRES_PASSWORD:=catlico}"; \
+	: "$${POSTGRES_DB:=catlico}"; \
+	set +a; \
 	uv run uvicorn app.main:app --reload
 
 # Sync dependencies (including dev group)

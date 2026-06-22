@@ -27,7 +27,7 @@ def _analyzer_h(secret):
 
 async def _register(client, secret, *connectors):
     return await client.post(
-        "/api/v1/analyzer/register",
+        "/api/internal/analyzer/register",
         json={"connectors": list(connectors)},
         headers=_analyzer_h(secret),
     )
@@ -68,7 +68,7 @@ async def _seed_job(
 
 
 async def _claim(client, secret, **params):
-    r = await client.post("/api/v1/analyzer/work", headers=_analyzer_h(secret), params=params)
+    r = await client.post("/api/internal/analyzer/work", headers=_analyzer_h(secret), params=params)
     assert r.status_code == 200, r.text
     return r.json()["items"]
 
@@ -95,8 +95,8 @@ async def test_claim_returns_lease_and_decrypted_config(
 
 
 async def test_work_requires_analyzer_secret(client: AsyncClient, analyzer_secret):
-    assert (await client.post("/api/v1/analyzer/work")).status_code == 401
-    bad = await client.post("/api/v1/analyzer/work", headers=_analyzer_h("nope"))
+    assert (await client.post("/api/internal/analyzer/work")).status_code == 401
+    bad = await client.post("/api/internal/analyzer/work", headers=_analyzer_h("nope"))
     assert bad.status_code == 401
 
 
@@ -122,7 +122,7 @@ async def test_result_success_imports_artifacts_and_writes_tags(
     )
     item = (await _claim(client, analyzer_secret, limit=10))[0]
     r = await client.post(
-        f"/api/v1/analyzer/jobs/{job_id}/result",
+        f"/api/internal/analyzer/jobs/{job_id}/result",
         headers=_analyzer_h(analyzer_secret),
         json={
             "lease_token": item["lease_token"],
@@ -159,7 +159,7 @@ async def test_new_result_replaces_prior_tags(
     )
     item = (await _claim(client, analyzer_secret, limit=10))[0]
     await client.post(
-        f"/api/v1/analyzer/jobs/{job_id}/result",
+        f"/api/internal/analyzer/jobs/{job_id}/result",
         headers=_analyzer_h(analyzer_secret),
         json={
             "lease_token": item["lease_token"],
@@ -180,7 +180,7 @@ async def test_new_result_replaces_prior_tags(
     item2 = (await _claim(client, analyzer_secret, limit=10))[0]
     assert item2["job_id"] == job2_id
     await client.post(
-        f"/api/v1/analyzer/jobs/{job2_id}/result",
+        f"/api/internal/analyzer/jobs/{job2_id}/result",
         headers=_analyzer_h(analyzer_secret),
         json={
             "lease_token": item2["lease_token"],
@@ -203,7 +203,7 @@ async def test_failure_result_records_error(
     )
     item = (await _claim(client, analyzer_secret, limit=10))[0]
     r = await client.post(
-        f"/api/v1/analyzer/jobs/{job_id}/result",
+        f"/api/internal/analyzer/jobs/{job_id}/result",
         headers=_analyzer_h(analyzer_secret),
         json={"lease_token": item["lease_token"], "status": "failure", "error": "upstream 503"},
     )
@@ -225,21 +225,21 @@ async def test_invalid_lease_and_status_rejected(
     h = _analyzer_h(analyzer_secret)
 
     wrong = await client.post(
-        f"/api/v1/analyzer/jobs/{job_id}/result",
+        f"/api/internal/analyzer/jobs/{job_id}/result",
         headers=h,
         json={"lease_token": str(uuid.uuid4()), "status": "success"},
     )
     assert wrong.status_code == 409
 
     bad_status = await client.post(
-        f"/api/v1/analyzer/jobs/{job_id}/result",
+        f"/api/internal/analyzer/jobs/{job_id}/result",
         headers=h,
         json={"lease_token": str(uuid.uuid4()), "status": "bogus"},
     )
     assert bad_status.status_code == 422
 
     missing = await client.post(
-        f"/api/v1/analyzer/jobs/{uuid.uuid4()}/result",
+        f"/api/internal/analyzer/jobs/{uuid.uuid4()}/result",
         headers=h,
         json={"lease_token": str(uuid.uuid4()), "status": "success"},
     )
@@ -265,6 +265,62 @@ async def test_expired_lease_is_reclaimed(
     assert [i["job_id"] for i in reclaimed] == [job_id]
     job = await enrichment_crud.get_job(session, uuid.UUID(job_id))
     assert job.attempts == 2
+
+
+async def _lease_window_seconds(session, job_id, since):
+    job = await enrichment_crud.get_job(session, uuid.UUID(job_id))
+    lease_exp = job.lease_expires_at
+    if lease_exp.tzinfo is None:
+        lease_exp = lease_exp.replace(tzinfo=UTC)
+    return (lease_exp - since).total_seconds()
+
+
+async def test_claim_leases_for_connector_declared_runtime(
+    client: AsyncClient, session, analyzer_secret, org_a, builtin_roles,
+    observable_types, analyst_a, analyst_a_token,
+):
+    """A job is leased for its connector's declared runtime (+grace), not the global
+    default, so a slow connector isn't re-handed mid-run."""
+    from app.core.configs import settings
+    from app.models.connector import Connector
+
+    _, _, job_id = await _seed_job(
+        client, session, analyzer_secret, org_a, builtin_roles, analyst_a, analyst_a_token
+    )
+    c = await session.get(Connector, "geoip2")
+    c.max_runtime_seconds = 1000
+    session.add(c)
+    await session.commit()
+
+    before = datetime.now(UTC)
+    await _claim(client, analyzer_secret, limit=10)
+    window = await _lease_window_seconds(session, job_id, before)
+    expected = 1000 + settings.ANALYZER_LEASE_GRACE_SECONDS
+    assert abs(window - expected) <= 30
+    # Sanity: it's well past the global default, proving per-connector leasing.
+    assert window > settings.ANALYZER_LEASE_SECONDS
+
+
+async def test_claim_lease_clamped_to_max(
+    client: AsyncClient, session, analyzer_secret, org_a, builtin_roles,
+    observable_types, analyst_a, analyst_a_token,
+):
+    """A connector can't lease a job beyond the configured ceiling."""
+    from app.core.configs import settings
+    from app.models.connector import Connector
+
+    _, _, job_id = await _seed_job(
+        client, session, analyzer_secret, org_a, builtin_roles, analyst_a, analyst_a_token
+    )
+    c = await session.get(Connector, "geoip2")
+    c.max_runtime_seconds = 10_000_000
+    session.add(c)
+    await session.commit()
+
+    before = datetime.now(UTC)
+    await _claim(client, analyzer_secret, limit=10)
+    window = await _lease_window_seconds(session, job_id, before)
+    assert abs(window - settings.ANALYZER_LEASE_SECONDS_MAX) <= 30
 
 
 async def test_attempts_cap_fails_job_out_of_queue(

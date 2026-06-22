@@ -2,7 +2,7 @@ import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, delete, or_
+from sqlalchemy import and_, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -77,17 +77,30 @@ async def enqueue(
     return job, True
 
 
+def _effective_lease_seconds(
+    runtime: int | None, *, default: int, grace: int, cap: int
+) -> int:
+    """Lease duration for a job: the connector's declared runtime plus grace so the
+    worker can kill and report a timeout before the lease expires, clamped to `cap`.
+    Falls back to `default` when the connector declared no runtime."""
+    base = (runtime + grace) if runtime else default
+    return max(1, min(base, cap))
+
+
 async def claim_work(
     session: AsyncSession,
     connector_names: list[str] | None,
     *,
     limit: int,
-    lease_seconds: int,
+    default_lease_seconds: int,
+    max_lease_seconds: int,
+    lease_grace_seconds: int,
     max_attempts: int,
 ) -> list[EnrichmentJob]:
     """Lease up to `limit` runnable jobs. Picks queued jobs and leased jobs whose
     lease has expired; uses SELECT ... FOR UPDATE SKIP LOCKED so concurrent
-    analyzer polls never grab the same row."""
+    analyzer polls never grab the same row. Each job is leased for its connector's
+    declared runtime (+grace, clamped) so slow connectors aren't re-leased mid-run."""
     now = datetime.now(UTC)
     stmt = select(EnrichmentJob).where(
         or_(
@@ -104,6 +117,21 @@ async def claim_work(
     stmt = stmt.with_for_update(skip_locked=True)
 
     candidates = list((await session.execute(stmt)).scalars().all())
+    if not candidates:
+        return []
+
+    # Per-connector runtime, batch-loaded for the candidates we're about to lease.
+    names = {job.connector_name for job in candidates}
+    runtimes = dict(
+        (
+            await session.execute(
+                select(Connector.name, Connector.max_runtime_seconds).where(
+                    Connector.name.in_(names)
+                )
+            )
+        ).all()
+    )
+
     leased: list[EnrichmentJob] = []
     for job in candidates:
         if job.attempts >= max_attempts:
@@ -114,6 +142,12 @@ async def claim_work(
             job.lease_expires_at = None
             session.add(job)
             continue
+        lease_seconds = _effective_lease_seconds(
+            runtimes.get(job.connector_name),
+            default=default_lease_seconds,
+            grace=lease_grace_seconds,
+            cap=max_lease_seconds,
+        )
         job.status = JobStatus.leased.value
         job.lease_token = uuid.uuid4()
         job.lease_expires_at = now + timedelta(seconds=lease_seconds)
@@ -214,6 +248,117 @@ async def list_for_observable(
         .order_by(EnrichmentJob.queued_at.desc())
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+# `running` is the queue's name for a leased job; the rest map 1:1 to JobStatus.
+_STATUS_FILTERS = {
+    "queued": [JobStatus.queued.value],
+    "running": [JobStatus.leased.value],
+    "success": [JobStatus.success.value],
+    "failure": [JobStatus.failure.value],
+    "cancelled": [JobStatus.cancelled.value],
+}
+
+
+def status_filter_values(status: str | None) -> list[str] | None:
+    """Translate a queue-tab name to the underlying job statuses, or None for
+    'all'. Unknown names also collapse to None (no filter)."""
+    if not status or status == "all":
+        return None
+    return _STATUS_FILTERS.get(status)
+
+
+async def list_for_org(
+    session: AsyncSession,
+    organisation_id: str,
+    *,
+    status: str | None = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[EnrichmentJob], int]:
+    """The org's enrichment jobs, newest first, optionally filtered by queue tab.
+    Tenant isolation rides EnrichmentJob.organisation_id."""
+    where = [EnrichmentJob.organisation_id == organisation_id]
+    statuses = status_filter_values(status)
+    if statuses is not None:
+        where.append(EnrichmentJob.status.in_(statuses))
+
+    total = (
+        await session.execute(
+            select(func.count()).select_from(EnrichmentJob).where(*where)
+        )
+    ).scalar_one()
+    stmt = (
+        select(EnrichmentJob)
+        .where(*where)
+        .order_by(EnrichmentJob.queued_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    jobs = list((await session.execute(stmt)).scalars().all())
+    return jobs, total
+
+
+async def get_for_org(
+    session: AsyncSession, organisation_id: str, job_id: uuid.UUID
+) -> EnrichmentJob | None:
+    job = await session.get(EnrichmentJob, job_id)
+    if job is None or job.organisation_id != organisation_id:
+        return None
+    return job
+
+
+async def delete_job(session: AsyncSession, job: EnrichmentJob) -> None:
+    await session.delete(job)
+    await session.flush()
+
+
+def _requeue(job: EnrichmentJob, now: datetime) -> None:
+    job.status = JobStatus.queued.value
+    job.verdict = None
+    job.error = None
+    job.report = None
+    job.from_cache = False
+    job.attempts = 0
+    job.lease_token = None
+    job.lease_expires_at = None
+    job.started_at = None
+    job.ended_at = None
+    job.queued_at = now
+
+
+async def retry_failed_for_org(session: AsyncSession, organisation_id: str) -> int:
+    """Requeue every failed job for the org (fresh attempt counter, cleared
+    verdict/report). Returns how many were requeued."""
+    stmt = select(EnrichmentJob).where(
+        EnrichmentJob.organisation_id == organisation_id,
+        EnrichmentJob.status == JobStatus.failure.value,
+    )
+    jobs = list((await session.execute(stmt)).scalars().all())
+    now = datetime.now(UTC)
+    for job in jobs:
+        _requeue(job, now)
+        session.add(job)
+    await session.flush()
+    return len(jobs)
+
+
+async def clear_finished_for_org(session: AsyncSession, organisation_id: str) -> int:
+    """Delete the org's terminal jobs (success/failure/cancelled). Returns the
+    number removed."""
+    terminal = [
+        JobStatus.success.value,
+        JobStatus.failure.value,
+        JobStatus.cancelled.value,
+    ]
+    result = await session.execute(
+        delete(EnrichmentJob).where(
+            EnrichmentJob.organisation_id == organisation_id,
+            EnrichmentJob.status.in_(terminal),
+        )
+    )
+    await session.flush()
+    return result.rowcount or 0
 
 
 async def list_report_tags(

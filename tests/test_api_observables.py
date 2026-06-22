@@ -115,6 +115,59 @@ async def test_observable_not_visible_to_other_org(
     assert (await client.get(f"/api/v1/observables/{obs_id}", headers=hb)).status_code == 404
 
 
+async def test_global_list_spans_cases_and_alerts(
+    client: AsyncClient, session, org_a, builtin_roles, observable_types, analyst_a, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    # A case observable...
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await client.post(
+        f"/api/v1/cases/{case.id}/observables",
+        json={"observable_type": "ip", "data": "8.8.8.8"},
+        headers=h,
+    )
+    # ...and an alert observable, both owned by org_a.
+    alert = await client.post(
+        "/api/v1/alerts/",
+        json={"type": "phishing", "source": "gw", "source_ref": "g1", "title": "a"},
+        headers=h,
+    )
+    await client.post(
+        f"/api/v1/alerts/{alert.json()['id']}/observables",
+        json={"observable_type": "domain", "data": "evil.global"},
+        headers=h,
+    )
+
+    r = await client.get("/api/v1/observables/", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 2
+    assert {o["data"] for o in body["items"]} == {"8.8.8.8", "evil.global"}
+
+
+async def test_global_list_is_tenant_isolated(
+    client: AsyncClient,
+    session,
+    org_a,
+    org_b,
+    builtin_roles,
+    observable_types,
+    analyst_a,
+    analyst_a_token,
+    analyst_b_token,
+):
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await client.post(
+        f"/api/v1/cases/{case.id}/observables",
+        json={"observable_type": "ip", "data": "1.1.1.1"},
+        headers=_headers(analyst_a_token, org_a.id),
+    )
+    # org_b shares nothing on this case, so its global list is empty.
+    r = await client.get("/api/v1/observables/", headers=_headers(analyst_b_token, org_b.id))
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 0
+
+
 async def test_promote_imports_alert_observables(
     client: AsyncClient, session, org_a, builtin_roles, observable_types, analyst_a, analyst_a_token
 ):

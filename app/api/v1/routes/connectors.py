@@ -34,11 +34,45 @@ def _to_public(
         version=connector.version,
         data_types=connector.data_types,
         description=connector.description,
+        manifest=connector.manifest,
         available=connector.available,
+        max_runtime_seconds=connector.max_runtime_seconds,
         enabled=enabled,
         settings=(secret.settings if secret else {}) or {},
         has_secrets=bool(secret and secret.secrets_encrypted),
     )
+
+
+def _required_config_names(connector: Connector) -> list[str]:
+    items = connector.manifest.get("configurationItems", [])
+    return [
+        str(item.get("name"))
+        for item in items
+        if item.get("required") and item.get("name")
+    ]
+
+
+async def _missing_required_config(
+    session: AsyncSession, connector: Connector
+) -> list[str]:
+    config = await connector_crud.get_decrypted_config(session, connector.name)
+    missing: list[str] = []
+    for name in _required_config_names(connector):
+        value = config.get(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(name)
+    return missing
+
+
+def _raise_missing_config(missing: list[str]) -> None:
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Connector requires configuration before it can be enabled.",
+                "missing": missing,
+            },
+        )
 
 
 @router.get("", response_model=list[ConnectorPublic])
@@ -94,6 +128,20 @@ async def update_connector_config(
     return _to_public(c, enabled=False, secret=secret)
 
 
+@router.post("/{name}/config/test")
+async def test_connector_config(
+    name: str,
+    admin: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    c = await connector_crud.get(session, name)
+    if c is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
+    missing = await _missing_required_config(session, c)
+    _raise_missing_config(missing)
+    return {"ok": True, "message": "Required connector configuration is present."}
+
+
 @router.post("/{name}/enable", response_model=ConnectorPublic)
 async def enable_connector(
     name: str,
@@ -119,6 +167,9 @@ async def _set_enabled(
     c = await connector_crud.get(session, name)
     if c is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
+    if enabled:
+        missing = await _missing_required_config(session, c)
+        _raise_missing_config(missing)
     await connector_crud.set_org_enabled(
         session, ctx.organisation_id, name, enabled=enabled, updated_by=str(ctx.user.id)
     )

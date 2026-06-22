@@ -11,7 +11,7 @@ The TheHive4 docs inform design decisions (data model concepts, permission model
 ## Stack
 
 - **Python 3.14**, **FastAPI**, **SQLModel** (SQLAlchemy + Pydantic), **Alembic**
-- **PostgreSQL** everywhere — dev, test, and prod all run on Postgres (via Docker) for parity; there is no SQLite fallback. Tenant isolation is enforced in the application layer (query-level `case_share`/`membership` joins), not via Postgres RLS.
+- **PostgreSQL** everywhere — dev, test, and prod all run on Postgres (via Docker) for parity. Tenant isolation is enforced in the application layer (query-level `case_share`/`membership` joins), not via Postgres RLS.
 - **JWT** (PyJWT) + **bcrypt** (pwdlib) for auth
 - **uv** for dependency management; **pytest + pytest-asyncio** for tests
 

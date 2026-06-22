@@ -45,7 +45,9 @@ async def claim_work(
         session,
         names,
         limit=limit,
-        lease_seconds=settings.ANALYZER_LEASE_SECONDS,
+        default_lease_seconds=settings.ANALYZER_LEASE_SECONDS,
+        max_lease_seconds=settings.ANALYZER_LEASE_SECONDS_MAX,
+        lease_grace_seconds=settings.ANALYZER_LEASE_GRACE_SECONDS,
         max_attempts=settings.ANALYZER_MAX_ATTEMPTS,
     )
     config_cache: dict[str, dict] = {}

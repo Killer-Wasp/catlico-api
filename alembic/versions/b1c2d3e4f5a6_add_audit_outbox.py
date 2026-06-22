@@ -5,9 +5,9 @@ Revises: 0a1b2c3d4e5f
 Create Date: 2026-06-14 00:00:00.000000
 
 Per-mutation audit trail + durable post-commit fan-out queue. `details`/`payload`
-are generic JSON (json on Postgres, TEXT on SQLite) to match the codebase's JSON
-convention; polymorphic targets are string columns, not FKs, so rows survive a
-hard-delete of their target.
+are generic JSON (json on Postgres) to match the codebase's JSON convention;
+polymorphic targets are string columns, not FKs, so rows survive a hard-delete of
+their target.
 """
 from typing import Sequence, Union
 

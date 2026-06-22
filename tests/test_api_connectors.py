@@ -2,7 +2,29 @@
 disable, super-admin global config with secret redaction."""
 from httpx import AsyncClient
 
-GEOIP = {"name": "geoip2", "display_name": "GeoIP", "version": "1.0.0", "data_types": ["ip"]}
+GEOIP = {
+    "name": "geoip2",
+    "display_name": "GeoIP",
+    "version": "1.0.0",
+    "data_types": ["ip"],
+    "manifest": {
+        "configurationItems": [
+            {
+                "name": "api_key",
+                "description": "API key",
+                "type": "string",
+                "required": True,
+            },
+            {
+                "name": "timeout",
+                "description": "Request timeout",
+                "type": "integer",
+                "required": False,
+                "defaultValue": 30,
+            },
+        ]
+    },
+}
 
 
 def _h(token, org_id):
@@ -15,7 +37,7 @@ def _analyzer_h(secret):
 
 async def _register(client, secret, *connectors):
     return await client.post(
-        "/api/v1/analyzer/register",
+        "/api/internal/analyzer/register",
         json={"connectors": list(connectors)},
         headers=_analyzer_h(secret),
     )
@@ -23,9 +45,9 @@ async def _register(client, secret, *connectors):
 
 async def test_register_requires_valid_secret(client: AsyncClient, analyzer_secret):
     body = {"connectors": [GEOIP]}
-    assert (await client.post("/api/v1/analyzer/register", json=body)).status_code == 401
+    assert (await client.post("/api/internal/analyzer/register", json=body)).status_code == 401
     bad = await client.post(
-        "/api/v1/analyzer/register", json=body, headers=_analyzer_h("nope")
+        "/api/internal/analyzer/register", json=body, headers=_analyzer_h("nope")
     )
     assert bad.status_code == 401
     ok = await _register(client, analyzer_secret, GEOIP)
@@ -34,7 +56,7 @@ async def test_register_requires_valid_secret(client: AsyncClient, analyzer_secr
 
 
 async def test_catalog_lists_with_per_org_enabled(
-    client: AsyncClient, analyzer_secret, org_a, builtin_roles, analyst_a, analyst_a_token
+    client: AsyncClient, analyzer_secret, admin_token, org_a, builtin_roles, analyst_a, analyst_a_token
 ):
     await _register(client, analyzer_secret, GEOIP)
     h = _h(analyst_a_token, org_a.id)
@@ -43,15 +65,59 @@ async def test_catalog_lists_with_per_org_enabled(
     assert lst.status_code == 200, lst.text
     assert lst.json()[0]["name"] == "geoip2"
     assert lst.json()[0]["enabled"] is False
+    assert lst.json()[0]["manifest"]["configurationItems"][0]["name"] == "api_key"
 
+    await client.put(
+        "/api/v1/connectors/geoip2/config",
+        json={"settings": {"timeout": 30}, "secrets": {"api_key": "s3cr3t"}},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
     en = await client.post("/api/v1/connectors/geoip2/enable", headers=h)
     assert en.status_code == 200
     assert en.json()["enabled"] is True
 
-    assert (await client.get("/api/v1/connectors/geoip2", headers=h)).json()["enabled"] is True
+    detail = (await client.get("/api/v1/connectors/geoip2", headers=h)).json()
+    assert detail["enabled"] is True
+    assert detail["manifest"]["configurationItems"][1]["defaultValue"] == 30
 
     dis = await client.post("/api/v1/connectors/geoip2/disable", headers=h)
     assert dis.json()["enabled"] is False
+
+
+async def test_enable_requires_required_connector_config(
+    client: AsyncClient, analyzer_secret, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    await _register(client, analyzer_secret, GEOIP)
+    r = await client.post("/api/v1/connectors/geoip2/enable", headers=_h(analyst_a_token, org_a.id))
+
+    assert r.status_code == 409
+    assert r.json()["detail"]["missing"] == ["api_key"]
+
+
+async def test_superadmin_can_test_required_connector_config(
+    client: AsyncClient, analyzer_secret, admin_token,
+):
+    await _register(client, analyzer_secret, GEOIP)
+
+    missing = await client.post(
+        "/api/v1/connectors/geoip2/config/test",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert missing.status_code == 409
+    assert missing.json()["detail"]["missing"] == ["api_key"]
+
+    await client.put(
+        "/api/v1/connectors/geoip2/config",
+        json={"settings": {"timeout": 30}, "secrets": {"api_key": "s3cr3t"}},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+
+    ok = await client.post(
+        "/api/v1/connectors/geoip2/config/test",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert ok.status_code == 200
+    assert ok.json() == {"ok": True, "message": "Required connector configuration is present."}
 
 
 async def test_enable_requires_write_connector(

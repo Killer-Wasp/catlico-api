@@ -63,7 +63,6 @@ def upgrade() -> None:
         'custom_field',
         ['name', 'organisation_id'],
         unique=True,
-        sqlite_where=sa.text('deleted_at IS NULL'),
         postgresql_where=sa.text('deleted_at IS NULL'),
     )
 

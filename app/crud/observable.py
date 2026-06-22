@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -8,6 +9,7 @@ from app.crud.audit import record_audit
 from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
+from app.models.alert import Alert
 from app.models.case_share import CaseShare
 from app.models.observable import (
     Observable,
@@ -97,6 +99,39 @@ async def list_observables_for_alert(
         Observable.alert_id == alert_id, Observable.deleted_at.is_(None)
     )
     return await paginate(session, base, Observable.created_at, skip=skip, limit=limit)
+
+
+async def list_observables_for_org(
+    session: AsyncSession,
+    *,
+    organisation_id: str,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[Observable], int]:
+    """Every live observable the active org may see, across all its cases and alerts:
+    case observables on cases it owns (owner sees all), observables explicitly shared to
+    it via ObservableShare, and observables on alerts it owns. Same visibility rule as
+    `_resolve_observable_visibility`, expressed as one filtered query. Newest first."""
+    owner_case_ids = select(CaseShare.case_id).where(
+        CaseShare.organisation_id == organisation_id,
+        CaseShare.is_owner == True,  # noqa: E712
+    )
+    shared_observable_ids = select(ObservableShare.observable_id).where(
+        ObservableShare.organisation_id == organisation_id
+    )
+    owned_alert_ids = select(Alert.id).where(
+        Alert.organisation_id == organisation_id,
+        Alert.deleted_at.is_(None),
+    )
+    base = select(Observable).where(
+        Observable.deleted_at.is_(None),
+        or_(
+            Observable.case_id.in_(owner_case_ids),
+            Observable.id.in_(shared_observable_ids),
+            Observable.alert_id.in_(owned_alert_ids),
+        ),
+    )
+    return await paginate(session, base, Observable.created_at.desc(), skip=skip, limit=limit)
 
 
 async def _fan_out_shares(

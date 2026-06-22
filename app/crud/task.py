@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -102,6 +102,34 @@ async def list_tasks_for_case(
     return await paginate(
         session, base, Task.group, Task.order, Task.created_at, skip=skip, limit=limit
     )
+
+
+async def list_tasks_for_org(
+    session: AsyncSession,
+    *,
+    organisation_id: str,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[Task], int]:
+    """Every live task the active org may see, across all its cases: tasks on
+    cases it owns (owner sees all) plus tasks explicitly shared to it via
+    TaskShare. Same visibility rule as `list_tasks_for_case`, generalised across
+    cases. Newest first."""
+    owner_case_ids = select(CaseShare.case_id).where(
+        CaseShare.organisation_id == organisation_id,
+        CaseShare.is_owner == True,  # noqa: E712
+    )
+    shared_task_ids = select(TaskShare.task_id).where(
+        TaskShare.organisation_id == organisation_id
+    )
+    base = select(Task).where(
+        Task.deleted_at.is_(None),
+        or_(
+            Task.case_id.in_(owner_case_ids),
+            Task.id.in_(shared_task_ids),
+        ),
+    )
+    return await paginate(session, base, Task.created_at.desc(), skip=skip, limit=limit)
 
 
 async def list_groups_for_case(

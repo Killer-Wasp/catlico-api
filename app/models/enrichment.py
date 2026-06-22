@@ -14,6 +14,7 @@ class JobStatus(str, Enum):
     leased = "leased"
     success = "success"
     failure = "failure"
+    cancelled = "cancelled"
 
 
 class EnrichmentJob(SQLModel, table=True):
@@ -131,3 +132,36 @@ class EnrichRequest(SQLModel):
 class EnrichmentOverview(SQLModel):
     jobs: list[EnrichmentJobPublic]
     tags: list[ReportTagPublic]
+
+
+class EnrichmentJobRow(SQLModel):
+    """One row in the org-wide analyzer-jobs queue. Carries the snapshotted
+    observable type/value so the queue renders without joining the (possibly
+    deleted) observable, plus the connector's display name for the table."""
+
+    id: uuid.UUID
+    observable_id: uuid.UUID
+    connector_name: str
+    connector_display_name: str
+    connector_version: str
+    data_type: str
+    data: str
+    status: str
+    verdict: str | None
+    error: str | None
+    from_cache: bool
+    attempts: int
+    queued_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+
+
+class EnrichmentJobDetail(EnrichmentJobRow):
+    """Full job record for the report drawer: adds the connector report payload,
+    the verdict badges it emitted, and the dispatch context."""
+
+    tlp: int
+    pap: int
+    report: dict | None
+    tags: list[ReportTagPublic]
+    created_by: str

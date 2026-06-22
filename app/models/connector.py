@@ -42,6 +42,9 @@ class Connector(TimestampMixin, table=True):
     description: str = Field(default="")
     manifest: dict = Field(default_factory=dict, sa_column=Column(JSON))
     available: bool = Field(default=True)
+    # Worst-case runtime the connector declares at registration; drives the work
+    # lease duration so slow connectors aren't re-leased mid-run. Clamped on use.
+    max_runtime_seconds: int = Field(default=60)
     # Analyzer-registered rows have no human author.
     created_by: str = Field(default="analyzer")
 
@@ -87,6 +90,7 @@ class ConnectorRegisterItem(SQLModel):
     data_types: list[str] = []
     description: str = ""
     manifest: dict = {}
+    max_runtime_seconds: int = 60
 
 
 class ConnectorRegister(SQLModel):
@@ -100,7 +104,9 @@ class ConnectorPublic(SQLModel):
     version: str
     data_types: list[str]
     description: str
+    manifest: dict = {}
     available: bool
+    max_runtime_seconds: int = 60
     enabled: bool = False  # resolved per active org
     settings: dict = {}  # non-secret only
     has_secrets: bool = False

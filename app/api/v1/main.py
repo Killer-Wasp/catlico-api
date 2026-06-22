@@ -2,13 +2,13 @@ from fastapi import APIRouter
 
 from app.api.v1.routes import (
     alerts,
-    analyzer,
     auth,
     case_templates,
     cases,
     comments,
     connectors,
     custom_fields,
+    enrichment_jobs,
     logs,
     observables,
     organisations,
@@ -30,5 +30,5 @@ api_router.include_router(observables.router)
 api_router.include_router(comments.router)
 api_router.include_router(case_templates.router)
 api_router.include_router(connectors.router)
+api_router.include_router(enrichment_jobs.router)
 api_router.include_router(custom_fields.router)
-api_router.include_router(analyzer.router)

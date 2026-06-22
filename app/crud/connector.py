@@ -36,6 +36,7 @@ async def upsert_from_register(
         existing.data_types = item.data_types
         existing.description = item.description
         existing.manifest = item.manifest
+        existing.max_runtime_seconds = item.max_runtime_seconds
         existing.available = True
         existing.updated_at = datetime.now(UTC)
         existing.updated_by = created_by
