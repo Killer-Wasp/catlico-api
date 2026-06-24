@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
+from sqlmodel import desc, select
 
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
@@ -28,13 +28,15 @@ async def list_comments(
     *,
     skip: int = 0,
     limit: int = 100,
+    sort_order: str = "desc",
 ) -> tuple[list[Comment], int]:
     base = select(Comment).where(
         Comment.entity_type == entity_type,
         Comment.entity_id == entity_id,
         Comment.deleted_at.is_(None),
     )
-    return await paginate(session, base, Comment.created_at, skip=skip, limit=limit)
+    order_col = desc(Comment.created_at) if sort_order == "desc" else Comment.created_at
+    return await paginate(session, base, order_col, skip=skip, limit=limit)
 
 
 async def create_comment(

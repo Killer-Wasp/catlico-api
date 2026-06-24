@@ -15,6 +15,8 @@ class Organisation(TimestampMixin, table=True):
     id: str = Field(primary_key=True)
     name: str
     description: str = Field(default="")
+    timezone: str = Field(default="UTC")
+    default_tlp: int = Field(default=2)
 
 
 class OrganisationCreate(SQLModel):
@@ -34,6 +36,8 @@ class OrganisationPublic(SQLModel):
     id: str
     name: str
     description: str
+    timezone: str
+    default_tlp: int
     created_at: datetime
     updated_at: datetime | None
 
@@ -41,3 +45,5 @@ class OrganisationPublic(SQLModel):
 class OrganisationUpdate(SQLModel):
     name: str | None = None
     description: str | None = None
+    timezone: str | None = None
+    default_tlp: int | None = None

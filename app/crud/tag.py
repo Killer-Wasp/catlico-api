@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import delete, select
 
-from app.models.tag import Tag, Tagging, TaggableType, parse_tag, tag_to_string
+from app.models.tag import Tag, TagCreate, TagUpdate, Tagging, TaggableType, parse_tag, tag_to_string
 
 
 async def get_or_create_tag(session: AsyncSession, text: str) -> Tag:
@@ -92,3 +92,69 @@ async def set_tags(
         )
     await session.flush()
     return tags
+
+
+async def list_all_tags(
+    session: AsyncSession,
+    *,
+    namespace: str | None = None,
+) -> list[Tag]:
+    base = select(Tag).order_by(Tag.namespace, Tag.predicate, Tag.value)
+    if namespace is not None:
+        base = base.where(Tag.namespace == namespace)
+    result = await session.execute(base)
+    return list(result.scalars().all())
+
+
+async def delete_tag(session: AsyncSession, tag: Tag) -> None:
+    await session.delete(tag)
+    await session.flush()
+
+
+async def create_tag(
+    session: AsyncSession,
+    tag_in: TagCreate,
+) -> Tag:
+    existing = await session.execute(
+        select(Tag).where(
+            Tag.namespace == tag_in.namespace,
+            Tag.predicate == tag_in.predicate,
+            Tag.value == tag_in.value,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise ValueError(
+            f"Tag '{tag_to_string_str(tag_in.namespace, tag_in.predicate, tag_in.value)}' already exists"
+        )
+    tag = Tag(
+        namespace=tag_in.namespace,
+        predicate=tag_in.predicate,
+        value=tag_in.value,
+        description=tag_in.description,
+        colour=tag_in.colour,
+    )
+    session.add(tag)
+    await session.flush()
+    return tag
+
+
+async def update_tag(
+    session: AsyncSession,
+    tag: Tag,
+    tag_in: TagUpdate,
+) -> Tag:
+    update_data = tag_in.model_dump(exclude_unset=True)
+    for key, val in update_data.items():
+        setattr(tag, key, val)
+    session.add(tag)
+    await session.flush()
+    return tag
+
+
+def tag_to_string_str(namespace: str, predicate: str, value: str) -> str:
+    s = predicate
+    if namespace:
+        s = f"{namespace}:{s}"
+    if value:
+        s = f"{s}={value}"
+    return s

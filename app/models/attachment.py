@@ -10,6 +10,7 @@ from app.models.common import CreatedMixin, SoftDeleteMixin
 class AttachmentOwnerType(str, Enum):
     observable = "observable"
     log = "log"
+    case = "case"
 
 
 class Attachment(CreatedMixin, table=True):
@@ -52,3 +53,4 @@ class AttachmentPublic(SQLModel):
     sha256: str
     organisation_id: str
     created_at: datetime
+    created_by: str

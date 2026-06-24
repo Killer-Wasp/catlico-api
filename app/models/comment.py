@@ -29,6 +29,17 @@ class CommentCreate(SQLModel):
     message: str = Field(description=MARKDOWN_NOTE)
 
 
+def _display_name_from_email(email: str) -> str:
+    """Derive a display name from the email's local part (matches frontend logic)."""
+    local = email.split("@")[0]
+    parts = local.replace(".", " ").replace("-", " ").replace("_", " ").split()
+    if not parts:
+        return email
+    return " ".join(
+        p.upper() + "." if len(p) == 1 else p[0].upper() + p[1:] for p in parts
+    )
+
+
 class CommentPublic(SQLModel):
     id: uuid.UUID
     entity_type: CommentEntityType
@@ -38,6 +49,7 @@ class CommentPublic(SQLModel):
     created_at: datetime
     created_by: str
     updated_at: datetime | None
+    author_name: str = ""
 
 
 class CommentUpdate(SQLModel):

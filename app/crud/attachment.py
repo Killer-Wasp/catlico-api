@@ -25,6 +25,7 @@ def to_public(link: AttachmentLink, blob: Attachment) -> AttachmentPublic:
         sha256=blob.sha256,
         organisation_id=link.organisation_id,
         created_at=link.created_at,
+        created_by=link.created_by,
     )
 
 

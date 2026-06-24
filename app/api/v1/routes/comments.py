@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ActiveOrgContext
 from app.core.db import get_session
 from app.crud import comment as comment_crud
+from app.crud import user as user_crud
 from app.crud.case_share import get_share, list_shares
-from app.models.comment import Comment, CommentEntityType, CommentPublic, CommentUpdate
+from app.models.comment import Comment, CommentEntityType, CommentPublic, CommentUpdate, _display_name_from_email
 
 router = APIRouter(prefix="/comments", tags=["comments"])
 
@@ -46,8 +47,23 @@ async def update_comment(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the author can edit this comment",
         )
-    return await comment_crud.update_comment(
+    comment = await comment_crud.update_comment(
         session, comment, comment_in, updated_by=str(ctx.user.id)
+    )
+    emails = await user_crud.emails_for_ids(session, [uuid.UUID(comment.created_by)])
+    author_name = _display_name_from_email(
+        emails.get(uuid.UUID(comment.created_by), "")
+    )
+    return CommentPublic(
+        id=comment.id,
+        entity_type=comment.entity_type,
+        entity_id=comment.entity_id,
+        message=comment.message,
+        organisation_id=comment.organisation_id,
+        created_at=comment.created_at,
+        created_by=comment.created_by,
+        updated_at=comment.updated_at,
+        author_name=author_name,
     )
 
 

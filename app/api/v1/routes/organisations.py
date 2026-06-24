@@ -7,11 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import OrgContext, SuperAdminUser, require_permission
 from app.core.db import get_session
 from app.crud import organisation as org_crud
+from app.crud import organisation_link as link_crud
 from app.crud import organisation_member as member_crud
 from app.crud import role as role_crud
 from app.crud import user as user_crud
 from app.crud.audit import record_audit
 from app.models.organisation import OrganisationCreate, OrganisationPublic, OrganisationUpdate
+from app.models.organisation_link import (
+    OrganisationLinkCreate,
+    OrganisationLinkPublic,
+    OrganisationLinkUpdate,
+)
 from app.models.organisation_member import (
     OrganisationMember,
     OrganisationMemberCreate,
@@ -207,3 +213,78 @@ async def remove_member(
         actor=str(ctx.user.id),
     )
     await member_crud.remove_member(session, member)
+
+
+# --- Links ---
+
+
+@router.get(
+    "/{organisation_id}/links", response_model=list[OrganisationLinkPublic]
+)
+async def list_links(
+    organisation_id: str,
+    _: Annotated[OrgContext, require_permission("read:organisation")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[OrganisationLinkPublic]:
+    return await link_crud.list_links(session, organisation_id)
+
+
+@router.post(
+    "/{organisation_id}/links",
+    response_model=OrganisationLinkPublic,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_link(
+    organisation_id: str,
+    link_in: OrganisationLinkCreate,
+    ctx: Annotated[OrgContext, require_permission("write:organisation")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OrganisationLinkPublic:
+    existing = await link_crud.get_link(session, organisation_id, link_in.to_org_id)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Link to '{link_in.to_org_id}' already exists",
+        )
+    return await link_crud.create_link(
+        session, organisation_id, link_in, created_by=str(ctx.user.id)
+    )
+
+
+@router.patch(
+    "/{organisation_id}/links/{to_org_id}",
+    response_model=OrganisationLinkPublic,
+)
+async def update_link(
+    organisation_id: str,
+    to_org_id: str,
+    link_in: OrganisationLinkUpdate,
+    ctx: Annotated[OrgContext, require_permission("write:organisation")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OrganisationLinkPublic:
+    link = await link_crud.get_link(session, organisation_id, to_org_id)
+    if not link:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Link not found"
+        )
+    return await link_crud.update_link(
+        session, link, link_in, updated_by=str(ctx.user.id)
+    )
+
+
+@router.delete(
+    "/{organisation_id}/links/{to_org_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_link(
+    organisation_id: str,
+    to_org_id: str,
+    ctx: Annotated[OrgContext, require_permission("write:organisation")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    link = await link_crud.get_link(session, organisation_id, to_org_id)
+    if not link:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Link not found"
+        )
+    await link_crud.delete_link(session, link)

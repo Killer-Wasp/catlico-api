@@ -1,5 +1,13 @@
 # Catlico Backend
 
+## Collaboration Principles
+
+- Ask, don't assume. If something is unclear, ask before writing a single line. Never make silent assumptions about intent, architecture, or requirements. When running unattended, pick the most reasonable interpretation, proceed, and record the assumption rather than blocking.
+- Implement the simplest solution for simple problems, and better solutions for harder problems. Do not over-engineer or add flexibility that is not needed yet.
+- Do not touch unrelated code. Surface bad code or design smells you discover so they can be addressed as separate issues.
+- Flag uncertainty explicitly. If unsure, ask before proceeding. When useful, conduct a small, localized, low-risk experiment, then bring the hypothesis and results back for discussion. Confidence without certainty causes more damage than admitting a gap.
+- Suggest better approaches when they would improve the work, especially when they have a longer-lasting impact than a tactical change.
+
 A security incident case management tool. `docs/thehive4/` contains reference material from TheHive4 — it is used to understand the problem domain, not as a spec to clone or reverse-engineer.
 
 ## What this is
@@ -92,3 +100,17 @@ PostgreSQL is required: set `POSTGRES_SERVER`, `POSTGRES_USER`, `POSTGRES_PASSWO
 - TLP/PAP values: 0=WHITE, 1=GREEN, 2=AMBER (default), 3=RED. Severity: 1=low, 2=medium, 3=high, 4=critical.
 - The analyzer plugin interface: a worker receives `{dataType, data, tlp, pap, config}` and returns `{full, summary (taxonomies), artifacts (new observables), operations (case mutations)}`.
 - API is clean v1 only — no v0/TheHive wire-format compatibility needed.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues via the `gh` CLI; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles map 1:1 to their label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

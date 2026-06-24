@@ -74,4 +74,14 @@ async def upsert_builtin_role(
             session.add(RolePermission(role_id=role.id, permission=perm.value))
         await session.commit()
         await session.refresh(role)
+        return role
+
+    # Add any newly defined permissions that the existing role is missing.
+    existing_perms = set(await get_role_permissions(session, role.id))
+    new_perms = {p.value for p in permissions} - existing_perms
+    if new_perms:
+        for perm in new_perms:
+            session.add(RolePermission(role_id=role.id, permission=perm))
+        await session.commit()
+        await session.refresh(role)
     return role

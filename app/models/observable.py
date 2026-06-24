@@ -82,6 +82,16 @@ class ObservableShare(CreatedMixin, table=True):
     )
 
 
+class ObservableTypeCreate(SQLModel):
+    name: str
+    is_attachment: bool = False
+
+
+class ObservableTypePublic(SQLModel):
+    name: str
+    is_attachment: bool
+
+
 class ObservableCreate(SQLModel):
     observable_type: str
     data: str

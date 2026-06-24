@@ -16,6 +16,7 @@ from app.models.observable import (
     ObservableCreate,
     ObservableShare,
     ObservableType,
+    ObservableTypeCreate,
     ObservableUpdate,
 )
 from app.models.organisation_link import AutoShareMode
@@ -40,6 +41,41 @@ async def get_observable(session: AsyncSession, observable_id: uuid.UUID) -> Obs
 
 async def get_type(session: AsyncSession, name: str) -> ObservableType | None:
     return await session.get(ObservableType, name)
+
+
+async def list_types(session: AsyncSession) -> list[ObservableType]:
+    result = await session.execute(select(ObservableType).order_by(ObservableType.name))
+    return list(result.scalars().all())
+
+
+async def create_type(
+    session: AsyncSession, type_in: ObservableTypeCreate, created_by: str
+) -> ObservableType:
+    type_ = ObservableType(name=type_in.name, is_attachment=type_in.is_attachment)
+    session.add(type_)
+    await session.flush()
+    await record_audit(
+        session,
+        action="create",
+        obj=type_,
+        actor=created_by,
+        details={"name": type_in.name, "is_attachment": type_in.is_attachment},
+    )
+    return type_
+
+
+async def delete_type(
+    session: AsyncSession, type_: ObservableType, deleted_by: str
+) -> None:
+    await session.delete(type_)
+    await session.flush()
+    await record_audit(
+        session,
+        action="delete",
+        obj=type_,
+        actor=deleted_by,
+        details={"name": type_.name},
+    )
 
 
 async def check_creatable_type(session: AsyncSession, name: str) -> str | None:

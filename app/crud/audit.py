@@ -152,6 +152,28 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
     return len(rows)
 
 
+async def list_audits(
+    session: AsyncSession,
+    *,
+    skip: int = 0,
+    limit: int = 100,
+    action: str | None = None,
+    object_type: str | None = None,
+    context_type: str | None = None,
+    context_id: str | None = None,
+) -> tuple[list[Audit], int]:
+    base = select(Audit)
+    if action:
+        base = base.where(Audit.action == action)
+    if object_type:
+        base = base.where(Audit.object_type == object_type)
+    if context_type:
+        base = base.where(Audit.context_type == context_type)
+    if context_id:
+        base = base.where(Audit.context_id == context_id)
+    return await paginate(session, base, Audit.id.desc(), skip=skip, limit=limit)
+
+
 async def list_case_activity(
     session: AsyncSession, case_id: int, *, skip: int = 0, limit: int = 100
 ) -> tuple[list[Audit], int]:

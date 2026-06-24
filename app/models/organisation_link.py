@@ -1,6 +1,6 @@
 from enum import Enum
 
-from sqlmodel import Field
+from sqlmodel import Field, SQLModel
 
 from app.models.common import TimestampMixin
 
@@ -14,6 +14,27 @@ class CaseSharingMode(str, Enum):
 class AutoShareMode(str, Enum):
     manual = "manual"
     auto_share = "autoShare"
+
+
+class OrganisationLinkCreate(SQLModel):
+    to_org_id: str
+    case_sharing: CaseSharingMode = CaseSharingMode.manual
+    task_sharing: AutoShareMode = AutoShareMode.manual
+    observable_sharing: AutoShareMode = AutoShareMode.manual
+
+
+class OrganisationLinkUpdate(SQLModel):
+    case_sharing: CaseSharingMode | None = None
+    task_sharing: AutoShareMode | None = None
+    observable_sharing: AutoShareMode | None = None
+
+
+class OrganisationLinkPublic(SQLModel):
+    from_org_id: str
+    to_org_id: str
+    case_sharing: CaseSharingMode
+    task_sharing: AutoShareMode
+    observable_sharing: AutoShareMode
 
 
 class OrganisationLink(TimestampMixin, table=True):

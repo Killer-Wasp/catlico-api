@@ -23,10 +23,12 @@ from app.api.v1.routes._files import (
     assert_attachment_type,
     attach_blob,
     ingest_upload,
+    stream_blob,
 )
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
 from app.crud import audit as audit_crud
+from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
 from app.crud import comment as comment_crud
 from app.crud import custom_field as cf_crud
@@ -39,7 +41,7 @@ from app.crud import tag as tag_crud
 from app.crud import task as task_crud
 from app.crud import user as user_crud
 from app.crud import task as task_crud
-from app.models.attachment import AttachmentOwnerType
+from app.models.attachment import AttachmentOwnerType, AttachmentPublic
 from app.models.audit import AuditPublic
 from app.models.case_ import (
     Case,
@@ -51,7 +53,12 @@ from app.models.case_ import (
     CaseTaskSummary,
     CaseUpdate,
 )
-from app.models.comment import CommentCreate, CommentEntityType, CommentPublic
+from app.models.comment import (
+    CommentCreate,
+    CommentEntityType,
+    CommentPublic,
+    _display_name_from_email,
+)
 from app.models.common import Page
 from app.models.custom_field import CustomFieldEntityType, CustomFieldValuesSet
 from app.models.flag import FlagEntityType
@@ -75,6 +82,31 @@ def _case_public(
     pub.custom_fields = custom_fields or {}
     if lineage is not None:
         pub.merged_into, pub.merged_from = lineage
+    return pub
+
+
+async def _case_public_resolved(
+    case: Case,
+    session: AsyncSession,
+    flagged: bool,
+    custom_fields: dict[str, Any] | None = None,
+    lineage: tuple[int | None, list[int]] | None = None,
+) -> CasePublic:
+    """Single-case projection that also resolves assignee_email, tags, and task
+    summaries — fields the list endpoint does in bulk but that single-case
+    endpoints were previously leaving as defaults."""
+    pub = _case_public(case, flagged, custom_fields, lineage)
+    if case.assignee_id:
+        emails = await user_crud.emails_for_ids(session, [case.assignee_id])
+        pub.assignee_email = emails.get(case.assignee_id)
+    pub.tags = await tag_crud.list_tag_strings_for(
+        session, TaggableType.case, str(case.id)
+    )
+    tasks_map = await task_crud.summaries_for_cases(session, [case.id])
+    pub.tasks = [
+        CaseTaskSummary(id=t.id, public_id=t.public_id, title=t.title, status=t.status)
+        for t in tasks_map.get(case.id, [])
+    ]
     return pub
 
 
@@ -246,7 +278,7 @@ async def create_case(
         if tpl_tags:
             await tag_crud.set_tags(session, TaggableType.case, str(case.id), tpl_tags)
 
-    return _case_public(case, flagged=False)
+    return await _case_public_resolved(case, session, flagged=False)
 
 
 @router.post("/merge", response_model=CasePublic, status_code=status.HTTP_201_CREATED)
@@ -279,7 +311,9 @@ async def merge_cases(
     except case_crud.MergeError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     lineage = await case_crud.lineage_for_many(session, [case.id])
-    return _case_public(case, flagged=False, lineage=lineage.get(case.id))
+    return await _case_public_resolved(
+        case, session, flagged=False, lineage=lineage.get(case.id)
+    )
 
 
 @router.get("/{case_id}", response_model=CasePublic)
@@ -294,7 +328,9 @@ async def get_case(
         session, CustomFieldEntityType.case, str(case_ctx.case.id)
     )
     lineage = await case_crud.lineage_for_many(session, [case_ctx.case.id])
-    return _case_public(case_ctx.case, flagged, cfs, lineage.get(case_ctx.case.id))
+    return await _case_public_resolved(
+        case_ctx.case, session, flagged, cfs, lineage.get(case_ctx.case.id)
+    )
 
 
 @router.patch("/{case_id}", response_model=CasePublic)
@@ -330,7 +366,7 @@ async def update_case(
         session, FlagEntityType.case, str(case.id), case_ctx.organisation_id
     )
     cfs = await cf_crud.values_for(session, CustomFieldEntityType.case, str(case.id))
-    return _case_public(case, flagged, cfs)
+    return await _case_public_resolved(case, session, flagged, cfs)
 
 
 @router.delete("/{case_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -549,11 +585,31 @@ async def list_case_comments(
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
+    sort_order: str = "desc",
 ) -> Page[CommentPublic]:
     comments, total = await comment_crud.list_comments(
-        session, CommentEntityType.case, str(case_ctx.case.id), skip=skip, limit=limit
+        session, CommentEntityType.case, str(case_ctx.case.id), skip=skip, limit=limit, sort_order=sort_order
     )
-    return Page(items=comments, total=total, skip=skip, limit=limit)
+    # Resolve author display names from user emails
+    user_ids = [uuid.UUID(c.created_by) for c in comments]
+    emails = await user_crud.emails_for_ids(session, user_ids)
+    items = [
+        CommentPublic(
+            id=c.id,
+            entity_type=c.entity_type,
+            entity_id=c.entity_id,
+            message=c.message,
+            organisation_id=c.organisation_id,
+            created_at=c.created_at,
+            created_by=c.created_by,
+            updated_at=c.updated_at,
+            author_name=_display_name_from_email(
+                emails.get(uuid.UUID(c.created_by), "")
+            ),
+        )
+        for c in comments
+    ]
+    return Page(items=items, total=total, skip=skip, limit=limit)
 
 
 @router.post(
@@ -566,13 +622,24 @@ async def create_case_comment(
     case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentPublic:
-    return await comment_crud.create_comment(
+    comment = await comment_crud.create_comment(
         session,
         comment_in,
         entity_type=CommentEntityType.case,
         entity_id=str(case_ctx.case.id),
         organisation_id=case_ctx.organisation_id,
         created_by=str(case_ctx.user.id),
+    )
+    return CommentPublic(
+        id=comment.id,
+        entity_type=comment.entity_type,
+        entity_id=comment.entity_id,
+        message=comment.message,
+        organisation_id=comment.organisation_id,
+        created_at=comment.created_at,
+        created_by=comment.created_by,
+        updated_at=comment.updated_at,
+        author_name=_display_name_from_email(case_ctx.user.email),
     )
 
 
@@ -657,3 +724,94 @@ async def set_case_custom_fields(
         details={"custom_fields": values},
     )
     return values
+
+
+# --- Case attachments ---
+
+
+@router.get("/{case_id}/attachments", response_model=Page[AttachmentPublic])
+async def list_case_attachments(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+) -> Page[AttachmentPublic]:
+    rows, total = await attachment_crud.list_links_for_owner(
+        session, AttachmentOwnerType.case, str(case_ctx.case.id),
+        skip=skip, limit=limit,
+    )
+    return Page(
+        items=[attachment_crud.to_public(link, blob) for link, blob in rows],
+        total=total, skip=skip, limit=limit,
+    )
+
+
+@router.post(
+    "/{case_id}/attachments",
+    response_model=AttachmentPublic,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_case_attachment(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    storage: Annotated[BlobStorage, Depends(get_storage)],
+    file: Annotated[UploadFile, File()],
+    name: Annotated[str | None, Form()] = None,
+) -> AttachmentPublic:
+    sha256, size, content_type = await ingest_upload(storage, file)
+    link = await attach_blob(
+        session,
+        sha256=sha256,
+        size=size,
+        content_type=content_type,
+        owner_type=AttachmentOwnerType.case,
+        owner_id=str(case_ctx.case.id),
+        name=name or file.filename or sha256,
+        organisation_id=case_ctx.organisation_id,
+        created_by=str(case_ctx.user.id),
+    )
+    blob = await attachment_crud.get_blob(session, link.attachment_id)
+    return attachment_crud.to_public(link, blob)
+
+
+@router.get("/{case_id}/attachments/{link_id}/file")
+async def download_case_attachment(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
+    link_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    storage: Annotated[BlobStorage, Depends(get_storage)],
+):
+    link = await attachment_crud.get_link(session, link_id)
+    if (
+        link is None
+        or link.owner_type != AttachmentOwnerType.case
+        or link.owner_id != str(case_ctx.case.id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found"
+        )
+    blob = await attachment_crud.get_blob(session, link.attachment_id)
+    return stream_blob(storage, link, blob)
+
+
+@router.delete(
+    "/{case_id}/attachments/{link_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_case_attachment(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
+    link_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    link = await attachment_crud.get_link(session, link_id)
+    if (
+        link is None
+        or link.owner_type != AttachmentOwnerType.case
+        or link.owner_id != str(case_ctx.case.id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found"
+        )
+    await attachment_crud.delete_link(
+        session, link, deleted_by=str(case_ctx.user.id)
+    )

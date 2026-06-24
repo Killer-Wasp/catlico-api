@@ -82,8 +82,22 @@ class TagPublic(SQLModel):
     namespace: str
     predicate: str
     value: str
+    description: str
     colour: str
     tag: str  # the rendered string form
+
+
+class TagCreate(SQLModel):
+    namespace: str = ""
+    predicate: str
+    value: str = ""
+    description: str = ""
+    colour: str = "#000000"
+
+
+class TagUpdate(SQLModel):
+    description: str | None = None
+    colour: str | None = None
 
 
 class TagSetRequest(SQLModel):

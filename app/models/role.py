@@ -27,6 +27,11 @@ class Permission(str, Enum):
     run_enrichment = "run:enrichment"
     read_custom_field = "read:custom_field"
     write_custom_field = "write:custom_field"
+    read_knowledge_base = "read:knowledge_base"
+    write_knowledge_base = "write:knowledge_base"
+    read_function = "read:function"
+    write_function = "write:function"
+    run_function = "run:function"
 
 
 ORG_PERMISSIONS = {
@@ -35,9 +40,13 @@ ORG_PERMISSIONS = {
     Permission.read_observable, Permission.write_observable,
     Permission.read_alert, Permission.write_alert,
     Permission.read_user, Permission.write_user,
+    Permission.read_organisation, Permission.write_organisation,
+    Permission.read_role, Permission.write_role,
     Permission.read_connector, Permission.write_connector,
     Permission.run_enrichment,
     Permission.read_custom_field, Permission.write_custom_field,
+    Permission.read_knowledge_base, Permission.write_knowledge_base,
+    Permission.read_function, Permission.write_function, Permission.run_function,
 }
 
 BUILTIN_ROLES: dict[str, set[Permission]] = {
@@ -48,8 +57,11 @@ BUILTIN_ROLES: dict[str, set[Permission]] = {
         Permission.read_observable, Permission.write_observable,
         Permission.read_alert, Permission.write_alert,
         Permission.read_user,
+        Permission.read_organisation,
         Permission.read_connector, Permission.run_enrichment,
         Permission.read_custom_field,
+        Permission.read_knowledge_base, Permission.write_knowledge_base,
+        Permission.read_function, Permission.run_function,
     },
     "read-only": {
         Permission.read_case,
@@ -57,8 +69,11 @@ BUILTIN_ROLES: dict[str, set[Permission]] = {
         Permission.read_observable,
         Permission.read_alert,
         Permission.read_user,
+        Permission.read_organisation,
         Permission.read_connector,
         Permission.read_custom_field,
+        Permission.read_knowledge_base,
+        Permission.read_function,
     },
 }
 
