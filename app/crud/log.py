@@ -1,25 +1,21 @@
-import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud._seq import next_log_ids
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
 from app.models.log import Log, LogCreate, LogUpdate
-from app.models.task import Task
 
 
-async def _case_id_for_task(session: AsyncSession, task_id: uuid.UUID) -> str | None:
-    """A log's activity-feed context is its task's case."""
-    task = await session.get(Task, task_id)
-    return str(task.case_id) if task is not None else None
-
-
-async def get_log(session: AsyncSession, log_id: uuid.UUID) -> Log | None:
-    """Returns the log only if it exists and is not soft-deleted."""
-    log = await session.get(Log, log_id)
+async def get_log(
+    session: AsyncSession, case_id: int, task_id: int, id: int
+) -> Log | None:
+    """Returns the log only if it exists and is not soft-deleted. Identity is the
+    composite (case_id, task_id, id)."""
+    log = await session.get(Log, (case_id, task_id, id))
     if log is None or log.deleted_at is not None:
         return None
     return log
@@ -27,12 +23,15 @@ async def get_log(session: AsyncSession, log_id: uuid.UUID) -> Log | None:
 
 async def list_logs_for_task(
     session: AsyncSession,
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     *,
     skip: int = 0,
     limit: int = 100,
 ) -> tuple[list[Log], int]:
-    base = select(Log).where(Log.task_id == task_id, Log.deleted_at.is_(None))
+    base = select(Log).where(
+        Log.case_id == case_id, Log.task_id == task_id, Log.deleted_at.is_(None)
+    )
 
     # Timeline order is by the analyst-set event time, falling back to entry time.
     return await paginate(
@@ -48,12 +47,16 @@ async def create_log(
     session: AsyncSession,
     log_in: LogCreate,
     *,
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     organisation_id: str,
     created_by: str,
 ) -> Log:
+    (log_id,) = await next_log_ids(session, case_id, task_id)
     log = Log(
+        case_id=case_id,
         task_id=task_id,
+        id=log_id,
         organisation_id=organisation_id,
         message=log_in.message,
         occurred_at=log_in.occurred_at,
@@ -69,7 +72,7 @@ async def create_log(
         action="create",
         obj=log,
         context_type="case",
-        context_id=await _case_id_for_task(session, task_id),
+        context_id=str(case_id),
         actor=created_by,
     )
     return log
@@ -89,7 +92,7 @@ async def update_log(
         action="update",
         obj=log,
         context_type="case",
-        context_id=await _case_id_for_task(session, log.task_id),
+        context_id=str(log.case_id),
         actor=updated_by,
     )
     return log
@@ -106,6 +109,6 @@ async def delete_log(session: AsyncSession, log: Log, deleted_by: str) -> None:
         action="delete",
         obj=log,
         context_type="case",
-        context_id=await _case_id_for_task(session, log.task_id),
+        context_id=str(log.case_id),
         actor=deleted_by,
     )

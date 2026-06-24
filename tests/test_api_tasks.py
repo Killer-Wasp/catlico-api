@@ -25,7 +25,7 @@ async def test_get_and_patch_task(
         created_by=str(analyst_a.id),
     )
     response = await client.get(
-        f"/api/v1/tasks/{task.id}",
+        f"/api/v1/cases/{case.id}/tasks/{task.id}",
         headers={
             "Authorization": f"Bearer {analyst_a_token}",
             "X-Organisation-Id": org_a.id,
@@ -35,7 +35,7 @@ async def test_get_and_patch_task(
     assert response.json()["title"] == "t"
 
     response = await client.patch(
-        f"/api/v1/tasks/{task.id}",
+        f"/api/v1/cases/{case.id}/tasks/{task.id}",
         json={"status": "InProgress"},
         headers={
             "Authorization": f"Bearer {analyst_a_token}",
@@ -65,7 +65,7 @@ async def test_list_tasks_returns_org_visible_queue_context(
     )
 
     response = await client.get(
-        "/api/v1/tasks/?limit=50",
+        "/api/v1/task-queue?limit=50",
         headers={
             "Authorization": f"Bearer {analyst_a_token}",
             "X-Organisation-Id": org_a.id,
@@ -76,7 +76,7 @@ async def test_list_tasks_returns_org_visible_queue_context(
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0] == {
-        "id": str(task.id),
+        "id": task.id,
         "public_id": task.public_id,
         "case_id": case.id,
         "organisation_id": org_a.id,
@@ -116,7 +116,7 @@ async def test_task_not_visible_returns_404(
         created_by=str(analyst_a.id),
     )
     response = await client.get(
-        f"/api/v1/tasks/{task.id}",
+        f"/api/v1/cases/{case.id}/tasks/{task.id}",
         headers={
             "Authorization": f"Bearer {analyst_b_token}",
             "X-Organisation-Id": org_b.id,
@@ -162,11 +162,11 @@ async def test_non_creator_non_owner_cannot_delete_task(
         created_by=str(analyst_a.id),
     )
     from app.models.task_share import TaskShare
-    session.add(TaskShare(task_id=task.id, organisation_id=org_b.id, created_by=str(analyst_a.id)))
+    session.add(TaskShare(case_id=case.id, task_id=task.id, organisation_id=org_b.id, created_by=str(analyst_a.id)))
     await session.commit()
 
     response = await client.delete(
-        f"/api/v1/tasks/{task.id}",
+        f"/api/v1/cases/{case.id}/tasks/{task.id}",
         headers={
             "Authorization": f"Bearer {analyst_b_token}",
             "X-Organisation-Id": org_b.id,

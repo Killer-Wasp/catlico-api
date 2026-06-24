@@ -1,4 +1,3 @@
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,7 +10,6 @@ from app.crud import flag as flag_crud
 from app.crud import log as log_crud
 from app.crud import organisation_member as member_crud
 from app.crud import task as task_crud
-from app.crud import user as user_crud
 from app.crud.case_share import get_share
 from app.models.case_ import Case
 from app.models.common import Page
@@ -28,7 +26,11 @@ from app.models.task import (
 from app.models.task_share import TaskShare
 from app.models.user import User
 
-router = APIRouter(prefix="/tasks", tags=["tasks"])
+# Item-level task ops are nested under the case so case_id is structural — the
+# composite key (case_id, id) is read straight from the path, never parsed.
+router = APIRouter(prefix="/cases/{case_id}/tasks", tags=["tasks"])
+# The cross-case task queue spans cases, so it can't live under /cases/{case_id}.
+queue_router = APIRouter(prefix="/task-queue", tags=["tasks"])
 
 
 def _task_public(task: Task, flagged: bool) -> TaskPublic:
@@ -55,13 +57,14 @@ def _task_queue_public(
 async def _resolve_task_visibility(
     session: AsyncSession,
     ctx: ActiveOrgContext,
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
 ) -> tuple[Task, bool, set[str]]:
     """Return (task, is_owner, effective_permissions) for the active org.
     Raises 404 if the active org cannot see the task (or it is soft-deleted).
     Permissions are intersection of org-role and case_share-role."""
-    task = await session.get(Task, task_id)
-    if not task or task.deleted_at is not None:
+    task = await task_crud.get_task(session, case_id, task_id)
+    if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
 
     if ctx.user.is_superadmin:
@@ -73,7 +76,7 @@ async def _resolve_task_visibility(
 
     if not share.is_owner:
         task_share_row = await session.get(
-            TaskShare, (task_id, ctx.organisation_id)
+            TaskShare, (task.case_id, task.id, ctx.organisation_id)
         )
         if task_share_row is None:
             raise HTTPException(
@@ -97,20 +100,23 @@ def _require(perm: str, perms: set[str]) -> None:
         )
 
 
-@router.get("/", response_model=Page[TaskQueuePublic])
-async def list_tasks(
+@queue_router.get("", response_model=Page[TaskQueuePublic])
+async def list_task_queue(
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
 ) -> Page[TaskQueuePublic]:
+    """Cross-case task queue: every task the active org may see across all its cases
+    (owned + shared via task_share), enriched with case + assignee context. Read-only
+    aggregate — item mutations go through the nested /cases/{case_id}/tasks routes."""
     _require("read:task", ctx.permissions)
     tasks, total = await task_crud.list_tasks_for_org(
         session, organisation_id=ctx.organisation_id, skip=skip, limit=limit
     )
 
     flagged = await flag_crud.flagged_ids(
-        session, FlagEntityType.task, [str(t.id) for t in tasks], ctx.organisation_id
+        session, FlagEntityType.task, [t.public_id for t in tasks], ctx.organisation_id
     )
     case_ids = {task.case_id for task in tasks}
     case_rows = (
@@ -136,7 +142,7 @@ async def list_tasks(
         items=[
             _task_queue_public(
                 task,
-                flagged=str(task.id) in flagged,
+                flagged=task.public_id in flagged,
                 case=cases_by_id[task.case_id],
                 assignee_email=(
                     users_by_id[task.assignee_id].email
@@ -154,26 +160,28 @@ async def list_tasks(
 
 @router.get("/{task_id}", response_model=TaskPublic)
 async def get_task(
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TaskPublic:
-    task, _, perms = await _resolve_task_visibility(session, ctx, task_id)
+    task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("read:task", perms)
     flagged = await flag_crud.is_flagged(
-        session, FlagEntityType.task, str(task.id), ctx.organisation_id
+        session, FlagEntityType.task, task.public_id, ctx.organisation_id
     )
     return _task_public(task, flagged)
 
 
 @router.patch("/{task_id}", response_model=TaskPublic)
 async def update_task(
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     task_in: TaskUpdate,
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TaskPublic:
-    task, _, perms = await _resolve_task_visibility(session, ctx, task_id)
+    task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("write:task", perms)
 
     # Enforce the status state machine (improvement over TheHive4's any->any).
@@ -200,18 +208,19 @@ async def update_task(
             )
     task = await task_crud.update_task(session, task, task_in, updated_by=str(ctx.user.id))
     flagged = await flag_crud.is_flagged(
-        session, FlagEntityType.task, str(task.id), ctx.organisation_id
+        session, FlagEntityType.task, task.public_id, ctx.organisation_id
     )
     return _task_public(task, flagged)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_task(
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    task, is_owner, perms = await _resolve_task_visibility(session, ctx, task_id)
+    task, is_owner, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("write:task", perms)
     # Creator's org OR owner org can delete.
     if not (is_owner or task.organisation_id == ctx.organisation_id):
@@ -226,16 +235,17 @@ async def delete_task(
 
 @router.put("/{task_id}/flag", status_code=status.HTTP_204_NO_CONTENT)
 async def flag_task(
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    task, _, perms = await _resolve_task_visibility(session, ctx, task_id)
+    task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("read:task", perms)
     await flag_crud.set_flag(
         session,
         FlagEntityType.task,
-        str(task.id),
+        task.public_id,
         ctx.organisation_id,
         created_by=str(ctx.user.id),
     )
@@ -243,14 +253,15 @@ async def flag_task(
 
 @router.delete("/{task_id}/flag", status_code=status.HTTP_204_NO_CONTENT)
 async def unflag_task(
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    task, _, perms = await _resolve_task_visibility(session, ctx, task_id)
+    task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("read:task", perms)
     await flag_crud.unset_flag(
-        session, FlagEntityType.task, str(task.id), ctx.organisation_id
+        session, FlagEntityType.task, task.public_id, ctx.organisation_id
     )
 
 
@@ -258,15 +269,18 @@ async def unflag_task(
 
 @router.get("/{task_id}/logs", response_model=Page[LogPublic])
 async def list_task_logs(
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
 ) -> Page[LogPublic]:
-    _, _, perms = await _resolve_task_visibility(session, ctx, task_id)
+    _, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("read:task", perms)
-    logs, total = await log_crud.list_logs_for_task(session, task_id, skip=skip, limit=limit)
+    logs, total = await log_crud.list_logs_for_task(
+        session, case_id, task_id, skip=skip, limit=limit
+    )
     return Page(items=logs, total=total, skip=skip, limit=limit)
 
 
@@ -276,16 +290,18 @@ async def list_task_logs(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_task_log(
-    task_id: uuid.UUID,
+    case_id: int,
+    task_id: int,
     log_in: LogCreate,
     ctx: ActiveOrgContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> LogPublic:
-    _, _, perms = await _resolve_task_visibility(session, ctx, task_id)
+    _, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("write:task", perms)
     return await log_crud.create_log(
         session,
         log_in,
+        case_id=case_id,
         task_id=task_id,
         organisation_id=ctx.organisation_id,
         created_by=str(ctx.user.id),

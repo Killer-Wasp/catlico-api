@@ -1,15 +1,14 @@
-import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, update
+from sqlalchemy import or_, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud._seq import next_task_ids
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
-from app.models.case_ import Case
 from app.models.case_share import CaseShare
 from app.models.log import Log
 from app.models.organisation_link import AutoShareMode
@@ -21,39 +20,6 @@ from app.models.task import (
     TaskUpdate,
 )
 from app.models.task_share import TaskShare
-
-
-def _public_id_sequence(public_id: str | None, case_id: int) -> int | None:
-    prefix = f"T-{case_id}-"
-    if public_id is None or not public_id.startswith(prefix):
-        return None
-    sequence = public_id.removeprefix(prefix)
-    if not sequence.isdecimal():
-        return None
-    return int(sequence)
-
-
-async def allocate_task_public_ids(
-    session: AsyncSession, case_id: int, *, count: int = 1
-) -> list[str]:
-    if count < 1:
-        return []
-
-    await session.execute(select(Case.id).where(Case.id == case_id).with_for_update())
-    result = await session.execute(select(Task.public_id).where(Task.case_id == case_id))
-    max_sequence = max(
-        (
-            sequence
-            for public_id in result.scalars().all()
-            if (sequence := _public_id_sequence(public_id, case_id)) is not None
-        ),
-        default=0,
-    )
-
-    return [
-        f"T-{case_id}-{sequence}"
-        for sequence in range(max_sequence + 1, max_sequence + count + 1)
-    ]
 
 
 async def summaries_for_cases(
@@ -75,12 +41,18 @@ async def summaries_for_cases(
     return out
 
 
-async def get_task(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
-    """Returns the task only if it exists and is not soft-deleted."""
-    task = await session.get(Task, task_id)
+async def get_task(session: AsyncSession, case_id: int, id: int) -> Task | None:
+    """Returns the task only if it exists and is not soft-deleted. Identity is the
+    composite (case_id, id)."""
+    task = await session.get(Task, (case_id, id))
     if task is None or task.deleted_at is not None:
         return None
     return task
+
+
+#: Join predicate from TaskShare onto its task's composite key — reused wherever a
+#: non-owner org's task visibility is resolved.
+_SHARE_ON_TASK = (TaskShare.case_id == Task.case_id) & (TaskShare.task_id == Task.id)
 
 
 async def list_tasks_for_case(
@@ -94,7 +66,7 @@ async def list_tasks_for_case(
 ) -> tuple[list[Task], int]:
     base = select(Task).where(Task.case_id == case_id, Task.deleted_at.is_(None))
     if not is_owner:
-        base = base.join(TaskShare, TaskShare.task_id == Task.id).where(
+        base = base.join(TaskShare, _SHARE_ON_TASK).where(
             TaskShare.organisation_id == organisation_id
         )
 
@@ -119,14 +91,14 @@ async def list_tasks_for_org(
         CaseShare.organisation_id == organisation_id,
         CaseShare.is_owner == True,  # noqa: E712
     )
-    shared_task_ids = select(TaskShare.task_id).where(
+    shared_task_keys = select(TaskShare.case_id, TaskShare.task_id).where(
         TaskShare.organisation_id == organisation_id
     )
     base = select(Task).where(
         Task.deleted_at.is_(None),
         or_(
             Task.case_id.in_(owner_case_ids),
-            Task.id.in_(shared_task_ids),
+            tuple_(Task.case_id, Task.id).in_(shared_task_keys),
         ),
     )
     return await paginate(session, base, Task.created_at.desc(), skip=skip, limit=limit)
@@ -150,7 +122,7 @@ async def list_groups_for_case(
         .distinct()
     )
     if not is_owner:
-        base = base.join(TaskShare, TaskShare.task_id == Task.id).where(
+        base = base.join(TaskShare, _SHARE_ON_TASK).where(
             TaskShare.organisation_id == organisation_id
         )
     result = await session.execute(base.order_by(Task.group))
@@ -165,8 +137,9 @@ async def create_task(
     organisation_id: str,
     created_by: str,
 ) -> Task:
+    (task_id,) = await next_task_ids(session, case_id)
     task = Task(
-        public_id=(await allocate_task_public_ids(session, case_id))[0],
+        id=task_id,
         case_id=case_id,
         organisation_id=organisation_id,
         title=task_in.title,
@@ -202,6 +175,7 @@ async def create_task(
             continue
         session.add(
             TaskShare(
+                case_id=task.case_id,
                 task_id=task.id,
                 organisation_id=target_org_id,
                 created_by=created_by,
@@ -267,7 +241,11 @@ async def delete_task(session: AsyncSession, task: Task, deleted_by: str) -> Non
     session.add(task)
     await session.execute(
         update(Log)
-        .where(Log.task_id == task.id, Log.deleted_at.is_(None))
+        .where(
+            Log.case_id == task.case_id,
+            Log.task_id == task.id,
+            Log.deleted_at.is_(None),
+        )
         .values(deleted_at=now, deleted_by=deleted_by)
     )
     await session.flush()

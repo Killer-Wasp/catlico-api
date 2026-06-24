@@ -95,7 +95,11 @@ async def record_audit(
         action=action,
         main_action=main_action,
         object_type=_type_of(obj),
-        object_id=str(obj.id),
+        # Composite-keyed objects (task/log/attachment) expose a case-scoped
+        # public_id (e.g. T-1234-1) that is globally unique and human-readable;
+        # the bare integer `id` is only unique within its case. Fall back to id
+        # for entities without one (case = its number, comment/observable = UUID).
+        object_id=str(getattr(obj, "public_id", None) or obj.id),
         context_type=context_type,
         context_id=context_id,
         actor=actor,

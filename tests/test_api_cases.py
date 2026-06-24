@@ -222,7 +222,7 @@ async def test_delete_case_soft_deletes_and_cascades(
     async with async_sessionmaker(engine, expire_on_commit=False)() as verify:
         db_case = await verify.get(Case, case.id)
         assert db_case is not None and db_case.deleted_at is not None
-        db_task = await verify.get(Task, task.id)
+        db_task = await verify.get(Task, (task.case_id, task.id))
         assert db_task is not None and db_task.deleted_at is not None
 
 

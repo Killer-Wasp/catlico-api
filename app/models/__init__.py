@@ -1,7 +1,11 @@
 from app.models.alert import Alert  # noqa: F401
 from app.models.api_key import ApiKey  # noqa: F401
 from app.models.auth import RefreshToken  # noqa: F401
-from app.models.attachment import Attachment, AttachmentLink  # noqa: F401
+from app.models.attachment import (  # noqa: F401
+    Attachment,
+    AttachmentLink,
+    ObservableAttachmentLink,
+)
 from app.models.audit import Audit, AuditOutbox  # noqa: F401
 from app.models.case_ import Case  # noqa: F401
 from app.models.case_merge import CaseMerge  # noqa: F401

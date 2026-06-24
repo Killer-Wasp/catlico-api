@@ -21,7 +21,8 @@ from app.api.deps import (
 )
 from app.api.v1.routes._files import (
     assert_attachment_type,
-    attach_blob,
+    attach_case_blob,
+    attach_observable_blob,
     ingest_upload,
     stream_blob,
 )
@@ -41,7 +42,7 @@ from app.crud import tag as tag_crud
 from app.crud import task as task_crud
 from app.crud import user as user_crud
 from app.crud import task as task_crud
-from app.models.attachment import AttachmentOwnerType, AttachmentPublic
+from app.models.attachment import AttachmentPublic
 from app.models.audit import AuditPublic
 from app.models.case_ import (
     Case,
@@ -427,10 +428,10 @@ async def list_case_tasks(
         limit=limit,
     )
     flagged = await flag_crud.flagged_ids(
-        session, FlagEntityType.task, [str(t.id) for t in tasks], case_ctx.organisation_id
+        session, FlagEntityType.task, [t.public_id for t in tasks], case_ctx.organisation_id
     )
     return Page(
-        items=[_task_public(t, str(t.id) in flagged) for t in tasks],
+        items=[_task_public(t, t.public_id in flagged) for t in tasks],
         total=total,
         skip=skip,
         limit=limit,
@@ -563,13 +564,12 @@ async def create_case_file_observable(
         organisation_id=case_ctx.organisation_id,
         created_by=str(case_ctx.user.id),
     )
-    await attach_blob(
+    await attach_observable_blob(
         session,
         sha256=sha256,
         size=size,
         content_type=content_type,
-        owner_type=AttachmentOwnerType.observable,
-        owner_id=str(observable.id),
+        observable_id=observable.id,
         name=file.filename or sha256,
         organisation_id=case_ctx.organisation_id,
         created_by=str(case_ctx.user.id),
@@ -736,9 +736,10 @@ async def list_case_attachments(
     skip: int = 0,
     limit: int = 100,
 ) -> Page[AttachmentPublic]:
-    rows, total = await attachment_crud.list_links_for_owner(
-        session, AttachmentOwnerType.case, str(case_ctx.case.id),
-        skip=skip, limit=limit,
+    # Case-owned attachments only (owner is the case itself). Task/log attachments
+    # are listed under their owner; all share the per-case A-{case_id}-{id} counter.
+    rows, total = await attachment_crud.list_links(
+        session, case_ctx.case.id, case_only=True, skip=skip, limit=limit,
     )
     return Page(
         items=[attachment_crud.to_public(link, blob) for link, blob in rows],
@@ -759,13 +760,12 @@ async def upload_case_attachment(
     name: Annotated[str | None, Form()] = None,
 ) -> AttachmentPublic:
     sha256, size, content_type = await ingest_upload(storage, file)
-    link = await attach_blob(
+    link = await attach_case_blob(
         session,
         sha256=sha256,
         size=size,
         content_type=content_type,
-        owner_type=AttachmentOwnerType.case,
-        owner_id=str(case_ctx.case.id),
+        case_id=case_ctx.case.id,
         name=name or file.filename or sha256,
         organisation_id=case_ctx.organisation_id,
         created_by=str(case_ctx.user.id),
@@ -774,19 +774,15 @@ async def upload_case_attachment(
     return attachment_crud.to_public(link, blob)
 
 
-@router.get("/{case_id}/attachments/{link_id}/file")
+@router.get("/{case_id}/attachments/{attachment_id}/file")
 async def download_case_attachment(
     case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
-    link_id: uuid.UUID,
+    attachment_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     storage: Annotated[BlobStorage, Depends(get_storage)],
 ):
-    link = await attachment_crud.get_link(session, link_id)
-    if (
-        link is None
-        or link.owner_type != AttachmentOwnerType.case
-        or link.owner_id != str(case_ctx.case.id)
-    ):
+    link = await attachment_crud.get_link(session, case_ctx.case.id, attachment_id)
+    if link is None or link.owner_task_id is not None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found"
         )
@@ -795,20 +791,16 @@ async def download_case_attachment(
 
 
 @router.delete(
-    "/{case_id}/attachments/{link_id}",
+    "/{case_id}/attachments/{attachment_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_case_attachment(
     case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
-    link_id: uuid.UUID,
+    attachment_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    link = await attachment_crud.get_link(session, link_id)
-    if (
-        link is None
-        or link.owner_type != AttachmentOwnerType.case
-        or link.owner_id != str(case_ctx.case.id)
-    ):
+    link = await attachment_crud.get_link(session, case_ctx.case.id, attachment_id)
+    if link is None or link.owner_task_id is not None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found"
         )

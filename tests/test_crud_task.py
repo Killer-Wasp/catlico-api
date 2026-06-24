@@ -100,5 +100,5 @@ async def test_create_task_autoshare_fans_out(
         organisation_id=org_a.id,
         created_by=str(analyst_a.id),
     )
-    ts = await session.get(TaskShare, (task.id, org_b.id))
+    ts = await session.get(TaskShare, (case.id, task.id, org_b.id))
     assert ts is not None

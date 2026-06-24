@@ -15,12 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ActiveOrgContext
 from app.api.v1.routes._files import (
     assert_attachment_type,
-    attach_blob,
+    attach_observable_blob,
     ingest_upload,
 )
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
-from app.models.attachment import AttachmentOwnerType
 from app.crud import alert as alert_crud
 from app.crud import audit as audit_crud
 from app.crud import case_ as case_crud
@@ -607,13 +606,12 @@ async def create_alert_file_observable(
         organisation_id=ctx.organisation_id,
         created_by=str(ctx.user.id),
     )
-    await attach_blob(
+    await attach_observable_blob(
         session,
         sha256=sha256,
         size=size,
         content_type=content_type,
-        owner_type=AttachmentOwnerType.observable,
-        owner_id=str(observable.id),
+        observable_id=observable.id,
         name=file.filename or sha256,
         organisation_id=ctx.organisation_id,
         created_by=str(ctx.user.id),

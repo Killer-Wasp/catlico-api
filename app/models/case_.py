@@ -50,6 +50,11 @@ class Case(TimestampMixin, SoftDeleteMixin, table=True):
     duplicate_of_case_id: int | None = Field(
         default=None, foreign_key="case_.id", ondelete="SET NULL"
     )
+    # Per-case monotonic counters for the composite-keyed children. Each child
+    # insert locks the case row and post-increments the relevant counter, so the
+    # allocated ids are gap-free per case and never reused (see app.crud._seq).
+    next_task_seq: int = Field(default=1)
+    next_attachment_seq: int = Field(default=1)
 
 
 class CaseCreate(SQLModel):
@@ -77,7 +82,7 @@ class CaseTaskSummary(SQLModel):
     """Slim task projection embedded in a case for list views: enough for a
     client to compute progress (done/total) without fetching full tasks."""
 
-    id: uuid.UUID
+    id: int
     public_id: str
     title: str
     status: TaskStatus

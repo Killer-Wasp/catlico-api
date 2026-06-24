@@ -5,6 +5,7 @@ from enum import Enum
 from sqlmodel import Field, SQLModel
 
 from app.models.common import SoftDeleteMixin, TimestampMixin
+from app.util.ids import format_task_id
 
 
 class TaskStatus(str, Enum):
@@ -34,9 +35,13 @@ TASK_TERMINAL_STATUSES = {TaskStatus.completed, TaskStatus.cancelled}
 class Task(TimestampMixin, SoftDeleteMixin, table=True):
     __tablename__ = "task"
 
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    public_id: str = Field(index=True, unique=True)
-    case_id: int = Field(foreign_key="case_.id", index=True, ondelete="CASCADE")
+    # Composite identity: a task is (case_id, id), where `id` is a per-case
+    # integer allocated from Case.next_task_seq. No surrogate UUID — case
+    # locality is structural. Display form is derived: T-{case_id}-{id}.
+    case_id: int = Field(
+        foreign_key="case_.id", primary_key=True, index=True, ondelete="CASCADE"
+    )
+    id: int = Field(primary_key=True, sa_column_kwargs={"autoincrement": False})
     organisation_id: str = Field(
         foreign_key="organisation.id", index=True, ondelete="RESTRICT"
     )
@@ -52,6 +57,12 @@ class Task(TimestampMixin, SoftDeleteMixin, table=True):
     due_date: datetime | None = Field(default=None)
     # Auto-managed: set when status enters a terminal state, cleared on re-open.
     end_date: datetime | None = Field(default=None)
+    # Per-task counter for worklogs (Log.id is scoped to its task).
+    next_log_seq: int = Field(default=1)
+
+    @property
+    def public_id(self) -> str:
+        return format_task_id(self.case_id, self.id)
 
 
 class TaskCreate(SQLModel):
@@ -65,7 +76,7 @@ class TaskCreate(SQLModel):
 
 
 class TaskPublic(SQLModel):
-    id: uuid.UUID
+    id: int
     public_id: str
     case_id: int
     organisation_id: str

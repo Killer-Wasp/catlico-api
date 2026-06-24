@@ -6,9 +6,11 @@ from sqlalchemy import String, and_, cast, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud._seq import next_attachment_ids, next_task_ids
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
 from app.models.alert import Alert
+from app.models.attachment import AttachmentLink
 from app.models.case_ import (
     Case,
     CaseCreate,
@@ -26,6 +28,7 @@ from app.models.log import Log
 from app.models.observable import Observable, ObservableShare
 from app.models.tag import Tag, Tagging, TaggableType, parse_tag, tag_to_string
 from app.models.task import Task
+from app.models.task_share import TaskShare
 from app.models.user import User
 
 
@@ -334,10 +337,7 @@ async def delete_case(session: AsyncSession, case: Case, deleted_by: str) -> Non
     )
     await session.execute(
         update(Log)
-        .where(
-            Log.task_id.in_(select(Task.id).where(Task.case_id == case.id)),
-            Log.deleted_at.is_(None),
-        )
+        .where(Log.case_id == case.id, Log.deleted_at.is_(None))
         .values(deleted_at=now, deleted_by=deleted_by)
     )
     await session.execute(
@@ -490,6 +490,89 @@ async def _union_observable_shares(
         await session.delete(share)
 
 
+async def _reparent_tasks(
+    session: AsyncSession, source_ids: list[int], new_case_id: int
+) -> tuple[dict[tuple[int, int], int], int]:
+    """Re-key every source task into the (empty) merged case. Task ids are per-case,
+    so we allocate fresh ids from the new case's counter to avoid cross-source
+    collisions, then move each task's logs and shares to the new key. Worklog ids are
+    per-task, so they survive the move unchanged. Composite FKs are deferrable, so the
+    children can be updated before the parent settles within this transaction.
+
+    Returns ({(old_case_id, old_task_id): new_task_id}, moved_count) — the mapping is
+    used to re-point attachment owners."""
+    rows = (
+        await session.execute(
+            select(Task.case_id, Task.id)
+            .where(Task.case_id.in_(source_ids), Task.deleted_at.is_(None))
+            .order_by(Task.case_id, Task.created_at, Task.id)
+        )
+    ).all()
+    if not rows:
+        return {}, 0
+    new_ids = await next_task_ids(session, new_case_id, count=len(rows))
+    mapping: dict[tuple[int, int], int] = {}
+    for (old_case, old_id), new_id in zip(rows, new_ids, strict=True):
+        mapping[(old_case, old_id)] = new_id
+        opts = {"synchronize_session": False}
+        await session.execute(
+            update(Log)
+            .where(Log.case_id == old_case, Log.task_id == old_id)
+            .values(case_id=new_case_id, task_id=new_id)
+            .execution_options(**opts)
+        )
+        await session.execute(
+            update(TaskShare)
+            .where(TaskShare.case_id == old_case, TaskShare.task_id == old_id)
+            .values(case_id=new_case_id, task_id=new_id)
+            .execution_options(**opts)
+        )
+        await session.execute(
+            update(Task)
+            .where(Task.case_id == old_case, Task.id == old_id)
+            .values(case_id=new_case_id, id=new_id)
+            .execution_options(**opts)
+        )
+    return mapping, len(rows)
+
+
+async def _reparent_case_attachments(
+    session: AsyncSession,
+    source_ids: list[int],
+    new_case_id: int,
+    task_mapping: dict[tuple[int, int], int],
+) -> int:
+    """Re-key case-bound attachment links into the merged case. The link id is the
+    per-case attachment counter, so allocate fresh ids; re-point task owners via
+    `task_mapping` (log owners ride their task, keeping the per-task log id)."""
+    rows = (
+        await session.execute(
+            select(AttachmentLink.case_id, AttachmentLink.id, AttachmentLink.owner_task_id)
+            .where(
+                AttachmentLink.case_id.in_(source_ids),
+                AttachmentLink.deleted_at.is_(None),
+            )
+            .order_by(AttachmentLink.case_id, AttachmentLink.id)
+        )
+    ).all()
+    if not rows:
+        return 0
+    new_ids = await next_attachment_ids(session, new_case_id, count=len(rows))
+    for (old_case, old_id, owner_task_id), new_id in zip(rows, new_ids, strict=True):
+        new_owner_task = (
+            task_mapping.get((old_case, owner_task_id))
+            if owner_task_id is not None
+            else None
+        )
+        await session.execute(
+            update(AttachmentLink)
+            .where(AttachmentLink.case_id == old_case, AttachmentLink.id == old_id)
+            .values(case_id=new_case_id, id=new_id, owner_task_id=new_owner_task)
+            .execution_options(synchronize_session=False)
+        )
+    return len(rows)
+
+
 async def merge_cases(
     session: AsyncSession,
     *,
@@ -583,11 +666,13 @@ async def merge_cases(
 
     source_id_strs = [str(cid) for cid in distinct_ids]
 
-    # Tasks (+ their logs / task_share follow the task automatically).
-    task_res = await session.execute(
-        update(Task)
-        .where(Task.case_id.in_(distinct_ids), Task.deleted_at.is_(None))
-        .values(case_id=new_case.id)
+    # Tasks (+ their logs / task_share), re-keyed into the empty merged case;
+    # then case-bound attachments, re-pointing task owners via the mapping.
+    task_mapping, moved_tasks = await _reparent_tasks(
+        session, distinct_ids, new_case.id
+    )
+    moved_attachments = await _reparent_case_attachments(
+        session, distinct_ids, new_case.id, task_mapping
     )
     # Observables (with dedup).
     moved_obs = await _reparent_observables(
@@ -700,7 +785,8 @@ async def merge_cases(
     await session.flush()
 
     moved = {
-        "tasks": task_res.rowcount or 0,
+        "tasks": moved_tasks,
+        "attachments": moved_attachments,
         "observables": moved_obs,
         "comments": comment_res.rowcount or 0,
         "alerts": alert_res.rowcount or 0,

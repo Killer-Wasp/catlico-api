@@ -28,27 +28,29 @@ async def test_log_crud(
         "X-Organisation-Id": org_a.id,
     }
 
+    base = f"/api/v1/cases/{case.id}/tasks/{task.id}/logs"
     response = await client.post(
-        f"/api/v1/tasks/{task.id}/logs",
+        base,
         json={"message": "checked dns logs"},
         headers=headers,
     )
     assert response.status_code == 201, response.text
     log = response.json()
     assert log["message"] == "checked dns logs"
+    assert log["public_id"] == f"TL-{case.id}-{task.id}-{log['id']}"
 
-    response = await client.get(f"/api/v1/tasks/{task.id}/logs", headers=headers)
+    response = await client.get(base, headers=headers)
     assert response.status_code == 200
     assert response.json()["total"] == 1
     assert len(response.json()["items"]) == 1
 
     response = await client.patch(
-        f"/api/v1/logs/{log['id']}",
+        f"{base}/{log['id']}",
         json={"message": "updated"},
         headers=headers,
     )
     assert response.status_code == 200
     assert response.json()["message"] == "updated"
 
-    response = await client.delete(f"/api/v1/logs/{log['id']}", headers=headers)
+    response = await client.delete(f"{base}/{log['id']}", headers=headers)
     assert response.status_code == 204

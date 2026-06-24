@@ -43,11 +43,11 @@ async def test_legal_transition_to_completed_sets_end_date(
     h = _headers(analyst_a_token, org_a.id)
 
     # Waiting -> InProgress -> Completed
-    r = await client.patch(f"/api/v1/tasks/{task.id}", json={"status": "InProgress"}, headers=h)
+    r = await client.patch(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", json={"status": "InProgress"}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["end_date"] is None
 
-    r = await client.patch(f"/api/v1/tasks/{task.id}", json={"status": "Completed"}, headers=h)
+    r = await client.patch(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", json={"status": "Completed"}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["end_date"] is not None
 
@@ -58,7 +58,7 @@ async def test_illegal_transition_rejected(
     _, task = await _make_case_and_task(session, org_a, builtin_roles, analyst_a)
     h = _headers(analyst_a_token, org_a.id)
     # Waiting -> Completed is not allowed (must pass through InProgress)
-    r = await client.patch(f"/api/v1/tasks/{task.id}", json={"status": "Completed"}, headers=h)
+    r = await client.patch(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", json={"status": "Completed"}, headers=h)
     assert r.status_code == 422, r.text
 
 
@@ -67,9 +67,9 @@ async def test_reopen_clears_end_date(
 ):
     _, task = await _make_case_and_task(session, org_a, builtin_roles, analyst_a)
     h = _headers(analyst_a_token, org_a.id)
-    await client.patch(f"/api/v1/tasks/{task.id}", json={"status": "InProgress"}, headers=h)
-    await client.patch(f"/api/v1/tasks/{task.id}", json={"status": "Completed"}, headers=h)
-    r = await client.patch(f"/api/v1/tasks/{task.id}", json={"status": "Waiting"}, headers=h)
+    await client.patch(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", json={"status": "InProgress"}, headers=h)
+    await client.patch(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", json={"status": "Completed"}, headers=h)
+    r = await client.patch(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", json={"status": "Waiting"}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["end_date"] is None
 
@@ -85,7 +85,7 @@ async def test_due_date_roundtrips(
         session, org_a, builtin_roles, analyst_a, due_date=due
     )
     h = _headers(analyst_a_token, org_a.id)
-    r = await client.get(f"/api/v1/tasks/{task.id}", headers=h)
+    r = await client.get(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", headers=h)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["due_date"] is not None
@@ -100,13 +100,13 @@ async def test_soft_deleted_task_returns_404_and_hides_logs(
 ):
     _, task = await _make_case_and_task(session, org_a, builtin_roles, analyst_a)
     h = _headers(analyst_a_token, org_a.id)
-    await client.post(f"/api/v1/tasks/{task.id}/logs", json={"message": "m"}, headers=h)
+    await client.post(f"/api/v1/cases/{task.case_id}/tasks/{task.id}/logs", json={"message": "m"}, headers=h)
 
-    r = await client.delete(f"/api/v1/tasks/{task.id}", headers=h)
+    r = await client.delete(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", headers=h)
     assert r.status_code == 204
 
     # Task no longer visible
-    assert (await client.get(f"/api/v1/tasks/{task.id}", headers=h)).status_code == 404
+    assert (await client.get(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", headers=h)).status_code == 404
     # Its logs cascade-soft-deleted: listing logs 404s (task gone), row still in DB
     from app.models.log import Log
     from sqlmodel import select
@@ -143,22 +143,22 @@ async def test_flag_is_per_org(
             created_by=str(analyst_a.id),
         )
     )
-    session.add(TaskShare(task_id=task.id, organisation_id=org_b.id, created_by=str(analyst_a.id)))
+    session.add(TaskShare(case_id=case.id, task_id=task.id, organisation_id=org_b.id, created_by=str(analyst_a.id)))
     await session.commit()
 
     ha = _headers(analyst_a_token, org_a.id)
     hb = _headers(analyst_b_token, org_b.id)
 
     # org-a flags the task
-    assert (await client.put(f"/api/v1/tasks/{task.id}/flag", headers=ha)).status_code == 204
+    assert (await client.put(f"/api/v1/cases/{task.case_id}/tasks/{task.id}/flag", headers=ha)).status_code == 204
 
     # org-a sees flagged=True, org-b sees flagged=False
-    assert (await client.get(f"/api/v1/tasks/{task.id}", headers=ha)).json()["flagged"] is True
-    assert (await client.get(f"/api/v1/tasks/{task.id}", headers=hb)).json()["flagged"] is False
+    assert (await client.get(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", headers=ha)).json()["flagged"] is True
+    assert (await client.get(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", headers=hb)).json()["flagged"] is False
 
     # Unflag is idempotent
-    assert (await client.delete(f"/api/v1/tasks/{task.id}/flag", headers=ha)).status_code == 204
-    assert (await client.get(f"/api/v1/tasks/{task.id}", headers=ha)).json()["flagged"] is False
+    assert (await client.delete(f"/api/v1/cases/{task.case_id}/tasks/{task.id}/flag", headers=ha)).status_code == 204
+    assert (await client.get(f"/api/v1/cases/{task.case_id}/tasks/{task.id}", headers=ha)).json()["flagged"] is False
 
 
 # --- Assignee must belong to the task's creator org ---
@@ -178,7 +178,7 @@ async def test_assignee_must_be_in_creator_org(
     h = _headers(analyst_a_token, org_a.id)
     # analyst_b is NOT a member of org-a (the task's creator org) -> 422
     r = await client.patch(
-        f"/api/v1/tasks/{task.id}", json={"assignee_id": str(analyst_b.id)}, headers=h
+        f"/api/v1/cases/{task.case_id}/tasks/{task.id}", json={"assignee_id": str(analyst_b.id)}, headers=h
     )
     assert r.status_code == 422, r.text
 
@@ -192,14 +192,14 @@ async def test_log_occurred_at_orders_timeline(
     _, task = await _make_case_and_task(session, org_a, builtin_roles, analyst_a)
     h = _headers(analyst_a_token, org_a.id)
     # Create "later-typed but earlier-occurred" log second; it should sort first.
-    await client.post(f"/api/v1/tasks/{task.id}/logs", json={"message": "newer-event"}, headers=h)
+    await client.post(f"/api/v1/cases/{task.case_id}/tasks/{task.id}/logs", json={"message": "newer-event"}, headers=h)
     backdated = datetime(2020, 1, 1, tzinfo=UTC).isoformat()
     await client.post(
-        f"/api/v1/tasks/{task.id}/logs",
+        f"/api/v1/cases/{task.case_id}/tasks/{task.id}/logs",
         json={"message": "older-event", "occurred_at": backdated},
         headers=h,
     )
-    r = await client.get(f"/api/v1/tasks/{task.id}/logs", headers=h)
+    r = await client.get(f"/api/v1/cases/{task.case_id}/tasks/{task.id}/logs", headers=h)
     msgs = [item["message"] for item in r.json()["items"]]
     assert msgs[0] == "older-event"
 

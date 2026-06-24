@@ -91,13 +91,14 @@ async def test_log_attachment_roundtrip(
         created_by=str(analyst_a.id),
     )
     log = await log_crud.create_log(
-        session, LogCreate(message="see attached"), task_id=task.id,
+        session, LogCreate(message="see attached"), case_id=case.id, task_id=task.id,
         organisation_id=org_a.id, created_by=str(analyst_a.id),
     )
     h = _headers(analyst_a_token, org_a.id)
+    base = f"/api/v1/cases/{case.id}/tasks/{task.id}/logs/{log.id}/attachments"
     content = b"pcap-data"
     r = await client.post(
-        f"/api/v1/logs/{log.id}/attachments",
+        base,
         files={"file": ("capture.pcap", content, "application/vnd.tcpdump.pcap")},
         data={},
         headers=h,
@@ -106,16 +107,17 @@ async def test_log_attachment_roundtrip(
     link_id = r.json()["id"]
     assert r.json()["name"] == "capture.pcap"
     assert r.json()["size"] == len(content)
+    assert r.json()["public_id"] == f"A-{case.id}-{link_id}"
 
-    lst = await client.get(f"/api/v1/logs/{log.id}/attachments", headers=h)
+    lst = await client.get(base, headers=h)
     assert lst.json()["total"] == 1
 
-    d = await client.get(f"/api/v1/logs/{log.id}/attachments/{link_id}/file", headers=h)
+    d = await client.get(f"{base}/{link_id}/file", headers=h)
     assert d.status_code == 200
     assert d.content == content
 
-    assert (await client.delete(f"/api/v1/logs/{log.id}/attachments/{link_id}", headers=h)).status_code == 204
-    assert (await client.get(f"/api/v1/logs/{log.id}/attachments", headers=h)).json()["total"] == 0
+    assert (await client.delete(f"{base}/{link_id}", headers=h)).status_code == 204
+    assert (await client.get(base, headers=h)).json()["total"] == 0
 
 
 async def test_blob_dedup_across_owners(
@@ -124,7 +126,7 @@ async def test_blob_dedup_across_owners(
     """Same bytes uploaded to two cases create one blob, two links."""
     from sqlmodel import select
 
-    from app.models.attachment import Attachment, AttachmentLink
+    from app.models.attachment import Attachment, ObservableAttachmentLink
 
     case1 = await _make_case(session, org_a, builtin_roles, analyst_a)
     case2 = await _make_case(session, org_a, builtin_roles, analyst_a)
@@ -140,7 +142,7 @@ async def test_blob_dedup_across_owners(
         assert r.status_code == 201, r.text
 
     blobs = (await session.execute(select(Attachment))).scalars().all()
-    links = (await session.execute(select(AttachmentLink))).scalars().all()
+    links = (await session.execute(select(ObservableAttachmentLink))).scalars().all()
     assert len(blobs) == 1   # deduped by sha256
     assert len(links) == 2   # one reference per observable
 

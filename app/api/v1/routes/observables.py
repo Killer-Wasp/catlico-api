@@ -16,7 +16,6 @@ from app.crud import enrichment as enrichment_crud
 from app.crud import observable as obs_crud
 from app.crud import tag as tag_crud
 from app.crud.case_share import get_share
-from app.models.attachment import AttachmentOwnerType
 from app.models.common import Page
 from app.models.enrichment import (
     EnrichmentJobPublic,
@@ -160,9 +159,7 @@ async def download_observable_file(
 ):
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
     _require("read:observable", perms)
-    link_blob = await attachment_crud.first_link_for_owner(
-        session, AttachmentOwnerType.observable, str(obs.id)
-    )
+    link_blob = await attachment_crud.first_observable_link(session, obs.id)
     if link_blob is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
