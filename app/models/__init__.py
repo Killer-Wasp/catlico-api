@@ -1,6 +1,6 @@
 from app.models.alert import Alert  # noqa: F401
 from app.models.api_key import ApiKey  # noqa: F401
-from app.models.auth import RefreshToken  # noqa: F401
+from app.models.auth import PasswordResetToken, RefreshToken  # noqa: F401
 from app.models.attachment import (  # noqa: F401
     Attachment,
     AttachmentLink,
@@ -22,7 +22,8 @@ from app.models.enrichment import EnrichmentJob, ReportTag  # noqa: F401
 from app.models.flag import Flag  # noqa: F401
 from app.models.function import Function, FunctionRun  # noqa: F401
 from app.models.knowledge_base import KnowledgeBasePage  # noqa: F401
-from app.models.log import Log  # noqa: F401
+from app.models.dashboard import Dashboard  # noqa: F401
+from app.models.metric import Metric, CaseMetricValue  # noqa: F401
 from app.models.misp import MispServer  # noqa: F401
 from app.models.notification import NotificationRule, Notifier, NotifierDelivery, UserNotification  # noqa: F401
 from app.models.observable import (  # noqa: F401

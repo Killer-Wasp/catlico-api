@@ -4,16 +4,19 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import CurrentUser, get_current_user
 from app.core.db import get_session
 from app.core.security import (
     TokenPayload,
     create_access_token,
+    get_password_hash,
     create_refresh_token,
     decode_refresh_token,
 )
 from app.crud.auth import get_valid_refresh_user_id, issue_refresh_token
-from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
+from app.models.auth import ForgotPasswordRequest, ResetPasswordRequest
+from app.models.user import User
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -105,3 +108,116 @@ async def refresh(
         )
     access_token = await _access_token_for(session, user)
     return Token(access_token=access_token, token_type="bearer")
+
+
+# --- Sessions (G5) ---
+
+
+@router.get("/sessions")
+async def list_sessions(
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[dict]:
+    """List the user's active refresh tokens (sessions)."""
+    from sqlmodel import select
+    from app.models.auth import RefreshToken
+
+    result = await session.execute(
+        select(RefreshToken).where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.expires_at > __import__("datetime").datetime.now(__import__("datetime").UTC),
+        )
+    )
+    tokens = result.scalars().all()
+    return [
+        {"id": str(t.token), "created_at": t.created_at.isoformat(), "expires_at": t.expires_at.isoformat()}
+        for t in tokens
+    ]
+
+
+@router.delete("/sessions/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_session(
+    token_id: str,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """Revoke a specific refresh token (log out a session)."""
+    from sqlmodel import select
+    from app.models.auth import RefreshToken
+
+    t = await session.get(RefreshToken, __import__("uuid").UUID(token_id))
+    if t is None or t.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    await session.delete(t)
+    await session.flush()
+
+
+# --- Password Reset (G6) ---
+
+
+@router.post("/password/forgot")
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Request a password reset link. Stub: email delivery deferred."""
+    import hashlib, secrets
+    from datetime import UTC, datetime, timedelta
+    from sqlmodel import select
+    from app.models.auth import PasswordResetToken
+    from app.models.user import User as UserModel
+
+    result = await session.execute(select(UserModel).where(UserModel.email == body.email))
+    user = result.scalar_one_or_none()
+    if user is None:
+        # Don't reveal whether the email exists
+        return {"message": "If the email is registered, a reset link has been sent"}
+
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    token = PasswordResetToken(
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    session.add(token)
+    await session.flush()
+
+    # ponytail: email delivery deferred; log the token for dev
+    import logging
+    logging.getLogger(__name__).info("Password reset token for %s: %s", body.email, raw_token)
+    return {"message": "If the email is registered, a reset link has been sent"}
+
+
+@router.post("/password/reset")
+async def reset_password(
+    body: ResetPasswordRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Reset password using a valid reset token."""
+    import hashlib
+    from datetime import UTC, datetime
+    from sqlmodel import select
+    from app.models.auth import PasswordResetToken
+
+    token_hash = hashlib.sha256(body.token.encode()).hexdigest()
+    result = await session.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token_hash == token_hash,
+            PasswordResetToken.used_at.is_(None),
+        )
+    )
+    token = result.scalar_one_or_none()
+    if token is None or token.expires_at < datetime.now(UTC):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
+
+    user = await get_user_by_id(session, token.user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid reset token")
+
+    user.hashed_password = get_password_hash(body.new_password)
+    token.used_at = datetime.now(UTC)
+    session.add(user)
+    session.add(token)
+    await session.flush()
+    return {"message": "Password reset successfully"}
