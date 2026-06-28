@@ -97,6 +97,7 @@ class WorkItem(SQLModel):
     tlp: int
     pap: int
     config: dict = {}  # decrypted global settings + secrets for the connector
+    file_ref: dict | None = None  # F2: file/blob reference for Category C connectors
 
 
 class WorkClaim(SQLModel):
