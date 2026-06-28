@@ -29,6 +29,7 @@ from app.models.observable import (  # noqa: F401
     ObservableShare,
     ObservableType,
 )
+from app.models.observable_provenance import ObservableProvenance  # noqa: F401
 from app.models.organisation import Organisation  # noqa: F401
 from app.models.organisation_link import OrganisationLink  # noqa: F401
 from app.models.organisation_member import OrganisationMember  # noqa: F401

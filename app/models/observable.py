@@ -69,6 +69,8 @@ class Observable(TimestampMixin, SoftDeleteMixin, table=True):
     organisation_id: str = Field(
         foreign_key="organisation.id", index=True, ondelete="RESTRICT"
     )
+    # Rolled-up verdict from enrichment report tags (B3).
+    verdict: str | None = Field(default=None, index=True)
 
 
 class ObservableShare(CreatedMixin, table=True):
@@ -114,6 +116,7 @@ class ObservablePublic(SQLModel):
     sighted: bool
     ignore_similarity: bool
     organisation_id: str
+    verdict: str | None = None
     created_at: datetime
     updated_at: datetime | None
 

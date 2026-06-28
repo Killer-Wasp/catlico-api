@@ -8,7 +8,7 @@ from sqlmodel import select
 
 from app.crud import observable as obs_crud
 from app.crud.connector import list_auto_run_enabled
-from app.models.connector import Connector
+from app.models.connector import Connector, VERDICT_SEVERITY
 from app.models.enrichment import (
     EnrichmentJob,
     JobStatus,
@@ -16,6 +16,7 @@ from app.models.enrichment import (
     ResultSubmit,
 )
 from app.models.observable import Observable
+from app.models.observable_provenance import ObservableProvenance
 
 
 def compute_cache_key(connector_name: str, version: str, data_type: str, data: str) -> str:
@@ -164,6 +165,8 @@ async def claim_work(
 async def _replace_report_tags(
     session: AsyncSession, job: EnrichmentJob, body: ResultSubmit
 ) -> None:
+    """Replace all report tags for this (observable, connector) and recompute
+    the observable's rolled-up verdict (B3)."""
     await session.execute(
         delete(ReportTag).where(
             ReportTag.observable_id == job.observable_id,
@@ -182,13 +185,33 @@ async def _replace_report_tags(
                 level=tax.level,
             )
         )
+    await session.flush()
+
+    # Recompute observable verdict from all current report tags
+    result = await session.execute(
+        select(ReportTag.level).where(ReportTag.observable_id == job.observable_id)
+    )
+    levels = list(result.scalars().all())
+    if levels:
+        worst = max(levels, key=lambda l: VERDICT_SEVERITY.get(l, 0))
+        # Update the observable directly
+        obs = await session.get(Observable, job.observable_id)
+        if obs:
+            obs.verdict = worst
+            session.add(obs)
+    else:
+        obs = await session.get(Observable, job.observable_id)
+        if obs:
+            obs.verdict = None
+            session.add(obs)
 
 
 async def _import_artifacts(
     session: AsyncSession, job: EnrichmentJob, body: ResultSubmit
 ) -> int:
     """Import returned artifacts as case observables (deduped). Alert observables
-    don't import (no case to attach to). Invalid/unknown types are skipped."""
+    don't import (no case to attach to). Invalid/unknown types are skipped.
+    Inserts provenance rows for each imported artifact (B4)."""
     obs = await obs_crud.get_observable(session, job.observable_id)
     if obs is None or obs.case_id is None:
         return 0
@@ -196,17 +219,36 @@ async def _import_artifacts(
     for art in body.artifacts:
         if await obs_crud.check_creatable_type(session, art.observable_type) is not None:
             continue
-        if await obs_crud.find_case_observable(
+        existing = await obs_crud.find_case_observable(
             session, obs.case_id, art.observable_type, art.data
-        ):
+        )
+        if existing:
+            # Duplicate: record provenance but don't create new observable
+            session.add(
+                ObservableProvenance(
+                    observable_id=existing.id,
+                    source_job_id=job.id,
+                    connector_name=job.connector_name,
+                    message=art.message or "",
+                )
+            )
             continue
-        await obs_crud.create_case_observable(
+        new_obs = await obs_crud.create_case_observable(
             session,
             art,
             case_id=obs.case_id,
             organisation_id=job.organisation_id,
             created_by=f"connector:{job.connector_name}",
         )
+        if new_obs:
+            session.add(
+                ObservableProvenance(
+                    observable_id=new_obs.id,
+                    source_job_id=job.id,
+                    connector_name=job.connector_name,
+                    message=art.message or "",
+                )
+            )
         imported += 1
     return imported
 
