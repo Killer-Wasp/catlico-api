@@ -30,6 +30,7 @@ from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
 from app.crud import audit as audit_crud
 from app.crud import attachment as attachment_crud
+from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
 from app.crud import comment as comment_crud
 from app.crud import custom_field as cf_crud
@@ -816,3 +817,20 @@ async def delete_case_attachment(
     await attachment_crud.delete_link(
         session, link, deleted_by=str(case_ctx.user.id)
     )
+
+
+# --- Timeline (G1) ---
+
+
+@router.get("/{case_id}/timeline")
+async def case_timeline(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+) -> dict:
+    from app.services.timeline import build_timeline
+
+    events = await build_timeline(session, case_ctx.case.id, skip=skip, limit=limit)
+    total = len(events)
+    return {"items": events, "total": total, "skip": skip, "limit": limit}
