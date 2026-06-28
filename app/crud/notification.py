@@ -1,5 +1,7 @@
 import uuid
+from datetime import UTC, datetime
 
+from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -12,6 +14,8 @@ from app.models.notification import (
     NotificationRule,
     NotificationRuleCreate,
     NotificationRuleUpdate,
+    UserNotification,
+    UserNotificationUpdate,
 )
 
 
@@ -154,3 +158,101 @@ async def delete_rule(
 ) -> None:
     await session.delete(rule)
     await session.flush()
+
+
+# --- UserNotification (A2) ---
+
+
+async def create_notification(
+    session: AsyncSession,
+    *,
+    organisation_id: str,
+    user_id: uuid.UUID | None,
+    event_type: str,
+    title: str,
+    body: str = "",
+    payload: dict | None = None,
+) -> UserNotification:
+    notif = UserNotification(
+        organisation_id=organisation_id,
+        user_id=user_id,
+        event_type=event_type,
+        title=title,
+        body=body,
+        payload=payload or {},
+    )
+    session.add(notif)
+    await session.flush()
+    return notif
+
+
+async def list_user_notifications(
+    session: AsyncSession,
+    organisation_id: str,
+    user_id: uuid.UUID,
+    *,
+    skip: int = 0,
+    limit: int = 100,
+    unread_only: bool = False,
+) -> tuple[list[UserNotification], int]:
+    """Visible rows: same org AND (null user_id OR matching user_id)."""
+    base = select(UserNotification).where(
+        UserNotification.organisation_id == organisation_id,
+        or_(
+            UserNotification.user_id.is_(None),
+            UserNotification.user_id == user_id,
+        ),
+    )
+    if unread_only:
+        base = base.where(UserNotification.read_at.is_(None))
+    return await paginate(
+        session, base, UserNotification.created_at.desc(), skip=skip, limit=limit
+    )
+
+
+async def get_user_notification(
+    session: AsyncSession, notification_id: uuid.UUID, organisation_id: str
+) -> UserNotification | None:
+    result = await session.execute(
+        select(UserNotification).where(
+            UserNotification.id == notification_id,
+            UserNotification.organisation_id == organisation_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def update_user_notification(
+    session: AsyncSession,
+    notif: UserNotification,
+    notif_in: UserNotificationUpdate,
+) -> UserNotification:
+    update_data = notif_in.model_dump(exclude_unset=True)
+    for k, v in update_data.items():
+        setattr(notif, k, v)
+    session.add(notif)
+    await session.flush()
+    return notif
+
+
+async def mark_all_read(
+    session: AsyncSession, organisation_id: str, user_id: uuid.UUID
+) -> int:
+    """Mark all visible unread notifications as read. Returns count updated."""
+    result = await session.execute(
+        select(UserNotification).where(
+            UserNotification.organisation_id == organisation_id,
+            or_(
+                UserNotification.user_id.is_(None),
+                UserNotification.user_id == user_id,
+            ),
+            UserNotification.read_at.is_(None),
+        )
+    )
+    rows = result.scalars().all()
+    now = datetime.now(UTC)
+    for r in rows:
+        r.read_at = now
+        session.add(r)
+    await session.flush()
+    return len(rows)

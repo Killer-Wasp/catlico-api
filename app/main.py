@@ -11,7 +11,8 @@ from app.api.v1.main import api_router
 from app.core.configs import settings
 from app.core.context import RequestIdMiddleware
 from app.core.db import AsyncSessionLocal, init_db, run_migrations
-from app.crud.audit import dispatch_pending_outbox
+from app.crud.audit import dispatch_pending_outbox, register_consumer
+from app.services.outbox_events import notify_feed_consumer
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(run_migrations)
     async with AsyncSessionLocal() as session:
         await init_db(session)
+    register_consumer(notify_feed_consumer)
     poller = asyncio.create_task(_outbox_poller())
     try:
         yield

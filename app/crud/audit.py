@@ -80,6 +80,7 @@ async def record_audit(
     context_id: str | None = None,
     details: dict[str, Any] | None = None,
     main_action: bool = True,
+    organisation_id: str | None = None,
 ) -> Audit:
     """Write one audit row + one outbox row in the caller's transaction.
 
@@ -109,21 +110,25 @@ async def record_audit(
     session.add(audit)
     await session.flush()  # assign audit.id for the outbox FK
 
+    payload: dict[str, Any] = {
+        "request_id": audit.request_id,
+        "action": audit.action,
+        "object_type": audit.object_type,
+        "object_id": audit.object_id,
+        "context_type": audit.context_type,
+        "context_id": audit.context_id,
+        "actor": audit.actor,
+        "details": audit.details,
+        "created_at": audit.created_at.isoformat(),
+    }
+    if organisation_id:
+        payload["organisation_id"] = organisation_id
+
     session.add(
         AuditOutbox(
             audit_id=audit.id,
             topic="audit",
-            payload={
-                "request_id": audit.request_id,
-                "action": audit.action,
-                "object_type": audit.object_type,
-                "object_id": audit.object_id,
-                "context_type": audit.context_type,
-                "context_id": audit.context_id,
-                "actor": audit.actor,
-                "details": audit.details,
-                "created_at": audit.created_at.isoformat(),
-            },
+            payload=payload,
         )
     )
     await session.flush()

@@ -16,6 +16,9 @@ from app.models.notification import (
     NotificationRuleCreate,
     NotificationRulePublic,
     NotificationRuleUpdate,
+    UserNotification,
+    UserNotificationPublic,
+    UserNotificationUpdate,
 )
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -190,5 +193,78 @@ async def delete_rule(
     await notif_crud.delete_rule(session, rule)
 
 
+# --- User Notification Feed (A2) ---
+
+
+feed_router = APIRouter(prefix="", tags=["notifications"])
+
+
+def _notification_public(n: UserNotification) -> UserNotificationPublic:
+    return UserNotificationPublic(
+        id=n.id,
+        event_type=n.event_type,
+        title=n.title,
+        body=n.body,
+        payload=n.payload,
+        read_at=n.read_at,
+        created_at=n.created_at,
+    )
+
+
+@feed_router.get("/", response_model=Page[UserNotificationPublic])
+async def list_feed(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+    unread: bool = False,
+) -> Page[UserNotificationPublic]:
+    items, total = await notif_crud.list_user_notifications(
+        session,
+        ctx.organisation_id,
+        ctx.user.id,
+        skip=skip,
+        limit=limit,
+        unread_only=unread,
+    )
+    return Page(
+        items=[_notification_public(n) for n in items],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@feed_router.patch("/{notification_id}", response_model=UserNotificationPublic)
+async def update_feed_item(
+    notification_id: UUID,
+    notif_in: UserNotificationUpdate,
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> UserNotificationPublic:
+    notif = await notif_crud.get_user_notification(
+        session, notification_id, ctx.organisation_id
+    )
+    if not notif:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    # Cross-user visibility: only the target user (or org-wide) can mark read
+    if notif.user_id is not None and notif.user_id != ctx.user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your notification")
+    notif = await notif_crud.update_user_notification(session, notif, notif_in)
+    return _notification_public(notif)
+
+
+@feed_router.post("/read-all", status_code=status.HTTP_200_OK)
+async def read_all(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    count = await notif_crud.mark_all_read(
+        session, ctx.organisation_id, ctx.user.id
+    )
+    return {"marked_read": count}
+
+
 router.include_router(notifier_router)
 router.include_router(rule_router)
+router.include_router(feed_router)

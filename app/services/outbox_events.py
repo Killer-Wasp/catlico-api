@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.crud import notification as notif_crud
 from app.models.audit import AuditOutbox
+
+# ponytail: simple heuristics for notification titles — upgrade to config-driven
+# templates when the product needs polish
+_DEFAULT_TITLE = "Activity"
 
 
 def build_event_envelope(row: AuditOutbox) -> dict[str, Any]:
@@ -37,3 +44,30 @@ def build_event_envelope(row: AuditOutbox) -> dict[str, Any]:
         "details": payload.get("details") or {},
         "created_at": payload.get("created_at", ""),
     }
+
+
+async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
+    """Outbox consumer: create a UserNotification row from every audit event.
+
+    Registered via `register_consumer()` so it runs inside the drain transaction.
+    Notification title is derived from the event type (e.g. "case.create" →
+    "Case created").
+    """
+    envelope = build_event_envelope(row)
+    obj_type = envelope["object"]["type"]
+    action = envelope["event_type"].rsplit(".", 1)[-1]
+    # ponytail: title generation fits the common case; add i18n/templates later
+    title = f"{obj_type.title()} {action.replace('_', ' ')}"
+    body = envelope.get("details", {}).get("summary", "")
+    # ponytail: org-wide notifications (user_id=None) for now; per-user routing
+    # when notification rules gain user-scoping
+    org_id = row.payload.get("organisation_id", "")
+    await notif_crud.create_notification(
+        session,
+        organisation_id=org_id,
+        user_id=None,
+        event_type=envelope["event_type"],
+        title=title,
+        body=body,
+        payload=envelope,
+    )

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
 from sqlalchemy import JSON, Column
@@ -108,3 +108,41 @@ class NotificationRulePublic(SQLModel):
     organisation_id: str
     created_at: datetime
     updated_at: datetime | None
+
+
+# --- User Notification Feed (A2) ---
+
+
+class UserNotification(SQLModel, table=True):
+    """A row in the per-user notification feed, created by the outbox consumer
+    when a matching event fires. `user_id` is null for org-wide notifications."""
+
+    __tablename__ = "user_notification"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    organisation_id: str = Field(
+        foreign_key="organisation.id", index=True, ondelete="CASCADE"
+    )
+    user_id: uuid.UUID | None = Field(
+        default=None, foreign_key="user.id", index=True, ondelete="CASCADE"
+    )
+    event_type: str = Field(index=True)
+    title: str
+    body: str = ""
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    read_at: datetime | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class UserNotificationPublic(SQLModel):
+    id: uuid.UUID
+    event_type: str
+    title: str
+    body: str
+    payload: dict
+    read_at: datetime | None
+    created_at: datetime
+
+
+class UserNotificationUpdate(SQLModel):
+    read_at: datetime | None = None  # set to now() to mark read, None for unread
