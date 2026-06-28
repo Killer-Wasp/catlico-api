@@ -23,6 +23,7 @@ from app.api.v1.routes import (
     tags,
     tasks,
     users,
+    ws,
 )
 
 api_router = APIRouter()
@@ -49,3 +50,4 @@ api_router.include_router(api_keys.router)
 api_router.include_router(slas.router)
 api_router.include_router(knowledge_bases.router)
 api_router.include_router(notifications.router)
+api_router.include_router(ws.router)

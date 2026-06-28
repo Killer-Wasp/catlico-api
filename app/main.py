@@ -14,6 +14,7 @@ from app.core.db import AsyncSessionLocal, init_db, run_migrations
 from app.crud.audit import dispatch_pending_outbox, register_consumer
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
+from app.services.websocket_hub import ws_broadcast_consumer
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
         await init_db(session)
     register_consumer(notify_feed_consumer)
     register_consumer(notifier_delivery_consumer)
+    register_consumer(ws_broadcast_consumer)
     poller = asyncio.create_task(_outbox_poller())
     try:
         yield
