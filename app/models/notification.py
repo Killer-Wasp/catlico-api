@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from app.models.common import TimestampMixin
@@ -146,3 +146,32 @@ class UserNotificationPublic(SQLModel):
 
 class UserNotificationUpdate(SQLModel):
     read_at: datetime | None = None  # set to now() to mark read, None for unread
+
+
+# --- Notifier Delivery (A3) ---
+
+
+class NotifierDelivery(SQLModel, table=True):
+    """One row per (outbox, notifier) pair — the delivery audit trail.
+    Unique constraint prevents duplicate sends when the same outbox row
+    matches the same notifier on retry."""
+
+    __tablename__ = "notifier_delivery"
+    __table_args__ = (
+        UniqueConstraint(
+            "outbox_id", "notifier_id", name="uq_notifier_delivery_outbox_notifier"
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    outbox_id: int = Field(
+        foreign_key="audit_outbox.id", index=True, ondelete="CASCADE"
+    )
+    notifier_id: uuid.UUID = Field(
+        foreign_key="notifier.id", index=True, ondelete="CASCADE"
+    )
+    status: str = Field(default="queued", index=True)  # queued | sent | failed
+    attempts: int = Field(default=0)
+    last_error: str | None = None
+    sent_at: datetime | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
