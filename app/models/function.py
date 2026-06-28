@@ -21,8 +21,12 @@ class FunctionTrigger(str, Enum):
 
 
 class FunctionRunStatus(str, Enum):
+    queued = "queued"
+    running = "running"
     success = "success"
     failure = "failure"
+    timeout = "timeout"
+    cancelled = "cancelled"
 
 
 class Function(TimestampMixin, SoftDeleteMixin, table=True):
@@ -55,7 +59,8 @@ class Function(TimestampMixin, SoftDeleteMixin, table=True):
 
 
 class FunctionRun(CreatedMixin, table=True):
-    """One immutable execution record of a function."""
+    """One immutable execution record of a function. `input` holds the trigger
+    payload; `output` holds the result or error details (D1)."""
 
     __tablename__ = "function_run"
 
@@ -63,11 +68,17 @@ class FunctionRun(CreatedMixin, table=True):
     function_id: int = Field(
         foreign_key="function.id", index=True, ondelete="CASCADE"
     )
-    status: FunctionRunStatus
+    status: FunctionRunStatus = Field(default=FunctionRunStatus.queued)
     trigger: str
-    started_at: datetime
-    duration_ms: int
-    attempts: int = Field(default=1)
+    input: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    output: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    context_type: str | None = Field(default=None)
+    context_id: str | None = Field(default=None)
+    dedup_key: str | None = Field(default=None, index=True)
+    started_at: datetime | None = Field(default=None)
+    ended_at: datetime | None = Field(default=None)
+    duration_ms: int = Field(default=0)
+    attempts: int = Field(default=0)
     error: str | None = Field(default=None)
 
 
@@ -108,10 +119,24 @@ class FunctionRunPublic(SQLModel):
     id: uuid.UUID
     status: FunctionRunStatus
     trigger: str
-    started_at: datetime
-    duration_ms: int
-    attempts: int
-    error: str | None
+    input: dict = {}
+    output: dict = {}
+    context_type: str | None = None
+    context_id: str | None = None
+    dedup_key: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_ms: int = 0
+    attempts: int = 0
+    error: str | None = None
+
+
+class FunctionRunCreate(SQLModel):
+    """Request body for manual function execution (D1)."""
+    input: dict = {}
+    context_type: str | None = None
+    context_id: str | None = None
+    dedup_key: str | None = None
 
 
 class FunctionPublic(SQLModel):
