@@ -21,6 +21,7 @@ from app.api.v1.routes import (
     observables,
     organisations,
     patterns,
+    report_templates,
     roles,
     slas,
     tags,
@@ -56,4 +57,5 @@ api_router.include_router(metrics_dashboards.router)
 api_router.include_router(misp.router)
 api_router.include_router(notifications.router)
 api_router.include_router(patterns.router)
+api_router.include_router(report_templates.router)
 api_router.include_router(ws.router)
