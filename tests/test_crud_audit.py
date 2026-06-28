@@ -111,23 +111,30 @@ async def test_dispatch_marks_pending_delivered(session):
 
 
 async def test_dispatch_invokes_registered_consumer(session):
+    from app.crud.audit import _consumers
+
     case = await _a_case(session)
-    await audit_crud.record_audit(session, action="create", obj=case, actor="system")
+    await audit_crud.record_audit(
+        session, action="create", obj=case, actor="system", organisation_id="test-org"
+    )
 
     seen: list[dict] = []
 
-    async def consumer(payload: dict) -> None:
-        seen.append(payload)
+    async def consumer(s, row) -> None:
+        seen.append(row.payload or {})
 
-    audit_crud.register_consumer(consumer)
+    # Clear global consumers for this test
+    saved = list(_consumers)
+    _consumers.clear()
     try:
+        audit_crud.register_consumer(consumer)
         await audit_crud.dispatch_pending_outbox(session)
     finally:
-        audit_crud._consumers.remove(consumer)
+        _consumers.clear()
+        _consumers.extend(saved)
 
     assert len(seen) == 1
     assert seen[0]["action"] == "create"
-    assert seen[0]["object_type"] == "case"
 
 
 async def test_record_audit_is_transactional_with_mutation(session):

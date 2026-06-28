@@ -155,14 +155,13 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
     for row in rows:
         row.attempts += 1
         session.add(row)
-        try:
-            for consumer in _consumers:
+        all_succeeded = True
+        for consumer in _consumers:
+            try:
                 await consumer(session, row)
-        except Exception:
-            # Any consumer failure leaves the row undelivered (attempts already
-            # incremented). The next poll cycle will retry.
-            pass
-        else:
+            except Exception:
+                all_succeeded = False
+        if all_succeeded:
             row.delivered_at = datetime.now(UTC)
             session.add(row)
             delivered += 1

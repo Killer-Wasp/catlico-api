@@ -11,6 +11,19 @@ from app.models.audit import Audit, AuditOutbox
 from app.models.case_ import Case
 
 
+# ponytail: save/restore global consumers to isolate unit tests from the
+# app-wide consumers registered at startup (notify_feed, notifier_delivery, ws)
+class _ConsumerGuard:
+    def __enter__(self):
+        self._saved = list(_consumers)
+        _consumers.clear()
+        return self
+
+    def __exit__(self, *args):
+        _consumers.clear()
+        _consumers.extend(self._saved)
+
+
 async def _a_case(session) -> Case:
     case = Case(title="test case", created_by="system")
     session.add(case)
@@ -18,7 +31,7 @@ async def _a_case(session) -> Case:
     return case
 
 
-async def _an_outbox_row(session) -> AuditOutbox:
+async def _an_outbox_row(session, org_id: str = "test-org") -> AuditOutbox:
     """Create a case + audit → outbox and return the outbox row."""
     case = await _a_case(session)
     await audit_crud.record_audit(
@@ -28,6 +41,7 @@ async def _an_outbox_row(session) -> AuditOutbox:
         context=case,
         actor="user-test",
         details={"key": "value"},
+        organisation_id=org_id,
     )
     await session.commit()
     result = await session.execute(
@@ -111,7 +125,7 @@ async def test_failed_consumer_leaves_undelivered(session):
         assert row.delivered_at is None
         assert row.attempts == 1
     finally:
-        _consumers.remove(_consumer)
+        _consumers.remove(_failing)
 
 
 async def test_attempts_increment_on_retry(session):
@@ -134,7 +148,7 @@ async def test_attempts_increment_on_retry(session):
             await session.refresh(row)
             assert row.attempts == expected_attempts
     finally:
-        _consumers.remove(_consumer)
+        _consumers.remove(_failing)
 
 
 async def test_multiple_consumers_all_succeed(session):
