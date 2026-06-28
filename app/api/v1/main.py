@@ -14,6 +14,7 @@ from app.api.v1.routes import (
     functions,
     knowledge_bases,
     logs,
+    misp,
     notifications,
     observable_types,
     observables,
@@ -50,6 +51,7 @@ api_router.include_router(custom_fields.router)
 api_router.include_router(api_keys.router)
 api_router.include_router(slas.router)
 api_router.include_router(knowledge_bases.router)
+api_router.include_router(misp.router)
 api_router.include_router(notifications.router)
 api_router.include_router(patterns.router)
 api_router.include_router(ws.router)
