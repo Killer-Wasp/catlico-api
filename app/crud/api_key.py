@@ -89,3 +89,23 @@ async def delete_key(
     key.deleted_by = deleted_by
     session.add(key)
     await session.flush()
+
+
+async def get_key_by_hash(session: AsyncSession, key_hash: str) -> ApiKey | None:
+    """Look up a non-deleted API key by its SHA-256 hash (C1)."""
+    result = await session.execute(
+        select(ApiKey).where(
+            ApiKey.key_hash == key_hash,
+            ApiKey.deleted_at.is_(None),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def touch_key(session: AsyncSession, key: ApiKey) -> None:
+    """Update last_used_at after successful authentication."""
+    from datetime import UTC, datetime
+
+    key.last_used_at = datetime.now(UTC)
+    session.add(key)
+    await session.flush()

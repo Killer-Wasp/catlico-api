@@ -1,4 +1,6 @@
+import hashlib
 import secrets
+import uuid
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -10,6 +12,7 @@ from sqlmodel import select
 from app.core.configs import settings
 from app.core.db import get_session
 from app.core.security import TokenPayload, decode_access_token
+from app.crud.api_key import get_key_by_hash, touch_key
 from app.crud.organisation_member import get_member_permissions
 from app.crud.user import get_user_by_id
 from app.models.case_ import Case, CaseStatus
@@ -34,6 +37,14 @@ class CaseAuthContext:
     case: Case
     is_owner: bool
     permissions: set[str]
+
+
+@dataclass
+class ApiKeyAuth:
+    """Authentication context from a valid API key (C1)."""
+    organisation_id: str
+    scopes: set[str]
+    key_id: str  # for audit trail
 
 
 async def get_token_payload(
@@ -128,6 +139,52 @@ async def get_active_org_context(
         )
     permissions = await _resolve_org_permissions(session, user, payload, x_organisation_id)
     return AuthContext(user=user, organisation_id=x_organisation_id, permissions=permissions)
+
+
+async def _try_api_key_auth(
+    token: str,
+    session: AsyncSession,
+    x_organisation_id: str | None = None,
+) -> AuthContext | None:
+    """Attempt API-key authentication (C1). Returns None if token is not an API key."""
+    if not token.startswith("thp_"):
+        return None
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    key = await get_key_by_hash(session, key_hash)
+    if key is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if key.expires_at is not None:
+        from datetime import UTC, datetime
+
+        if key.expires_at < datetime.now(UTC):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key has expired",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    if x_organisation_id and x_organisation_id != key.organisation_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key organisation does not match X-Organisation-Id",
+        )
+    await touch_key(session, key)
+    # Synthetic user for AuthContext shape — no superadmin bypass for API keys
+    api_user = User(
+        id=uuid.uuid4(),
+        email=f"apikey:{key.id}",
+        is_active=True,
+        is_superadmin=False,
+        is_verified=True,
+    )
+    return AuthContext(
+        user=api_user,
+        organisation_id=key.organisation_id,
+        permissions=set(key.scopes),
+    )
 
 
 ActiveOrgContext = Annotated[AuthContext, Depends(get_active_org_context)]
@@ -257,6 +314,62 @@ async def get_analyzer_principal(
     return AnalyzerPrincipal()
 
 
+async def _get_auth_context(
+    session: AsyncSession,
+    token: str,
+    x_organisation_id: str | None,
+) -> AuthContext:
+    """Resolve auth: try API key first, fall back to JWT (C1)."""
+    ctx = await _try_api_key_auth(token, session, x_organisation_id)
+    if ctx is not None:
+        return ctx
+    # Fall through to JWT
+    payload = decode_access_token(token)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user = await get_user_by_id(session, payload.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not x_organisation_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-Organisation-Id header is required",
+        )
+    if user.is_superadmin:
+        return AuthContext(
+            user=user,
+            organisation_id=x_organisation_id,
+            permissions={p.value for p in Permission},
+        )
+    if x_organisation_id not in payload.organisations:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not a member of this organisation",
+        )
+    perms = await get_member_permissions(session, user.id, x_organisation_id)
+    return AuthContext(user=user, organisation_id=x_organisation_id, permissions=perms)
+
+
+async def get_active_org_or_api_key(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    token: Annotated[str, Depends(oauth2_scheme)],
+    x_organisation_id: Annotated[str | None, Header(alias="X-Organisation-Id")] = None,
+) -> AuthContext:
+    """JWT or API-key authentication (C1). Routes use this instead of ActiveOrgContext
+    when they want to support programmatic API-key access."""
+    return await _get_auth_context(session, token, x_organisation_id)
+
+
+ActiveOrgContext = Annotated[AuthContext, Depends(get_active_org_context)]
+ActiveOrgOrApiKeyContext = Annotated[AuthContext, Depends(get_active_org_or_api_key)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 SuperAdminUser = Annotated[User, Depends(get_superadmin_user)]
 OrgContext = Annotated[AuthContext, Depends(get_org_context)]
