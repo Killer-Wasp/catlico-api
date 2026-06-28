@@ -7,7 +7,7 @@ platform completeness, spanning `catlico-api` (this repo) and `catlico-konnect`
 Companion docs:
 - `catlico-web/docs/api-wiring-audit.md` — the frontend stub audit that motivated this.
 - `catlico-konnect/docs/gap-analysis.md` — the konnect-side detail (responders, blob, porting).
-- `docs/blocked-features-schema-plan.md` — the schema-layer plan for Workstream A models + migrations (models done, migrations pending).
+- `docs/blocked-features-schema-plan.md` — the schema-layer plan for Workstream A models + migrations (all DONE).
 
 Findings are concrete: `catlico-api`'s `app/` is clean (no half-finished TODOs),
 so "missing" means features with no crud/route/migration — not broken code.
@@ -22,38 +22,27 @@ Workstream A models are written; see [blocked-features-schema-plan.md](blocked-f
 - **Observable types** — `observable_types.py` route (GET/POST/DELETE) mounted; `ObservableType` model + `BUILTIN_OBSERVABLE_TYPES` seed in `app/models/observable.py`.
 - **Organisation links** — `GET/POST/PATCH/DELETE organisations/{org_id}/links` live inside `app/api/v1/routes/organisations.py`; model + crud in `organisation_link.py`.
 - **Global admin audit search** — `GET /audit/` (SuperAdmin-only, paginated, filterable by action/object_type/context) in `app/api/v1/routes/audit.py`.
-- **Models without CRUD/routes**: Function, KnowledgeBasePage, ApiKey, SlaPolicy, Notifier, NotificationRule models exist (`app/models/{function,knowledge_base,api_key,sla,notification}.py`). CRUD, routes, and mounts are the remaining work (Workstream A).
+- **Models + CRUD/routes**: Function, KnowledgeBasePage, ApiKey, SlaPolicy, Notifier, NotificationRule models + CRUD + routes + mounts are DONE (Workstream A). See [blocked-features-schema-plan.md](blocked-features-schema-plan.md) for migration history.
 
 ---
 
-## Workstream A — Web-facing feature backends (model exists, add crud + route + mount)
+## Workstream A — Web-facing feature backends ✅ DONE
 
-Brand-new entities with **models written, zero CRUD/route**. Follow the pattern end-to-end:
-`app/crud/<x>.py` → `app/api/v1/routes/<x>.py` → mount in
-`app/api/v1/main.py` → Alembic migration. **Use the `custom_field.py` trio as the
-reference template.** Standard `created_at/by`, `updated_at/by` columns; tenancy
-via membership/org scoping.
+CRUD, routes, and mounts are **complete** for all six entities. Models, migrations,
+and API endpoints are live:
 
-| Feature | New endpoints | Powers web stub | Model |
+| Feature | Endpoints | Powers web stub | Status |
 |---|---|---|---|
-| **Functions / automation** | `GET/POST/PATCH/DELETE functions/`, `POST functions/{id}/toggle`, `POST functions/{id}/test` (real sandboxed run) | FunctionsPage (local `useState`, fake console) | `app/models/function.py` |
-| **Knowledge Base** | `GET/POST/PATCH/DELETE knowledge-base/` (pages w/ block content) | KnowledgeBase (hardcoded pages) | `app/models/knowledge_base.py` |
-| **API keys** | `GET/POST api-keys/`, `DELETE api-keys/{id}`; + validate keys in `app/api/deps.py` alongside JWT | Settings → ApiKeysPanel | `app/models/api_key.py` |
-| **SLA policies** | `GET sla-policies/`, `PUT sla-policies/` (bulk upsert); breach evaluation hook | Settings → SlaPanel | `app/models/sla.py` |
-| **Notification rules + Notifiers** | `GET/PATCH notification-rules/`, `GET/POST/PATCH notifiers/`, `POST notifiers/{id}/test` (Slack/Email/Webhook/Kafka) | Settings → NotificationsPanel | `app/models/notification.py` |
-| **User Notifications feed** | `GET notifications/`, `PATCH notifications/{id}`, `POST notifications/read-all` | Header notifications bell | `app/models/notification.py` |
+| Functions / automation | `GET/POST/PATCH/DELETE functions/`, `POST functions/{id}/toggle`, `POST functions/{id}/run` | FunctionsPage | ✅ CRUD done; execution runtime NOT yet implemented |
+| Knowledge Base | `GET/POST/PATCH/DELETE knowledge-base/` (pages w/ block content) | KnowledgeBase | ✅ DONE |
+| API keys | `GET/POST api-keys/`, `DELETE api-keys/{id}` | Settings → ApiKeysPanel | ✅ CRUD done; request authentication NOT yet implemented |
+| SLA policies | `GET sla-policies/`, `PUT sla-policies/` (bulk upsert) | Settings → SlaPanel | ✅ DONE |
+| Notification rules + Notifiers | `GET/PATCH notification-rules/`, `GET/POST/PATCH notifiers/` | Settings → NotificationsPanel | ✅ CRUD done; notifier delivery NOT yet implemented |
+| User Notifications feed | `GET notifications/`, `PATCH notifications/{id}`, `POST notifications/read-all` | Header notifications bell | NOT yet implemented (needs outbox consumers) |
 
-> In the last round, all six models were written up-front (full SQLModel tables,
-> API schemas, enums, JSON columns). The remaining work is CRUD + route + mount
-> + Alembic migration. Functions "test run" and Notifiers "test" are the deepest
-> — they need real execution/delivery, not just CRUD. Functions execution should
-> reuse the konnect subprocess-isolation model rather than inventing a second
-> sandbox.
->
-> **Immediate next step**: create the 5 Alembic migrations so the DB has tables
-> for all Workstream A entities. See [blocked-features-schema-plan.md](blocked-features-schema-plan.md)
-> for the per-migration spec (indexes, unique constraints, enum types, permission
-> backfill). After that, CRUD+route work can proceed table by table.
+> Workstream A CRUD is complete. Remaining sub-items are **execution/delivery**
+> behavior (function sandbox, notifier dispatch, API-key auth, notification feed),
+> not CRUD scaffolding. These are tracked in the current milestone plan below.
 
 ---
 
@@ -105,7 +94,20 @@ See `catlico-konnect/docs/gap-analysis.md`. Current: **40 of 275 flavors done**
 
 ---
 
-## Suggested phasing
+## Current milestone order
+
+1. **Operational Spine** — outbox consumers, notification feed, notifier delivery, WebSocket stream
+2. **Enrichment Automation** — auto-enrich, verdict rollup, artifact provenance, konnect periodic register
+3. **API-Key Auth** — request authentication with API keys
+4. **Functions Runtime** — queued execution, sandboxed runner, scoped identity
+5. **Responders** — action connectors, operation schema, konnect responder SDK
+6. **Threat Intel Depth** — MITRE, MISP, file analyzer lease, local-tool worker mode
+7. **Analytics/Auth Hardening** — timeline, metrics, dashboards, reporting, sessions, password reset, OIDC/SAML
+
+## Suggested phasing (superseded by above)
+
+<details>
+<summary>Historical phasing plan — kept for reference</summary>
 
 1. **Taxonomies CRUD (B)** — close out the last route-only gap. Unblocks Settings → TaxonomiesPanel.
 2. **Web feature backends (A: API keys, SLA, Knowledge Base)** — independent CRUD; models already written. Fast sequential wins.
@@ -114,6 +116,8 @@ See `catlico-konnect/docs/gap-analysis.md`. Current: **40 of 275 flavors done**
 5. **Enrichment automation (D)** — auto-enrich, verdict rollup, catalog re-sync.
 6. **ATT&CK (C Pattern/Procedure)** + **Responders (E)** — deepest, cross-repo.
 7. **Ongoing — konnect coverage (F)** — blob seam, then porting, in parallel.
+
+</details>
 
 ---
 
