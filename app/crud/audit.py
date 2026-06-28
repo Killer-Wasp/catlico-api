@@ -58,13 +58,14 @@ def _redact(details: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-# Outbox consumers: async fn(payload) -> None. Empty in v1 — the drain still runs
-# end-to-end and marks rows delivered. Registering a consumer is the seam for real
-# stream/notification/connector fan-out.
-_consumers: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
+# Outbox consumers: receive the session + the outbox row so they can write
+# notification/stream/connector rows in the same drain transaction. Empty in v1 —
+# registering a consumer is the seam for real stream/notification/connector fan-out.
+OutboxConsumer = Callable[[AsyncSession, AuditOutbox], Awaitable[None]]
+_consumers: list[OutboxConsumer] = []
 
 
-def register_consumer(fn: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+def register_consumer(fn: OutboxConsumer) -> None:
     _consumers.append(fn)
 
 
@@ -131,8 +132,8 @@ async def record_audit(
 
 async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) -> int:
     """Drain undelivered outbox rows: hand each to every registered consumer, then
-    mark delivered and bump attempts. Runs on its own session (the poller's), so it
-    commits. Returns the number of rows processed."""
+    mark delivered only after *all* consumers complete successfully. Runs on its own
+    session (the poller's), so it commits. Returns the number of rows delivered."""
     rows = (
         (
             await session.execute(
@@ -145,15 +146,24 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
         .scalars()
         .all()
     )
+    delivered = 0
     for row in rows:
         row.attempts += 1
-        for consumer in _consumers:
-            await consumer(row.payload)
-        row.delivered_at = datetime.now(UTC)
         session.add(row)
+        try:
+            for consumer in _consumers:
+                await consumer(session, row)
+        except Exception:
+            # Any consumer failure leaves the row undelivered (attempts already
+            # incremented). The next poll cycle will retry.
+            pass
+        else:
+            row.delivered_at = datetime.now(UTC)
+            session.add(row)
+            delivered += 1
     if rows:
         await session.commit()
-    return len(rows)
+    return delivered
 
 
 async def list_audits(
