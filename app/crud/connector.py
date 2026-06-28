@@ -87,16 +87,50 @@ async def is_enabled_for_org(
     return bool(row and row.enabled)
 
 
-async def list_enabled_for_org(
+async def is_auto_run_enabled(
+    session: AsyncSession, organisation_id: str, name: str
+) -> bool:
+    row = await get_org_connector(session, organisation_id, name)
+    return bool(row and row.auto_run_enabled)
+
+
+async def set_auto_run(
+    session: AsyncSession,
+    organisation_id: str,
+    name: str,
+    *,
+    auto_run: bool,
+    updated_by: str,
+) -> OrgConnector:
+    row = await get_org_connector(session, organisation_id, name)
+    if row is None:
+        row = OrgConnector(
+            organisation_id=organisation_id,
+            connector_name=name,
+            enabled=True,  # enabling auto-run implies enabling the connector
+            auto_run_enabled=auto_run,
+            created_by=updated_by,
+        )
+    else:
+        row.auto_run_enabled = auto_run
+        row.updated_at = datetime.now(UTC)
+        row.updated_by = updated_by
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def list_auto_run_enabled(
     session: AsyncSession, organisation_id: str
 ) -> list[Connector]:
-    """Available connectors this org has explicitly enabled."""
+    """Available connectors this org has enabled with auto-run turned on."""
     stmt = (
         select(Connector)
         .join(OrgConnector, OrgConnector.connector_name == Connector.name)
         .where(
             OrgConnector.organisation_id == organisation_id,
             OrgConnector.enabled == True,  # noqa: E712
+            OrgConnector.auto_run_enabled == True,  # noqa: E712
             Connector.available == True,  # noqa: E712
         )
         .order_by(Connector.name)

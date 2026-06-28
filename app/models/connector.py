@@ -76,6 +76,7 @@ class OrgConnector(TimestampMixin, table=True):
         foreign_key="connector.name", primary_key=True, ondelete="CASCADE"
     )
     enabled: bool = Field(default=True)
+    auto_run_enabled: bool = Field(default=False)
     created_by: str = Field(default="")
 
 
@@ -108,6 +109,7 @@ class ConnectorPublic(SQLModel):
     available: bool
     max_runtime_seconds: int = 60
     enabled: bool = False  # resolved per active org
+    auto_run_enabled: bool = False  # resolved per active org
     settings: dict = {}  # non-secret only
     has_secrets: bool = False
 

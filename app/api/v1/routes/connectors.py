@@ -25,7 +25,11 @@ def _require(perm: str, perms: set[str]) -> None:
 
 
 def _to_public(
-    connector: Connector, *, enabled: bool, secret: ConnectorSecret | None
+    connector: Connector,
+    *,
+    enabled: bool,
+    auto_run_enabled: bool = False,
+    secret: ConnectorSecret | None,
 ) -> ConnectorPublic:
     return ConnectorPublic(
         name=connector.name,
@@ -38,6 +42,7 @@ def _to_public(
         available=connector.available,
         max_runtime_seconds=connector.max_runtime_seconds,
         enabled=enabled,
+        auto_run_enabled=auto_run_enabled,
         settings=(secret.settings if secret else {}) or {},
         has_secrets=bool(secret and secret.secrets_encrypted),
     )
@@ -86,8 +91,11 @@ async def list_connectors(
         enabled = await connector_crud.is_enabled_for_org(
             session, ctx.organisation_id, c.name
         )
+        auto_run = await connector_crud.is_auto_run_enabled(
+            session, ctx.organisation_id, c.name
+        )
         secret = await connector_crud.get_secret(session, c.name)
-        out.append(_to_public(c, enabled=enabled, secret=secret))
+        out.append(_to_public(c, enabled=enabled, auto_run_enabled=auto_run, secret=secret))
     return out
 
 
@@ -102,8 +110,9 @@ async def get_connector(
     if c is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
     enabled = await connector_crud.is_enabled_for_org(session, ctx.organisation_id, name)
+    auto_run = await connector_crud.is_auto_run_enabled(session, ctx.organisation_id, name)
     secret = await connector_crud.get_secret(session, name)
-    return _to_public(c, enabled=enabled, secret=secret)
+    return _to_public(c, enabled=enabled, auto_run_enabled=auto_run, secret=secret)
 
 
 @router.put("/{name}/config", response_model=ConnectorPublic)
@@ -174,4 +183,48 @@ async def _set_enabled(
         session, ctx.organisation_id, name, enabled=enabled, updated_by=str(ctx.user.id)
     )
     secret = await connector_crud.get_secret(session, name)
-    return _to_public(c, enabled=enabled, secret=secret)
+    return _to_public(c, enabled=enabled, auto_run_enabled=False, secret=secret)
+
+
+# --- Auto-Run (B1) ---
+
+
+@router.post("/{name}/auto-run/enable", response_model=ConnectorPublic)
+async def enable_auto_run(
+    name: str,
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ConnectorPublic:
+    return await _set_auto_run(name, ctx, session, auto_run=True)
+
+
+@router.post("/{name}/auto-run/disable", response_model=ConnectorPublic)
+async def disable_auto_run(
+    name: str,
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ConnectorPublic:
+    return await _set_auto_run(name, ctx, session, auto_run=False)
+
+
+async def _set_auto_run(
+    name: str, ctx: ActiveOrgContext, session: AsyncSession, *, auto_run: bool
+) -> ConnectorPublic:
+    _require("write:connector", ctx.permissions)
+    c = await connector_crud.get(session, name)
+    if c is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
+    if auto_run:
+        # Auto-run requires connector enabled AND required config present
+        if not await connector_crud.is_enabled_for_org(session, ctx.organisation_id, name):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Connector must be enabled before auto-run can be enabled.",
+            )
+        missing = await _missing_required_config(session, c)
+        _raise_missing_config(missing)
+    await connector_crud.set_auto_run(
+        session, ctx.organisation_id, name, auto_run=auto_run, updated_by=str(ctx.user.id)
+    )
+    secret = await connector_crud.get_secret(session, name)
+    return _to_public(c, enabled=True, auto_run_enabled=auto_run, secret=secret)
