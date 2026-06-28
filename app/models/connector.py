@@ -9,7 +9,7 @@ from app.models.common import TimestampMixin
 
 class ConnectorType(str, Enum):
     analyzer = "analyzer"
-    # responder = "responder"  # reserved for a later milestone
+    responder = "responder"
 
 
 class Verdict(str, Enum):
