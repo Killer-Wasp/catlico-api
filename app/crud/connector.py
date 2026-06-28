@@ -120,6 +120,24 @@ async def set_auto_run(
     return row
 
 
+async def list_enabled_for_org(
+    session: AsyncSession, organisation_id: str
+) -> list[Connector]:
+    """Available connectors this org has explicitly enabled."""
+    stmt = (
+        select(Connector)
+        .join(OrgConnector, OrgConnector.connector_name == Connector.name)
+        .where(
+            OrgConnector.organisation_id == organisation_id,
+            OrgConnector.enabled == True,  # noqa: E712
+            Connector.available == True,  # noqa: E712
+        )
+        .order_by(Connector.name)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def list_auto_run_enabled(
     session: AsyncSession, organisation_id: str
 ) -> list[Connector]:
