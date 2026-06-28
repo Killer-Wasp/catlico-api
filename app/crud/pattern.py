@@ -1,0 +1,119 @@
+"""F1: MITRE ATT&CK pattern and procedure CRUD."""
+
+import uuid
+
+from sqlalchemy import delete as sql_delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
+
+from app.crud.pagination import paginate
+from app.models.pattern import Pattern, PatternImportItem, Procedure, ProcedureReplace
+
+
+# --- Patterns ---
+
+async def list_patterns(
+    session: AsyncSession,
+    *,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[Pattern], int]:
+    base = select(Pattern).order_by(Pattern.name)
+    return await paginate(session, base, Pattern.name, skip=skip, limit=limit)
+
+
+async def get_pattern_by_external_id(
+    session: AsyncSession, external_id: str
+) -> Pattern | None:
+    result = await session.execute(
+        select(Pattern).where(Pattern.external_id == external_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def import_patterns(
+    session: AsyncSession,
+    items: list[PatternImportItem],
+    *,
+    created_by: str,
+) -> list[Pattern]:
+    """Bulk upsert patterns by external_id (F1)."""
+    out: list[Pattern] = []
+    for item in items:
+        existing = await get_pattern_by_external_id(session, item.external_id)
+        if existing:
+            existing.name = item.name
+            existing.description = item.description
+            existing.tactic = item.tactic
+            existing.url = item.url
+            existing.parent_external_id = item.parent_external_id
+            existing.updated_by = created_by
+            session.add(existing)
+            out.append(existing)
+        else:
+            new = Pattern(
+                external_id=item.external_id,
+                name=item.name,
+                description=item.description,
+                tactic=item.tactic,
+                url=item.url,
+                parent_external_id=item.parent_external_id,
+                created_by=created_by,
+            )
+            session.add(new)
+            out.append(new)
+    await session.flush()
+    return out
+
+
+# --- Procedures ---
+
+async def list_procedures(
+    session: AsyncSession,
+    case_id: int,
+) -> list[Procedure]:
+    result = await session.execute(
+        select(Procedure).where(Procedure.case_id == case_id).order_by(Procedure.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def replace_procedures(
+    session: AsyncSession,
+    case_id: int,
+    body: ProcedureReplace,
+    *,
+    created_by: str,
+) -> list[Procedure]:
+    """Replace all procedures for a case atomically."""
+    # Delete existing
+    await session.execute(
+        sql_delete(Procedure).where(Procedure.case_id == case_id)
+    )
+    # Insert new
+    out: list[Procedure] = []
+    for proc_item in body.procedures:
+        pattern = await get_pattern_by_external_id(session, proc_item.external_id)
+        if pattern is None:
+            # Auto-import if pattern doesn't exist yet
+            pattern = Pattern(
+                external_id=proc_item.external_id,
+                name=proc_item.name or proc_item.external_id,
+                description=proc_item.description,
+                tactic=proc_item.tactic,
+                url=proc_item.url,
+                parent_external_id=proc_item.parent_external_id,
+                created_by=created_by,
+            )
+            session.add(pattern)
+            await session.flush()
+        proc = Procedure(
+            case_id=case_id,
+            pattern_id=pattern.id,
+            description=proc_item.description,
+            created_by=created_by,
+        )
+        session.add(proc)
+        out.append(proc)
+    await session.flush()
+    return out

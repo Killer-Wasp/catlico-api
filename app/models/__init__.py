@@ -30,7 +30,10 @@ from app.models.observable import (  # noqa: F401
     ObservableType,
 )
 from app.models.observable_provenance import ObservableProvenance  # noqa: F401
+from app.models.observable_provenance import ObservableProvenance  # noqa: F401
+from app.models.observable_provenance import ObservableProvenance  # noqa: F401
 from app.models.organisation import Organisation  # noqa: F401
+from app.models.pattern import Pattern, Procedure  # noqa: F401
 from app.models.organisation_link import OrganisationLink  # noqa: F401
 from app.models.organisation_member import OrganisationMember  # noqa: F401
 from app.models.role import Role, RolePermission  # noqa: F401
