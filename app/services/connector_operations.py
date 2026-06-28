@@ -45,6 +45,8 @@ class ResponderResult(BaseModel):
     message: str = ""
     full: dict = {}
     error: str | None = None
+    dry_run: bool = False  # E1+: return intended changes without applying
+    require_confirmation: bool = False  # E1+: require explicit user confirmation
 
 
 async def _validate_operation(
@@ -109,9 +111,13 @@ async def apply_operations(
     organisation_id: str,
     connector_name: str,
     case_id: int | None = None,
+    dry_run: bool = False,
 ) -> list[str]:
     """Apply a list of operations transactionally (all-or-nothing for now).
     Returns list of error messages. Empty list = all succeeded.
+
+    When `dry_run=True`, validates operations but does NOT apply them — returns
+    the list of operations that *would* be applied (or validation errors).
 
     The actor for audit is set to `connector:<connector_name>`.
     """
@@ -125,7 +131,11 @@ async def apply_operations(
             errors.append(err)
 
     if errors:
-        return errors  # ponytail: v1 all-or-nothing; partial application later
+        return errors
+
+    if dry_run:
+        # ponytail: dry-run returns what would happen without applying
+        return []
 
     # Apply operations
     for op in operations:

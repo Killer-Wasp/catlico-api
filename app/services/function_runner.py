@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal
+from app.crud.audit import record_audit
 from app.crud.function import (
     create_run,
     list_functions,
@@ -46,7 +47,7 @@ async def _execute_function(
     """Execute a single function run. v1 test stub: mark success immediately.
     Real implementation would sandbox-execute func.code with the scoped token.
 
-    ponytail: test stub; replace with subprocess sandbox when needed.
+    ponytail: test stub; replace with subprocess/jail sandbox when needed.
     """
     token = create_function_token(
         function_id=func.id,
@@ -57,14 +58,31 @@ async def _execute_function(
     )
     # Test runner: always succeeds after a brief delay simulating work
     await asyncio.sleep(0.1)
+    output = {
+        "message": "Function executed successfully (test runner)",
+        "function_id": func.id,
+        "organisation_id": func.organisation_id,
+    }
     await update_run_status(
         session,
         run,
         FunctionRunStatus.success,
-        output={
-            "message": "Function executed successfully (test runner)",
+        output=output,
+    )
+    # Emit audit for the completed run (D2)
+    await record_audit(
+        session,
+        action="function.run.completed",
+        obj=run,
+        actor=f"function:{func.id}",
+        organisation_id=func.organisation_id,
+        details={
             "function_id": func.id,
-            "organisation_id": func.organisation_id,
+            "function_version": func.updated_at.isoformat() if func.updated_at else "",
+            "trigger": run.trigger,
+            "sandbox_policy": "test-stub",
+            "status": FunctionRunStatus.success.value,
+            "duration_ms": run.duration_ms,
         },
     )
 
@@ -106,6 +124,19 @@ async def _process_queued_runs(session: AsyncSession) -> int:
                 FunctionRunStatus.timeout,
                 error=f"timed out after {func.timeout_ms}ms",
             )
+            await record_audit(
+                session,
+                action="function.run.timeout",
+                obj=run,
+                actor=f"function:{func.id}",
+                organisation_id=func.organisation_id,
+                details={
+                    "function_id": func.id,
+                    "sandbox_policy": "test-stub",
+                    "status": FunctionRunStatus.timeout.value,
+                    "error": f"timed out after {func.timeout_ms}ms",
+                },
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("function %d run %s failed", func.id, run.id)
             await update_run_status(
@@ -113,6 +144,19 @@ async def _process_queued_runs(session: AsyncSession) -> int:
                 run,
                 FunctionRunStatus.failure,
                 error=str(exc)[:1000],
+            )
+            await record_audit(
+                session,
+                action="function.run.failed",
+                obj=run,
+                actor=f"function:{func.id}",
+                organisation_id=func.organisation_id,
+                details={
+                    "function_id": func.id,
+                    "sandbox_policy": "test-stub",
+                    "status": FunctionRunStatus.failure.value,
+                    "error": str(exc)[:1000],
+                },
             )
         await session.commit()
         processed += 1

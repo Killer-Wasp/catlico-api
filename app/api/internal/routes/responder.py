@@ -53,11 +53,28 @@ async def responder_submit_result(
 
         # Determine case from the job context
         case_id = None
-        obs = None
         from app.crud import observable as obs_crud
         obs = await obs_crud.get_observable(session, job.observable_id)
         if obs and obs.case_id:
             case_id = obs.case_id
+
+        if body.dry_run:
+            # Dry-run: validate, return intended changes, don't apply
+            errors = await apply_operations(
+                session,
+                body.operations,
+                organisation_id=job.organisation_id,
+                connector_name=job.connector_name,
+                case_id=case_id,
+                dry_run=True,
+            )
+            return {
+                "ok": True,
+                "job_id": str(job_id),
+                "status": "dry_run",
+                "operations": [op.model_dump() for op in body.operations],
+                "errors": errors if errors else None,
+            }
 
         errors = await apply_operations(
             session,
@@ -65,6 +82,7 @@ async def responder_submit_result(
             organisation_id=job.organisation_id,
             connector_name=job.connector_name,
             case_id=case_id,
+            dry_run=False,
         )
         if errors:
             raise HTTPException(
