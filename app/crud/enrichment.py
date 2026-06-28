@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud import observable as obs_crud
+from app.crud.connector import list_auto_run_enabled
 from app.models.connector import Connector
 from app.models.enrichment import (
     EnrichmentJob,
@@ -366,3 +367,80 @@ async def list_report_tags(
 ) -> list[ReportTag]:
     stmt = select(ReportTag).where(ReportTag.observable_id == observable_id)
     return list((await session.execute(stmt)).scalars().all())
+
+
+# --- Auto-Enrichment (B2) ---
+
+
+def _tlp_name(value: int) -> str:
+    return {0: "WHITE", 1: "GREEN", 2: "AMBER", 3: "RED"}.get(value, "UNKNOWN")
+
+
+def _pap_name(value: int) -> str:
+    return {0: "WHITE", 1: "GREEN", 2: "AMBER", 3: "RED"}.get(value, "UNKNOWN")
+
+
+async def enqueue_auto_for_observable(
+    session: AsyncSession,
+    observable: Observable,
+    *,
+    organisation_id: str,
+    created_by: str,
+) -> int:
+    """Auto-enqueue enrichment jobs for a newly-created observable.
+
+    Loads all auto-run-enabled connectors for the org, filters by observable
+    data type, and respects TLP/PAP guardrails from each connector's manifest.
+    Returns the number of jobs enqueued."""
+    auto_connectors = await list_auto_run_enabled(session, organisation_id)
+    if not auto_connectors:
+        return 0
+
+    obs_type = observable.observable_type
+    obs_tlp = observable.tlp
+    obs_pap = observable.pap
+
+    count = 0
+    for connector in auto_connectors:
+        # Filter by data type
+        if obs_type not in connector.data_types:
+            continue
+
+        # Guardrails from manifest
+        manifest = connector.manifest or {}
+        check_tlp = manifest.get("check_tlp", False)
+        max_tlp_str = manifest.get("max_tlp", "")
+        check_pap = manifest.get("check_pap", False)
+        max_pap_str = manifest.get("max_pap", "")
+
+        # TLP guard: connector declares max allowed TLP
+        if check_tlp and max_tlp_str:
+            try:
+                max_tlp_idx = {"WHITE": 0, "GREEN": 1, "AMBER": 2, "RED": 3}[max_tlp_str.upper()]
+            except KeyError:
+                max_tlp_idx = 3
+            if obs_tlp > max_tlp_idx:
+                continue
+
+        # PAP guard: connector declares max allowed PAP
+        if check_pap and max_pap_str:
+            try:
+                max_pap_idx = {"WHITE": 0, "GREEN": 1, "AMBER": 2, "RED": 3}[max_pap_str.upper()]
+            except KeyError:
+                max_pap_idx = 3
+            if obs_pap > max_pap_idx:
+                continue
+
+        job, created = await enqueue(
+            session,
+            observable,
+            connector,
+            organisation_id=organisation_id,
+            created_by=created_by,
+            force_refresh=False,
+            ttl_seconds=3600,
+        )
+        if created:
+            count += 1
+
+    return count

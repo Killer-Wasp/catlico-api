@@ -33,6 +33,7 @@ from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
 from app.crud import comment as comment_crud
 from app.crud import custom_field as cf_crud
+from app.crud import enrichment as enrichment_crud
 from app.crud import flag as flag_crud
 from app.crud import case_template as ct_crud
 from app.crud import observable as obs_crud
@@ -515,13 +516,21 @@ async def create_case_observable(
             status_code=status.HTTP_409_CONFLICT,
             detail="Observable with this type and value already exists on the case",
         )
-    return await obs_crud.create_case_observable(
+    observable = await obs_crud.create_case_observable(
         session,
         obs_in,
         case_id=case_ctx.case.id,
         organisation_id=case_ctx.organisation_id,
         created_by=str(case_ctx.user.id),
     )
+    # Auto-enqueue enrichment for matching auto-run connectors
+    await enrichment_crud.enqueue_auto_for_observable(
+        session,
+        observable,
+        organisation_id=case_ctx.organisation_id,
+        created_by=str(case_ctx.user.id),
+    )
+    return observable
 
 
 @router.post(

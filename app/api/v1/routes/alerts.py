@@ -26,6 +26,7 @@ from app.crud import case_ as case_crud
 from app.crud import case_share as case_share_crud
 from app.crud import case_template as ct_crud
 from app.crud import custom_field as cf_crud
+from app.crud import enrichment as enrichment_crud
 from app.crud import flag as flag_crud
 from app.crud import observable as obs_crud
 from app.crud import organisation_member as member_crud
@@ -562,13 +563,21 @@ async def create_alert_observable(
     err = await obs_crud.check_creatable_type(session, obs_in.observable_type)
     if err:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=err)
-    return await obs_crud.create_alert_observable(
+    observable = await obs_crud.create_alert_observable(
         session,
         obs_in,
         alert_id=alert.id,
         organisation_id=ctx.organisation_id,
         created_by=str(ctx.user.id),
     )
+    # Auto-enqueue enrichment for matching auto-run connectors
+    await enrichment_crud.enqueue_auto_for_observable(
+        session,
+        observable,
+        organisation_id=ctx.organisation_id,
+        created_by=str(ctx.user.id),
+    )
+    return observable
 
 
 @router.post(
