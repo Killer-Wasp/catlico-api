@@ -14,7 +14,7 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
-    ActiveOrgContext,
+    ActiveOrgOrApiKeyContext,
     CaseAuthContext,
     require_case_owner,
     require_case_permission,
@@ -113,7 +113,7 @@ async def _case_public_resolved(
     return pub
 
 
-def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
+def _require_perm(ctx: ActiveOrgOrApiKeyContext, permission: str) -> None:
     if permission not in ctx.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -134,7 +134,7 @@ async def _assert_assignee_in_org(
 
 @router.get("/", response_model=Page[CasePublic])
 async def list_cases(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -210,7 +210,7 @@ async def list_cases(
 
 @router.get("/filters", response_model=CaseListFacets)
 async def list_case_filters(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CaseListFacets:
     """Distinct assignee/tag values across the org's cases for the list view's
@@ -222,7 +222,7 @@ async def list_case_filters(
 @router.post("/", response_model=CasePublic, status_code=status.HTTP_201_CREATED)
 async def create_case(
     case_in: CaseCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CasePublic:
     _require_perm(ctx, "write:case")
@@ -287,7 +287,7 @@ async def create_case(
 @router.post("/merge", response_model=CasePublic, status_code=status.HTTP_201_CREATED)
 async def merge_cases(
     req: CaseMergeRequest,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CasePublic:
     """Merge 2+ same-owner-org cases into a fresh case. Sources are frozen as

@@ -11,7 +11,7 @@ class CreatedMixin(SQLModel):
     """Creation metadata. Subclasses that need a non-default author (e.g.
     system/analyzer-seeded rows) re-declare just `created_by`."""
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC).replace(tzinfo=None))
     created_by: str
 
 

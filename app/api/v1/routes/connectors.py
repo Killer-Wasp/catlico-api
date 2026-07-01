@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext, SuperAdminUser
+from app.api.deps import ActiveOrgOrApiKeyContext, SuperAdminUser
 from app.core.db import get_session
 from app.crud import connector as connector_crud
 from app.models.connector import (
@@ -82,7 +82,7 @@ def _raise_missing_config(missing: list[str]) -> None:
 
 @router.get("", response_model=list[ConnectorPublic])
 async def list_connectors(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[ConnectorPublic]:
     _require("read:connector", ctx.permissions)
@@ -102,7 +102,7 @@ async def list_connectors(
 @router.get("/{name}", response_model=ConnectorPublic)
 async def get_connector(
     name: str,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ConnectorPublic:
     _require("read:connector", ctx.permissions)
@@ -154,7 +154,7 @@ async def test_connector_config(
 @router.post("/{name}/enable", response_model=ConnectorPublic)
 async def enable_connector(
     name: str,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ConnectorPublic:
     return await _set_enabled(name, ctx, session, enabled=True)
@@ -163,14 +163,14 @@ async def enable_connector(
 @router.post("/{name}/disable", response_model=ConnectorPublic)
 async def disable_connector(
     name: str,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ConnectorPublic:
     return await _set_enabled(name, ctx, session, enabled=False)
 
 
 async def _set_enabled(
-    name: str, ctx: ActiveOrgContext, session: AsyncSession, *, enabled: bool
+    name: str, ctx: ActiveOrgOrApiKeyContext, session: AsyncSession, *, enabled: bool
 ) -> ConnectorPublic:
     _require("write:connector", ctx.permissions)
     c = await connector_crud.get(session, name)
@@ -192,7 +192,7 @@ async def _set_enabled(
 @router.post("/{name}/auto-run/enable", response_model=ConnectorPublic)
 async def enable_auto_run(
     name: str,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ConnectorPublic:
     return await _set_auto_run(name, ctx, session, auto_run=True)
@@ -201,14 +201,14 @@ async def enable_auto_run(
 @router.post("/{name}/auto-run/disable", response_model=ConnectorPublic)
 async def disable_auto_run(
     name: str,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ConnectorPublic:
     return await _set_auto_run(name, ctx, session, auto_run=False)
 
 
 async def _set_auto_run(
-    name: str, ctx: ActiveOrgContext, session: AsyncSession, *, auto_run: bool
+    name: str, ctx: ActiveOrgOrApiKeyContext, session: AsyncSession, *, auto_run: bool
 ) -> ConnectorPublic:
     _require("write:connector", ctx.permissions)
     c = await connector_crud.get(session, name)

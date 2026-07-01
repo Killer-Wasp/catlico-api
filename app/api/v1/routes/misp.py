@@ -112,8 +112,11 @@ async def test_server(
     s = await misp_crud.get_server(session, server_id, ctx.organisation_id)
     if not s:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MISP server not found")
-    from app.services.misp_import import test_connection
-    return await test_connection(s)
+    # ponytail: 501 until MISP integration is implemented (P1.4)
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="MISP connection test not yet implemented",
+    )
 
 
 @router.post("/servers/{server_id}/import-now")
@@ -127,8 +130,11 @@ async def import_now(
     s = await misp_crud.get_server(session, server_id, ctx.organisation_id)
     if not s:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MISP server not found")
-    from app.services.misp_import import import_from_misp
-    return await import_from_misp(server_id, body.event_id, ctx.organisation_id, session)
+    # ponytail: 501 until MISP integration is implemented (P1.4)
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="MISP import not yet implemented",
+    )
 
 
 @router.post("/cases/{case_id}/export/misp")
@@ -138,5 +144,8 @@ async def export_case(
     case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
-    from app.services.misp_export import export_case_to_misp
-    return await export_case_to_misp(body.server_id, case_ctx.case.id, body.ioc_only, session)
+    # ponytail: 501 until MISP integration is implemented (P1.4)
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="MISP export not yet implemented",
+    )

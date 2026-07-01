@@ -106,7 +106,7 @@ async def update_template(
 ) -> CaseTemplate:
     update_data = tpl_in.model_dump(exclude_unset=True)
     tasks = update_data.pop("tasks", None)
-    update_data["updated_at"] = datetime.now(UTC)
+    update_data["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
     update_data["updated_by"] = updated_by
     tpl.sqlmodel_update(update_data)
     session.add(tpl)
@@ -132,7 +132,7 @@ async def update_template(
 async def delete_template(
     session: AsyncSession, tpl: CaseTemplate, deleted_by: str
 ) -> None:
-    tpl.deleted_at = datetime.now(UTC)
+    tpl.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     tpl.deleted_by = deleted_by
     session.add(tpl)
     await session.flush()

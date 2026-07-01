@@ -7,7 +7,7 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgContext, CaseAuthContext, require_case_permission
 from app.core.db import get_session
 from app.crud.pagination import paginate
 
@@ -20,6 +20,9 @@ from app.models.dashboard import Dashboard, DashboardCreate, DashboardUpdate, Da
 from app.models.common import Page
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
+case_metrics_router = APIRouter(
+    prefix="/cases/{case_id}/metrics", tags=["metrics"]
+)
 
 
 async def _ensure_admin(ctx: ActiveOrgContext):
@@ -61,8 +64,14 @@ async def delete_metric(metric_id: uuid.UUID, ctx: ActiveOrgContext, db=Depends(
 
 # --- Case metrics ---
 
+@case_metrics_router.get("", response_model=list[CaseMetricPublic])
 @router.get("/cases/{case_id}/metrics", response_model=list[CaseMetricPublic])
-async def list_case_metrics(case_id: int, ctx: ActiveOrgContext, db=Depends(get_session)):
+async def list_case_metrics(
+    case_id: int,
+    ctx: ActiveOrgContext,
+    db=Depends(get_session),
+    _case_perm: CaseAuthContext = require_case_permission("read:case"),
+):
     result = await db.execute(select(CaseMetricValue).where(CaseMetricValue.case_id == case_id))
     vals = result.scalars().all()
     out = []
@@ -72,12 +81,29 @@ async def list_case_metrics(case_id: int, ctx: ActiveOrgContext, db=Depends(get_
     return out
 
 
+@case_metrics_router.put("", response_model=list[CaseMetricPublic])
 @router.put("/cases/{case_id}/metrics", response_model=list[CaseMetricPublic])
-async def update_case_metrics(case_id: int, body: CaseMetricUpdate, ctx: ActiveOrgContext, db=Depends(get_session)):
+async def update_case_metrics(
+    case_id: int,
+    body: CaseMetricUpdate,
+    ctx: ActiveOrgContext,
+    db=Depends(get_session),
+    _case_perm: CaseAuthContext = require_case_permission("write:case"),
+):
     from datetime import UTC, datetime
     now = datetime.now(UTC)
     for mid, val in body.metrics.items():
-        row = CaseMetricValue(case_id=case_id, metric_id=uuid.UUID(mid), value=val, updated_at=now)
+        metric_id = uuid.UUID(mid)
+        # Validate metric belongs to the active organisation
+        m = await db.get(Metric, metric_id)
+        if not m or m.organisation_id != ctx.organisation_id:
+            raise HTTPException(404, f"Metric {mid} not found")
+        row = CaseMetricValue(
+            case_id=case_id,
+            metric_id=metric_id,
+            value=val,
+            updated_at=now,
+        )
         await db.merge(row)
     await db.flush()
     # Return updated
@@ -110,17 +136,17 @@ async def create_dashboard(body: DashboardCreate, ctx: ActiveOrgContext, db=Depe
 
 
 @dash_router.patch("/{dashboard_id}", response_model=DashboardPublic)
-async def update_dashboard(did: uuid.UUID, body: DashboardUpdate, ctx: ActiveOrgContext, db=Depends(get_session)):
+async def update_dashboard(dashboard_id: uuid.UUID, body: DashboardUpdate, ctx: ActiveOrgContext, db=Depends(get_session)):
     await _ensure_admin(ctx)
-    d = await db.get(Dashboard, did)
+    d = await db.get(Dashboard, dashboard_id)
     if not d or d.organisation_id != ctx.organisation_id: raise HTTPException(404, "Not found")
     for k, v in body.model_dump(exclude_unset=True).items(): setattr(d, k, v)
     d.updated_by = str(ctx.user.id); db.add(d); await db.flush(); return DashboardPublic(**d.__dict__)
 
 
 @dash_router.delete("/{dashboard_id}", status_code=204)
-async def delete_dashboard(did: uuid.UUID, ctx: ActiveOrgContext, db=Depends(get_session)):
+async def delete_dashboard(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db=Depends(get_session)):
     await _ensure_admin(ctx)
-    d = await db.get(Dashboard, did)
+    d = await db.get(Dashboard, dashboard_id)
     if not d or d.organisation_id != ctx.organisation_id: raise HTTPException(404, "Not found")
     await db.delete(d); await db.flush()

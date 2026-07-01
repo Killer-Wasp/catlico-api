@@ -77,7 +77,7 @@ async def update_page(
         ]
     for k, v in update_data.items():
         setattr(page, k, v)
-    page.updated_at = datetime.now(UTC)
+    page.updated_at = datetime.now(UTC).replace(tzinfo=None)
     page.updated_by = updated_by
     session.add(page)
     await session.flush()
@@ -87,7 +87,7 @@ async def update_page(
 async def delete_page(
     session: AsyncSession, page: KnowledgeBasePage, deleted_by: str
 ) -> None:
-    page.deleted_at = datetime.now(UTC)
+    page.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     page.deleted_by = deleted_by
     session.add(page)
     await session.flush()

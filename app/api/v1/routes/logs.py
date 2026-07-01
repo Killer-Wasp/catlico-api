@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.api.v1.routes._files import attach_case_blob, ingest_upload, stream_blob
 from app.api.v1.routes.tasks import _require, _resolve_task_visibility
 from app.core.db import get_session
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/cases/{case_id}/tasks/{task_id}/logs", tags=["logs"]
 
 async def _resolve_log(
     session: AsyncSession,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     case_id: int,
     task_id: int,
     log_id: int,
@@ -38,7 +38,7 @@ async def get_log(
     case_id: int,
     task_id: int,
     log_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> LogPublic:
     log, _, perms = await _resolve_log(session, ctx, case_id, task_id, log_id)
@@ -52,7 +52,7 @@ async def update_log(
     task_id: int,
     log_id: int,
     log_in: LogUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> LogPublic:
     log, _, perms = await _resolve_log(session, ctx, case_id, task_id, log_id)
@@ -65,7 +65,7 @@ async def delete_log(
     case_id: int,
     task_id: int,
     log_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     log, is_owner, perms = await _resolve_log(session, ctx, case_id, task_id, log_id)
@@ -89,7 +89,7 @@ async def upload_log_attachment(
     case_id: int,
     task_id: int,
     log_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     storage: Annotated[BlobStorage, Depends(get_storage)],
     file: Annotated[UploadFile, File()],
@@ -119,7 +119,7 @@ async def list_log_attachments(
     case_id: int,
     task_id: int,
     log_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -149,7 +149,7 @@ async def download_log_attachment(
     task_id: int,
     log_id: int,
     attachment_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     storage: Annotated[BlobStorage, Depends(get_storage)],
 ):
@@ -168,7 +168,7 @@ async def delete_log_attachment(
     task_id: int,
     log_id: int,
     attachment_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     log, is_owner, perms = await _resolve_log(session, ctx, case_id, task_id, log_id)

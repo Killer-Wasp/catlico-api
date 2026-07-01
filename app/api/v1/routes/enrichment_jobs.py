@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import enrichment as enrichment_crud
 from app.models.common import Page
@@ -75,7 +75,7 @@ def _to_row(job: EnrichmentJob, display_name: str) -> EnrichmentJobRow:
 
 @router.get("", response_model=Page[EnrichmentJobRow])
 async def list_enrichment_jobs(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     status: Annotated[str | None, Query()] = None,
     skip: int = 0,
@@ -95,7 +95,7 @@ async def list_enrichment_jobs(
 @router.get("/{job_id}", response_model=EnrichmentJobDetail)
 async def get_enrichment_job(
     job_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> EnrichmentJobDetail:
     _require("read:observable", ctx.permissions)
@@ -122,7 +122,7 @@ async def get_enrichment_job(
 @router.post("/{job_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
 async def cancel_enrichment_job(
     job_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     """Drop a job that hasn't finished. Queued jobs are removed before they run;
@@ -142,7 +142,7 @@ async def cancel_enrichment_job(
 
 @router.post("/retry-failed")
 async def retry_failed_jobs(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
     """Requeue every failed job for the org so the analyzer picks them up again."""
@@ -153,7 +153,7 @@ async def retry_failed_jobs(
 
 @router.post("/clear-finished")
 async def clear_finished_jobs(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
     """Remove the org's terminal jobs (success/failure/cancelled) from the queue."""

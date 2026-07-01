@@ -175,7 +175,7 @@ async def delete_link(
 ) -> None:
     """Soft-delete the reference. The blob itself is left in place — it is
     content-addressed and may be referenced by other links (GC is out of scope)."""
-    link.deleted_at = datetime.now(UTC)
+    link.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     link.deleted_by = deleted_by
     session.add(link)
     await session.flush()

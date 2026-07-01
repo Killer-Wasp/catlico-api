@@ -5,6 +5,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
+from app.core.configs import settings
 from app.core.db import get_session
 from app.core.security import (
     TokenPayload,
@@ -14,9 +15,9 @@ from app.core.security import (
     decode_refresh_token,
 )
 from app.crud.auth import get_valid_refresh_user_id, issue_refresh_token
+from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
 from app.models.auth import ForgotPasswordRequest, ResetPasswordRequest
-from app.models.user import User
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -160,33 +161,45 @@ async def forgot_password(
     body: ForgotPasswordRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
-    """Request a password reset link. Stub: email delivery deferred."""
+    """Request a password reset link. Always returns the same response."""
     import hashlib, secrets
     from datetime import UTC, datetime, timedelta
     from sqlmodel import select
     from app.models.auth import PasswordResetToken
     from app.models.user import User as UserModel
+    from app.services import password_reset_delivery
 
+    public = {"message": "If the email is registered, a reset link has been sent"}
     result = await session.execute(select(UserModel).where(UserModel.email == body.email))
     user = result.scalar_one_or_none()
     if user is None:
-        # Don't reveal whether the email exists
-        return {"message": "If the email is registered, a reset link has been sent"}
+        return public
+
+    now = datetime.now(UTC)
+    recent_cutoff = now - timedelta(seconds=settings.PASSWORD_RESET_THROTTLE_SECONDS)
+    existing = await session.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+            PasswordResetToken.created_at >= recent_cutoff,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        return public
 
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     token = PasswordResetToken(
         user_id=user.id,
         token_hash=token_hash,
-        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        expires_at=now + timedelta(hours=1),
     )
     session.add(token)
     await session.flush()
 
-    # ponytail: email delivery deferred; log the token for dev
-    import logging
-    logging.getLogger(__name__).info("Password reset token for %s: %s", body.email, raw_token)
-    return {"message": "If the email is registered, a reset link has been sent"}
+    # No raw-token logging. Delivery is a no-op unless SMTP is configured.
+    await password_reset_delivery.send_password_reset_email(user.email, raw_token)
+    return public
 
 
 @router.post("/password/reset")

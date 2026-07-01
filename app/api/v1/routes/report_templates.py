@@ -7,7 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.api.deps import ActiveOrgContext, CaseAuthContext, require_case_permission
+from app.api.deps import (
+    ActiveOrgContext,
+    CaseAuthContext,
+    _resolve_case_context,
+    require_case_permission,
+)
 from app.core.db import get_session
 from app.models.report_template import (
     ReportTemplate, ReportTemplateCreate, ReportTemplateUpdate, ReportTemplatePublic,
@@ -38,18 +43,18 @@ async def create_template(body: ReportTemplateCreate, ctx: ActiveOrgContext, db=
 
 
 @router.patch("/{template_id}", response_model=ReportTemplatePublic)
-async def update_template(tid: uuid.UUID, body: ReportTemplateUpdate, ctx: ActiveOrgContext, db=Depends(get_session)):
+async def update_template(template_id: uuid.UUID, body: ReportTemplateUpdate, ctx: ActiveOrgContext, db=Depends(get_session)):
     _ensure_admin(ctx)
-    t = await db.get(ReportTemplate, tid)
+    t = await db.get(ReportTemplate, template_id)
     if not t or t.organisation_id != ctx.organisation_id: raise HTTPException(404, "Not found")
     for k, v in body.model_dump(exclude_unset=True).items(): setattr(t, k, v)
     t.updated_by = str(ctx.user.id); db.add(t); await db.flush(); return ReportTemplatePublic(**t.__dict__)
 
 
 @router.delete("/{template_id}", status_code=204)
-async def delete_template(tid: uuid.UUID, ctx: ActiveOrgContext, db=Depends(get_session)):
+async def delete_template(template_id: uuid.UUID, ctx: ActiveOrgContext, db=Depends(get_session)):
     _ensure_admin(ctx)
-    t = await db.get(ReportTemplate, tid)
+    t = await db.get(ReportTemplate, template_id)
     if not t or t.organisation_id != ctx.organisation_id: raise HTTPException(404, "Not found")
     await db.delete(t); await db.flush()
 
@@ -69,6 +74,8 @@ async def render_case_report(
     t = await db.get(ReportTemplate, template_id)
     if not t or t.organisation_id != ctx.organisation_id:
         raise HTTPException(404, "Template not found")
+    # Verify case visibility before rendering
+    await _resolve_case_context(case_id, ctx, db)
     from app.services.case_reporting import render_report
     try:
         content = await render_report(db, t, case_id, fmt=fmt)

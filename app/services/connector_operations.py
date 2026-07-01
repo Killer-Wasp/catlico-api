@@ -17,10 +17,12 @@ from app.crud import audit as audit_crud
 from app.crud import case_ as case_crud
 from app.crud import comment as comment_crud
 from app.crud import flag as flag_crud
+from app.crud import organisation_member as member_crud
 from app.crud import observable as obs_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
 from app.crud.connector import get as get_connector
+from app.util.ids import parse_task_id
 
 
 class OperationKind(str, Enum):
@@ -85,12 +87,21 @@ async def _validate_operation(
         task_id = params.get("task_id")
         if not task_id:
             return "close_task requires 'task_id' param"
+        if not str(task_id).startswith("T-") and case_id is None:
+            return "close_task requires a public task id or a case context"
 
     elif kind == OperationKind.assign_case:
         if not case_id:
             return "assign_case requires a case context"
-        if not params.get("assignee_id"):
+        assignee_id = params.get("assignee_id")
+        if not assignee_id:
             return "assign_case requires 'assignee_id' param"
+        try:
+            assignee_uuid = uuid.UUID(str(assignee_id))
+        except ValueError:
+            return "assign_case requires a valid assignee_id UUID"
+        if await member_crud.get_member(session, assignee_uuid, organisation_id) is None:
+            return "Assignee must be a member of the organisation"
 
     elif kind == OperationKind.update_observable:
         obs_id = params.get("observable_id")
@@ -164,7 +175,7 @@ async def _apply_one(
     if op.kind == OperationKind.add_tag:
         tag_name = params["tag"]
         if case_id:
-            case = await case_crud.get_case(session, case_id, organisation_id)
+            case = await case_crud.get_case(session, case_id)
             if case is None:
                 return "Case not found"
             await flag_crud.attach_tag(session, case, tag_name, actor=actor)
@@ -181,25 +192,28 @@ async def _apply_one(
             session,
             task_in,
             case_id=case_id,
+            organisation_id=organisation_id,
             created_by=actor,
         )
 
     elif op.kind == OperationKind.add_comment:
-        from app.models.comment import CommentCreate
+        from app.models.comment import CommentCreate, CommentEntityType
         comment_in = CommentCreate(
             message=params["message"],
         )
         await comment_crud.create_comment(
             session,
             comment_in,
-            case_id=case_id,
+            entity_type=CommentEntityType.case,
+            entity_id=str(case_id),
+            organisation_id=organisation_id,
             created_by=actor,
         )
 
     elif op.kind == OperationKind.update_case:
         allowed = {k for k in params if k in ("title", "description", "severity", "status", "tlp", "pap")}
         if allowed:
-            case = await case_crud.get_case(session, case_id, organisation_id)
+            case = await case_crud.get_case(session, case_id)
             if case is None:
                 return "Case not found"
             from app.models.case_ import CaseUpdate
@@ -217,21 +231,48 @@ async def _apply_one(
         if allowed:
             from app.models.observable import ObservableUpdate
             update = ObservableUpdate(**{k: params[k] for k in allowed})
-            await obs_crud.update_observable(session, obs, update)
+            await obs_crud.update_observable(session, obs, update, updated_by=actor)
 
     elif op.kind == OperationKind.close_task:
         task_id = params.get("task_id")
-        task = await task_crud.get_task_by_public_id(session, task_id) if task_id else None
+        task = None
+        if task_id:
+            try:
+                close_case_id, close_task_id = parse_task_id(str(task_id))
+            except ValueError:
+                if case_id is None:
+                    return f"Task '{task_id}' not found"
+                try:
+                    close_case_id = case_id
+                    close_task_id = int(task_id)
+                except (TypeError, ValueError):
+                    return f"Task '{task_id}' not found"
+            task = await task_crud.get_task(session, close_case_id, close_task_id)
         if task is None:
             return f"Task '{task_id}' not found"
-        await task_crud.close_task(session, task, closed_by=actor)
+        if task.organisation_id != organisation_id:
+            return f"Task '{task_id}' not found"
+        from app.models.task import TaskStatus, TaskUpdate
+
+        await task_crud.update_task(
+            session,
+            task,
+            TaskUpdate(status=TaskStatus.completed),
+            updated_by=actor,
+        )
 
     elif op.kind == OperationKind.assign_case:
         assignee_id = params.get("assignee_id")
-        case = await case_crud.get_case(session, case_id, organisation_id)
+        case = await case_crud.get_case(session, case_id)
         if case is None:
             return "Case not found"
-        case.assignee = assignee_id
-        session.add(case)
+        from app.models.case_ import CaseUpdate
+
+        await case_crud.update_case(
+            session,
+            case,
+            CaseUpdate(assignee_id=uuid.UUID(str(assignee_id))),
+            updated_by=actor,
+        )
 
     return None

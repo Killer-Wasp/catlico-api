@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import custom_field as cf_crud
 from app.models.common import Page
@@ -17,7 +17,7 @@ from app.models.custom_field import (
 router = APIRouter(prefix="/custom-fields", tags=["custom-fields"])
 
 
-def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
+def _require_perm(ctx: ActiveOrgOrApiKeyContext, permission: str) -> None:
     if permission not in ctx.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -26,7 +26,7 @@ def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
 
 
 async def _resolve(
-    session: AsyncSession, ctx: ActiveOrgContext, field_id: int
+    session: AsyncSession, ctx: ActiveOrgOrApiKeyContext, field_id: int
 ) -> CustomField:
     field = await cf_crud.get_field(session, field_id, ctx.organisation_id)
     if field is None:
@@ -38,7 +38,7 @@ async def _resolve(
 
 @router.get("/", response_model=Page[CustomFieldPublic])
 async def list_custom_fields(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -59,7 +59,7 @@ async def list_custom_fields(
 @router.post("/", response_model=CustomFieldPublic, status_code=status.HTTP_201_CREATED)
 async def create_custom_field(
     field_in: CustomFieldCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CustomFieldPublic:
     _require_perm(ctx, "write:custom_field")
@@ -86,7 +86,7 @@ async def create_custom_field(
 async def update_custom_field(
     field_id: int,
     field_in: CustomFieldUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CustomFieldPublic:
     _require_perm(ctx, "write:custom_field")
@@ -105,7 +105,7 @@ async def update_custom_field(
 @router.delete("/{field_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_custom_field(
     field_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     _require_perm(ctx, "write:custom_field")

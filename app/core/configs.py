@@ -67,6 +67,17 @@ class Settings(BaseSettings):
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
     DEFAULT_ADMIN_PASSWORD: str = "changeme"
 
+    # Password reset delivery. If SMTP_HOST is unset, reset tokens are stored but
+    # not delivered (same public response, no raw-token logging).
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM_EMAIL: str = "no-reply@catlico.local"
+    SMTP_USE_TLS: bool = True
+    PASSWORD_RESET_PATH: str = "/reset-password"
+    PASSWORD_RESET_THROTTLE_SECONDS: int = 300
+
     # Connector / analyzer engine.
     # Shared secret the catlico-connector-engine service presents (Bearer) to register and
     # pull work. Unset ⇒ analyzer endpoints reject all callers. Per-org API keys
@@ -89,6 +100,11 @@ class Settings(BaseSettings):
     ANALYZER_LEASE_GRACE_SECONDS: int = 30
     # Give up after this many lease attempts and mark the job failed.
     ANALYZER_MAX_ATTEMPTS: int = 3
+
+    # Function runner mode.
+    # - "stub": test stub marks every run successful (no sandbox). Local/test only.
+    # - "disabled": reject queued runs with a clear status. Production default.
+    FUNCTION_RUNNER_MODE: Literal["disabled", "stub"] = "disabled"
 
     # Blob storage for file attachments / file observables.
     # Backed by fsspec, so the same code targets local FS, S3 (incl. SeaweedFS/MinIO),

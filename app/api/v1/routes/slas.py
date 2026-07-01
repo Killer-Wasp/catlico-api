@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import sla as sla_crud
 from app.models.common import Page
@@ -12,7 +12,7 @@ from app.models.sla import SlaPolicyPublic, SlaPolicyUpsert
 router = APIRouter(prefix="/sla-policies", tags=["sla-policies"])
 
 
-def _ensure_org_admin(ctx: ActiveOrgContext) -> None:
+def _ensure_org_admin(ctx: ActiveOrgOrApiKeyContext) -> None:
     if "write:organisation" not in ctx.permissions and not ctx.user.is_superadmin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Organisation admin required"
@@ -21,7 +21,7 @@ def _ensure_org_admin(ctx: ActiveOrgContext) -> None:
 
 @router.get("/", response_model=Page[SlaPolicyPublic])
 async def list_sla_policies(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -44,7 +44,7 @@ async def list_sla_policies(
 @router.put("/", response_model=list[SlaPolicyPublic])
 async def upsert_sla_policies(
     policies_in: list[SlaPolicyUpsert],
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[SlaPolicyPublic]:
     _ensure_org_admin(ctx)

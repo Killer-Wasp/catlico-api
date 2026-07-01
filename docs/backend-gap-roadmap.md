@@ -9,6 +9,8 @@ Companion docs:
 - `catlico-konnect/docs/gap-analysis.md` — the konnect-side detail (responders, blob, porting).
 - `docs/blocked-features-schema-plan.md` — the schema-layer plan for Workstream A models + migrations (all DONE).
 
+> Last updated: 2026-06-28 — aligned with remediation review.
+
 Findings are concrete: `catlico-api`'s `app/` is clean (no half-finished TODOs),
 so "missing" means features with no crud/route/migration — not broken code.
 Workstream A models are written; see [blocked-features-schema-plan.md](blocked-features-schema-plan.md).
@@ -17,7 +19,15 @@ Workstream A models are written; see [blocked-features-schema-plan.md](blocked-f
 
 ## Already built — do NOT rebuild
 
-- `GET/PATCH users/me` (`app/api/v1/routes/users.py`); CustomFields (model+crud+route, mounted in `app/api/v1/main.py`); full case/alert/task/log/observable/comment/template/role/org CRUD; audit write-path + outbox **drain** (consumer registry present but empty); connectors list/config/test/enable; **manual** enrichment.
+- `GET/PATCH users/me` (`app/api/v1/routes/users.py`); CustomFields (model+crud+route, mounted in `app/api/v1/main.py`); full case/alert/task/log/observable/comment/template/role/org CRUD; audit write-path + outbox **drain**; connectors list/config/test/enable; **manual** enrichment.
+- **MITRE ATT&CK Pattern / Procedure** — models, routes, and case linkage exist (`app/api/v1/routes/patterns.py`).
+- **Notification feed + delivery** — outbox consumers, user notification feed (`GET/PATCH notifications/`), webhook/Slack notifier delivery all implemented.
+- **Outbox consumers** — registered and operational: notification feed, notifier dispatch, WebSocket stream.
+- **WebSocket activity stream** — `/api/v1/activity` endpoint + `websocket_hub` exist.
+- **API-key auth** — CRUD (`/api/v1/api-keys/`) + request authentication wired. 14 programmatic routes accept API keys via `ActiveOrgOrApiKeyContext`. Org-admin routes (api-keys, notifications, organisations) remain JWT-only.
+- **Enrichment automation** — auto-enqueue on JSON case/alert observable creation (B2: mostly done; file observable endpoints not yet enqueuing). Verdict rollup (B3), artifact provenance (B4), konnect periodic register (B5) done.
+- **Event envelope + outbox contract** (A1) done.
+- **Responder scaffold** — source catalog (E0), partial API + Konnect SDK scaffold (E1/E2). End-to-end integration (E3) pending.
 - **Enrichment (manual path, end-to-end)**: konnect registers manifests at startup → `POST observables/{id}/enrich` enqueues → worker claims via `internal/analyzer/work` (SELECT…FOR UPDATE SKIP LOCKED, leases) → posts to `…/result` → API stores report, replaces `ReportTag`s, imports extracted artifacts as case observables.
 - **Observable types** — `observable_types.py` route (GET/POST/DELETE) mounted; `ObservableType` model + `BUILTIN_OBSERVABLE_TYPES` seed in `app/models/observable.py`.
 - **Organisation links** — `GET/POST/PATCH/DELETE organisations/{org_id}/links` live inside `app/api/v1/routes/organisations.py`; model + crud in `organisation_link.py`.
@@ -33,12 +43,12 @@ and API endpoints are live:
 
 | Feature | Endpoints | Powers web stub | Status |
 |---|---|---|---|
-| Functions / automation | `GET/POST/PATCH/DELETE functions/`, `POST functions/{id}/toggle`, `POST functions/{id}/run` | FunctionsPage | ✅ CRUD done; execution runtime NOT yet implemented |
+| Functions / automation | `GET/POST/PATCH/DELETE functions/`, `POST functions/{id}/toggle`, `POST functions/{id}/run` | FunctionsPage | ✅ CRUD done; execution runtime is test-stub (needs sandbox gating) |
 | Knowledge Base | `GET/POST/PATCH/DELETE knowledge-base/` (pages w/ block content) | KnowledgeBase | ✅ DONE |
-| API keys | `GET/POST api-keys/`, `DELETE api-keys/{id}` | Settings → ApiKeysPanel | ✅ CRUD done; request authentication NOT yet implemented |
+| API keys | `GET/POST api-keys/`, `DELETE api-keys/{id}` | Settings → ApiKeysPanel | ✅ CRUD + request auth done (P0.1 remediated 2026-06-28) |
 | SLA policies | `GET sla-policies/`, `PUT sla-policies/` (bulk upsert) | Settings → SlaPanel | ✅ DONE |
-| Notification rules + Notifiers | `GET/PATCH notification-rules/`, `GET/POST/PATCH notifiers/` | Settings → NotificationsPanel | ✅ CRUD done; notifier delivery NOT yet implemented |
-| User Notifications feed | `GET notifications/`, `PATCH notifications/{id}`, `POST notifications/read-all` | Header notifications bell | NOT yet implemented (needs outbox consumers) |
+| Notification rules + Notifiers | `GET/PATCH notification-rules/`, `GET/POST/PATCH notifiers/` | Settings → NotificationsPanel | ✅ CRUD + delivery done (webhook/slack) |
+| User Notifications feed | `GET notifications/`, `PATCH notifications/{id}`, `POST notifications/read-all` | Header notifications bell | ✅ DONE (outbox consumers operational) |
 
 > Workstream A CRUD is complete. Remaining sub-items are **execution/delivery**
 > behavior (function sandbox, notifier dispatch, API-key auth, notification feed),
@@ -54,8 +64,8 @@ and API endpoints are live:
 
 ## Workstream C — Domain-model completeness
 
-- **MITRE ATT&CK Pattern / Procedure** — fully absent (AGENTS.md "not built yet"). New `Pattern`/`Procedure` models + case linkage + route (`GET patterns/`, `PUT cases/{id}/procedures`). → web "ATT&CK matrix" nav item (currently a dead link).
-- **Audit outbox consumers** — `register_consumer`/`_consumers` exists but empty in `app/crud/audit.py`; the poller in `app/main.py` drains to nothing. Register real consumers: **notification fan-out** (feeds A's user feed), **notifier dispatch** (Slack/Email/Webhook from A), and a **stream** seam. This is the spine that makes A's notifications real instead of polled tables.
+- **MITRE ATT&CK Pattern / Procedure** — ✅ DONE. Models, routes, and case linkage exist at `app/api/v1/routes/patterns.py`.
+- **Audit outbox consumers** — ✅ DONE. Consumers registered and operational for notification fan-out, notifier dispatch, and WebSocket stream.
 - **Cascade child audit rows** — on parent soft-delete, child audit rows orphan (AGENTS.md "still to wire"). Add cascade in the delete CRUD paths.
 
 ---
@@ -64,21 +74,21 @@ and API endpoints are live:
 
 Manual enrich works; automation does not.
 
-- **Auto-enrich on creation** — observables created via case/alert routes never enqueue jobs (`app/api/v1/routes/cases.py` `create_case_observable` just returns). Add an outbox consumer (or post-create hook) that enqueues all org-enabled connectors matching the observable type, reusing `enrichment_crud.enqueue()` (`app/crud/enrichment.py`).
-- **Observable verdict rollup** — verdict lives only per-job; the observable has no rolled-up worst-verdict field. Add `verdict` to `Observable`, recompute on result ingestion in `enrichment_crud.submit_result()` from `ReportTag`s.
-- **Periodic catalog re-sync** — konnect only registers manifests at startup; stale until restart. Re-register on an interval / heartbeat.
-- **Artifact lineage** — extracted artifacts drop the connector context/`message`; persist provenance.
+- **Auto-enrich on creation** — ✅ Mostly done. JSON case/alert observable creation enqueues; file observable endpoints do not enqueue yet.
+- **Observable verdict rollup** — ✅ DONE. `Observable.verdict` recomputed on result ingestion.
+- **Periodic catalog re-sync** — ✅ DONE. Konnect periodic register implemented.
+- **Artifact lineage** — ✅ DONE. Provenance persisted with connector context.
 
 ---
 
 ## Workstream E — Responder capability (cross-cutting: api + konnect SDK)
 
-The largest net-new capability. Today everything is analyzer-only; `responder` is
-a reserved-but-commented enum in `app/models/connector.py` and the konnect SDK
-hardcodes `connector_type = "analyzer"`.
+The largest net-new capability. Today everything is analyzer-first; responder
+scaffolding is partial (source catalog done, API route stubbed, Konnect worker
+branch exists but not in main loop).
 
-- **api**: activate `ConnectorType.responder`; responder job lease/claim/result endpoints (parallel to the analyzer ones in `app/api/internal/routes/analyzer.py`); add `operations` to `ResultSubmit` (`app/models/enrichment.py`) and an ingestion path that **applies case mutations** (add-tag, create-task, change-tlp, …) safely under tenancy.
-- **konnect/sdk**: new `Responder` base class + `ActionResult` model; worker branch for operations; client endpoints for responder claim/submit.
+- **api**: activate `ConnectorType.responder`; build responder job lease/claim/result endpoints (currently stubbed at `/api/internal/responder/work`); add `operations` to `ResultSubmit` (`app/models/enrichment.py`) and an ingestion path that **applies case mutations** (add-tag, create-task, change-tlp, …) safely under tenancy.
+- **konnect/sdk**: finish `Responder` base class + `ActionResult` model; wire responder polling in worker main loop; client endpoints for responder claim/submit.
 - **web**: the Connectors page already models `kind: analyzer | responder` — it lights up once the backend supports it.
 
 ---
@@ -94,15 +104,18 @@ See `catlico-konnect/docs/gap-analysis.md`. Current: **40 of 275 flavors done**
 
 ---
 
-## Current milestone order
+## Current milestone order (post-remediation 2026-06-28)
 
-1. **Operational Spine** — outbox consumers, notification feed, notifier delivery, WebSocket stream
-2. **Enrichment Automation** — auto-enrich, verdict rollup, artifact provenance, konnect periodic register
-3. **API-Key Auth** — request authentication with API keys
-4. **Functions Runtime** — queued execution, sandboxed runner, scoped identity
-5. **Responders** — action connectors, operation schema, konnect responder SDK
-6. **Threat Intel Depth** — MITRE, MISP, file analyzer lease, local-tool worker mode
-7. **Analytics/Auth Hardening** — timeline, metrics, dashboards, reporting, sessions, password reset, OIDC/SAML
+Items marked ✅ are done; ❌ are remaining.
+
+1. ✅ Operational Spine — outbox consumers, notification feed, notifier delivery, WebSocket stream
+2. ✅ Enrichment Automation — auto-enrich, verdict rollup, artifact provenance, konnect periodic register
+3. ✅ API-Key Auth — request authentication with API keys (wired to 14 programmatic routes)
+4. ❌ Functions Runtime — test-stub needs sandbox gating (P1.3)
+5. ❌ Responders — action connectors, operation schema, konnect responder SDK (P1.2)
+6. ❌ File/Blob Analyzer Leases — file_ref in work items (P1.1)
+7. ❌ Threat Intel Depth — MISP import/export stubs (P1.4), local-tool worker mode (P2.3)
+8. ❌ Analytics/Auth Hardening — password reset delivery (P2.1), OIDC/SAML (P2.2)
 
 ## Suggested phasing (superseded by above)
 

@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import case_template as ct_crud
 from app.crud import tag as tag_crud
@@ -22,7 +22,7 @@ from app.models.tag import TaggableType, TagSetRequest
 router = APIRouter(prefix="/case-templates", tags=["case-templates"])
 
 
-def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
+def _require_perm(ctx: ActiveOrgOrApiKeyContext, permission: str) -> None:
     if permission not in ctx.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -44,7 +44,7 @@ async def _to_public(
 
 
 async def _resolve(
-    session: AsyncSession, ctx: ActiveOrgContext, template_id: int
+    session: AsyncSession, ctx: ActiveOrgOrApiKeyContext, template_id: int
 ) -> CaseTemplate:
     tpl = await ct_crud.get_template(session, template_id, ctx.organisation_id)
     if tpl is None:
@@ -56,7 +56,7 @@ async def _resolve(
 
 @router.get("/", response_model=Page[CaseTemplatePublic])
 async def list_case_templates(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -76,7 +76,7 @@ async def list_case_templates(
 @router.post("/", response_model=CaseTemplatePublic, status_code=status.HTTP_201_CREATED)
 async def create_case_template(
     tpl_in: CaseTemplateCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CaseTemplatePublic:
     _require_perm(ctx, "write:case")
@@ -91,7 +91,7 @@ async def create_case_template(
 )
 async def import_case_template(
     doc: CaseTemplateExport,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CaseTemplatePublic:
     """Create a template in the caller's org from a portable export document."""
@@ -133,7 +133,7 @@ async def import_case_template(
 @router.get("/{template_id}/export", response_model=CaseTemplateExport)
 async def export_case_template(
     template_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CaseTemplateExport:
     """Portable JSON for sharing a playbook across orgs/instances."""
@@ -160,7 +160,7 @@ async def export_case_template(
 @router.get("/{template_id}", response_model=CaseTemplatePublic)
 async def get_case_template(
     template_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CaseTemplatePublic:
     _require_perm(ctx, "read:case")
@@ -172,7 +172,7 @@ async def get_case_template(
 async def update_case_template(
     template_id: int,
     tpl_in: CaseTemplateUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CaseTemplatePublic:
     _require_perm(ctx, "write:case")
@@ -184,7 +184,7 @@ async def update_case_template(
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_case_template(
     template_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     _require_perm(ctx, "write:case")
@@ -195,7 +195,7 @@ async def delete_case_template(
 @router.get("/{template_id}/tags", response_model=list[str])
 async def list_template_tags(
     template_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[str]:
     _require_perm(ctx, "read:case")
@@ -209,7 +209,7 @@ async def list_template_tags(
 async def set_template_tags(
     template_id: int,
     body: TagSetRequest,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[str]:
     _require_perm(ctx, "write:case")

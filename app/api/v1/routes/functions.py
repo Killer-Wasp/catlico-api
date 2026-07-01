@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import function as func_crud
 from app.models.common import Page
@@ -19,7 +19,7 @@ from app.models.function import (
 router = APIRouter(prefix="/functions", tags=["functions"])
 
 
-def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
+def _require_perm(ctx: ActiveOrgOrApiKeyContext, permission: str) -> None:
     if permission not in ctx.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -29,7 +29,7 @@ def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
 
 @router.get("/", response_model=Page[FunctionPublic])
 async def list_functions(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -49,7 +49,7 @@ async def list_functions(
 @router.get("/{function_id}", response_model=FunctionPublic)
 async def get_function(
     function_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> FunctionPublic:
     _require_perm(ctx, "read:function")
@@ -64,7 +64,7 @@ async def get_function(
 @router.post("/", response_model=FunctionPublic, status_code=status.HTTP_201_CREATED)
 async def create_function(
     func_in: FunctionCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> FunctionPublic:
     _require_perm(ctx, "write:function")
@@ -81,7 +81,7 @@ async def create_function(
 async def update_function(
     function_id: int,
     func_in: FunctionUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> FunctionPublic:
     _require_perm(ctx, "write:function")
@@ -99,7 +99,7 @@ async def update_function(
 @router.delete("/{function_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_function(
     function_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     _require_perm(ctx, "write:function")
@@ -118,7 +118,7 @@ async def delete_function(
 async def run_function(
     function_id: int,
     run_in: FunctionRunCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> FunctionRunPublic:
     _require_perm(ctx, "run:function")
@@ -147,7 +147,7 @@ async def run_function(
 @router.get("/{function_id}/runs", response_model=Page[FunctionRunPublic])
 async def list_function_runs(
     function_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -170,7 +170,7 @@ async def list_function_runs(
 @router.post("/{function_id}/toggle", response_model=FunctionPublic)
 async def toggle_function(
     function_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> FunctionPublic:
     _require_perm(ctx, "write:function")

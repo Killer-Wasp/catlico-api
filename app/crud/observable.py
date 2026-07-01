@@ -316,7 +316,7 @@ async def update_observable(
         for field, new in update_data.items()
         if getattr(observable, field, None) != new
     }
-    update_data["updated_at"] = datetime.now(UTC)
+    update_data["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
     update_data["updated_by"] = updated_by
     observable.sqlmodel_update(update_data)
     session.add(observable)
@@ -338,7 +338,7 @@ async def update_observable(
 async def delete_observable(
     session: AsyncSession, observable: Observable, deleted_by: str
 ) -> None:
-    observable.deleted_at = datetime.now(UTC)
+    observable.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     observable.deleted_by = deleted_by
     session.add(observable)
     await session.flush()

@@ -80,7 +80,7 @@ async def update_function(
     update_data = func_in.model_dump(exclude_unset=True)
     for k, v in update_data.items():
         setattr(func, k, v)
-    func.updated_at = datetime.now(UTC)
+    func.updated_at = datetime.now(UTC).replace(tzinfo=None)
     func.updated_by = updated_by
     session.add(func)
     await session.flush()
@@ -90,7 +90,7 @@ async def update_function(
 async def delete_function(
     session: AsyncSession, func: Function, deleted_by: str
 ) -> None:
-    func.deleted_at = datetime.now(UTC)
+    func.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     func.deleted_by = deleted_by
     session.add(func)
     await session.flush()
@@ -159,7 +159,7 @@ async def update_run_status(
     error: str | None = None,
 ) -> FunctionRun:
     """Transition a run to a new status (D1)."""
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(tzinfo=None)
     run.status = status
     if status == FunctionRunStatus.running and run.started_at is None:
         run.started_at = now
@@ -190,7 +190,7 @@ async def toggle_function(
     updated_by: str,
 ) -> Function:
     func.enabled = enabled
-    func.updated_at = datetime.now(UTC)
+    func.updated_at = datetime.now(UTC).replace(tzinfo=None)
     func.updated_by = updated_by
     session.add(func)
     await session.flush()

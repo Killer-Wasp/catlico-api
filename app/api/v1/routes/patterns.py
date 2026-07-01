@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext, CaseAuthContext, require_case_permission
+from app.api.deps import ActiveOrgOrApiKeyContext, CaseAuthContext, require_case_permission
 from app.core.db import get_session
 from app.crud import pattern as pattern_crud
 from app.models.common import Page
@@ -21,7 +21,7 @@ pattern_router = APIRouter(prefix="/patterns")
 
 @pattern_router.get("", response_model=Page[PatternPublic])
 async def list_patterns(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -38,7 +38,7 @@ async def list_patterns(
 @pattern_router.post("/import", response_model=list[PatternPublic])
 async def import_patterns(
     items: list[PatternImportItem],
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[PatternPublic]:
     """Bulk import/upsert ATT&CK patterns by external_id."""

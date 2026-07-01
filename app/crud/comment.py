@@ -73,7 +73,7 @@ async def update_comment(
     session: AsyncSession, comment: Comment, comment_in: CommentUpdate, updated_by: str
 ) -> Comment:
     comment.message = comment_in.message
-    comment.updated_at = datetime.now(UTC)
+    comment.updated_at = datetime.now(UTC).replace(tzinfo=None)
     comment.updated_by = updated_by
     session.add(comment)
     await session.flush()
@@ -90,7 +90,7 @@ async def update_comment(
 
 
 async def delete_comment(session: AsyncSession, comment: Comment, deleted_by: str) -> None:
-    comment.deleted_at = datetime.now(UTC)
+    comment.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     comment.deleted_by = deleted_by
     session.add(comment)
     await session.flush()

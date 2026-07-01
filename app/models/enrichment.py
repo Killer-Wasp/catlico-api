@@ -91,6 +91,7 @@ class WorkItem(SQLModel):
     job_id: uuid.UUID
     lease_token: uuid.UUID
     connector_name: str
+    connector_type: str = "analyzer"
     connector_version: str
     data_type: str
     data: str

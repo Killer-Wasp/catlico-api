@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.api.v1.routes._files import stream_blob
 from app.core.configs import settings
 from app.core.db import get_session
@@ -37,7 +37,7 @@ router = APIRouter(prefix="/observables", tags=["observables"])
 
 async def _resolve_observable_visibility(
     session: AsyncSession,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     observable_id: uuid.UUID,
 ) -> tuple[Observable, bool, set[str]]:
     """Return (observable, is_owner, effective_permissions) for the active org.
@@ -88,7 +88,7 @@ def _require(perm: str, perms: set[str]) -> None:
 
 @router.get("/", response_model=Page[ObservablePublic])
 async def list_observables(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -114,7 +114,7 @@ async def list_observables(
 @router.get("/{observable_id}", response_model=ObservablePublic)
 async def get_observable(
     observable_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ObservablePublic:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
@@ -126,7 +126,7 @@ async def get_observable(
 async def update_observable(
     observable_id: uuid.UUID,
     obs_in: ObservableUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ObservablePublic:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
@@ -137,7 +137,7 @@ async def update_observable(
 @router.delete("/{observable_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_observable(
     observable_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     obs, is_owner, perms = await _resolve_observable_visibility(session, ctx, observable_id)
@@ -153,7 +153,7 @@ async def delete_observable(
 @router.get("/{observable_id}/file")
 async def download_observable_file(
     observable_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     storage: Annotated[BlobStorage, Depends(get_storage)],
 ):
@@ -174,7 +174,7 @@ async def download_observable_file(
 @router.get("/{observable_id}/tags", response_model=list[str])
 async def list_observable_tags(
     observable_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[str]:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
@@ -188,7 +188,7 @@ async def list_observable_tags(
 async def set_observable_tags(
     observable_id: uuid.UUID,
     body: TagSetRequest,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[str]:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
@@ -205,7 +205,7 @@ async def set_observable_tags(
 async def enrich_observable(
     observable_id: uuid.UUID,
     body: EnrichRequest,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[EnrichmentJobPublic]:
     """Dispatch enrichment to enabled connectors that accept this observable's type.
@@ -257,7 +257,7 @@ async def enrich_observable(
 @router.get("/{observable_id}/enrichments", response_model=EnrichmentOverview)
 async def list_observable_enrichments(
     observable_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> EnrichmentOverview:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)

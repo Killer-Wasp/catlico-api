@@ -4,6 +4,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Query, WebSocket, status
+from app.core.db import get_session
 from app.services.websocket_hub import get_hub
 
 logger = logging.getLogger(__name__)

@@ -12,7 +12,7 @@ from fastapi import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.api.v1.routes._files import (
     assert_attachment_type,
     attach_observable_blob,
@@ -63,7 +63,7 @@ def _alert_public(
     return pub
 
 
-def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
+def _require_perm(ctx: ActiveOrgOrApiKeyContext, permission: str) -> None:
     if permission not in ctx.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -72,7 +72,7 @@ def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
 
 
 async def _resolve_owned_alert(
-    session: AsyncSession, ctx: ActiveOrgContext, alert_id: int
+    session: AsyncSession, ctx: ActiveOrgOrApiKeyContext, alert_id: int
 ) -> Alert:
     """Return the alert iff the active org owns it (or caller is superadmin).
     Alerts are org-owned with no sharing — visibility is direct ownership."""
@@ -86,7 +86,7 @@ async def _resolve_owned_alert(
 
 @router.get("/", response_model=Page[AlertPublic])
 async def list_alerts(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -126,7 +126,7 @@ async def list_alerts(
 @router.post("/", response_model=AlertPublic)
 async def ingest_alert(
     alert_in: AlertCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     response: Response,  # set 200 (updated via dedup) vs 201 (created)
 ) -> AlertPublic:
@@ -150,7 +150,7 @@ async def ingest_alert(
 @router.get("/{alert_id}", response_model=AlertPublic)
 async def get_alert(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AlertPublic:
     _require_perm(ctx, "read:alert")
@@ -166,7 +166,7 @@ async def get_alert(
 async def update_alert(
     alert_id: int,
     alert_in: AlertUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AlertPublic:
     _require_perm(ctx, "write:alert")
@@ -211,7 +211,7 @@ async def update_alert(
 @router.delete("/{alert_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_alert(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     _require_perm(ctx, "write:alert")
@@ -227,7 +227,7 @@ async def delete_alert(
 async def promote_alert(
     alert_id: int,
     promote_in: AlertPromote,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CasePublic:
     # Consuming an alert and producing a case exercises both capabilities.
@@ -352,7 +352,7 @@ async def _import_alert_into_case(
 @router.post("/merge", response_model=CasePublic, status_code=status.HTTP_201_CREATED)
 async def merge_alerts(
     req: AlertBulkMerge,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CasePublic:
     """Merge 1+ alerts into one case — a new case, or an existing one via
@@ -502,7 +502,7 @@ async def merge_alerts(
 @router.put("/{alert_id}/flag", status_code=status.HTTP_204_NO_CONTENT)
 async def flag_alert(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     _require_perm(ctx, "read:alert")
@@ -519,7 +519,7 @@ async def flag_alert(
 @router.delete("/{alert_id}/flag", status_code=status.HTTP_204_NO_CONTENT)
 async def unflag_alert(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     _require_perm(ctx, "read:alert")
@@ -534,7 +534,7 @@ async def unflag_alert(
 @router.get("/{alert_id}/observables", response_model=Page[ObservablePublic])
 async def list_alert_observables(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -555,7 +555,7 @@ async def list_alert_observables(
 async def create_alert_observable(
     alert_id: int,
     obs_in: ObservableCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ObservablePublic:
     _require_perm(ctx, "write:observable")
@@ -587,7 +587,7 @@ async def create_alert_observable(
 )
 async def create_alert_file_observable(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     storage: Annotated[BlobStorage, Depends(get_storage)],
     file: Annotated[UploadFile, File()],
@@ -633,7 +633,7 @@ async def create_alert_file_observable(
 @router.get("/{alert_id}/tags", response_model=list[str])
 async def list_alert_tags(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[str]:
     _require_perm(ctx, "read:alert")
@@ -645,7 +645,7 @@ async def list_alert_tags(
 async def set_alert_tags(
     alert_id: int,
     body: TagSetRequest,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[str]:
     _require_perm(ctx, "write:alert")
@@ -659,7 +659,7 @@ async def set_alert_tags(
 @router.get("/{alert_id}/custom-fields", response_model=dict[str, Any])
 async def get_alert_custom_fields(
     alert_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
     _require_perm(ctx, "read:alert")
@@ -671,7 +671,7 @@ async def get_alert_custom_fields(
 async def set_alert_custom_fields(
     alert_id: int,
     body: CustomFieldValuesSet,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
     _require_perm(ctx, "write:alert")

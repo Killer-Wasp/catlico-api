@@ -123,8 +123,8 @@ async def ingest_alert(
     existing.pap = alert_in.pap
     if alert_in.external_link is not None:
         existing.external_link = alert_in.external_link
-    existing.last_sync_date = datetime.now(UTC)
-    existing.updated_at = datetime.now(UTC)
+    existing.last_sync_date = datetime.now(UTC).replace(tzinfo=None)
+    existing.updated_at = datetime.now(UTC).replace(tzinfo=None)
     existing.updated_by = created_by
     session.add(existing)
     await session.flush()
@@ -147,7 +147,7 @@ async def update_alert(
         for field, new in update_data.items()
         if getattr(alert, field, None) != new
     }
-    update_data["updated_at"] = datetime.now(UTC)
+    update_data["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
     update_data["updated_by"] = updated_by
     alert.sqlmodel_update(update_data)
     session.add(alert)
@@ -164,7 +164,7 @@ async def mark_promoted(
 ) -> Alert:
     alert.case_id = case_id
     alert.status = AlertStatus.imported
-    alert.updated_at = datetime.now(UTC)
+    alert.updated_at = datetime.now(UTC).replace(tzinfo=None)
     alert.updated_by = updated_by
     session.add(alert)
     await session.flush()
@@ -183,7 +183,7 @@ async def mark_promoted(
 
 async def delete_alert(session: AsyncSession, alert: Alert, deleted_by: str) -> None:
     """Soft delete."""
-    alert.deleted_at = datetime.now(UTC)
+    alert.deleted_at = datetime.now(UTC).replace(tzinfo=None)
     alert.deleted_by = deleted_by
     session.add(alert)
     await session.flush()

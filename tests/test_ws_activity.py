@@ -71,3 +71,16 @@ async def test_broadcast_dead_connections_cleaned():
     await hub.broadcast("org-a", {"type": "event", "event": {}})
     # Dead connection should be removed
     assert "org-a" not in hub._orgs or len(hub._orgs.get("org-a", [])) == 0
+
+
+# --- Route-level tests ----------------------------------------------------------------
+# ponytail: WebSocket route tests skipped — starlette TestClient websocket_connect
+# hangs in the current asyncpg + asyncio backend config. Hub-level tests (above)
+# cover the core broadcast/disconnect logic. Add route tests when the test
+# backend supports ASGI WebSocket sessions without blocking.
+#
+# Test plan for when backend is ready:
+#   - test_ws_route_connect_succeeds: valid JWT + org → connection accepted
+#   - test_ws_route_missing_token_fails: no token → 1008 close
+#   - test_ws_route_bad_token_fails: invalid token → 1008 close
+#   - test_ws_route_cross_org_fails: token for org-b cannot connect as org-a

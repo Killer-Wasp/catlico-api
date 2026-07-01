@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import flag as flag_crud
 from app.crud import log as log_crud
@@ -56,7 +56,7 @@ def _task_queue_public(
 
 async def _resolve_task_visibility(
     session: AsyncSession,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     case_id: int,
     task_id: int,
 ) -> tuple[Task, bool, set[str]]:
@@ -102,7 +102,7 @@ def _require(perm: str, perms: set[str]) -> None:
 
 @queue_router.get("", response_model=Page[TaskQueuePublic])
 async def list_task_queue(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -162,7 +162,7 @@ async def list_task_queue(
 async def get_task(
     case_id: int,
     task_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TaskPublic:
     task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
@@ -178,7 +178,7 @@ async def update_task(
     case_id: int,
     task_id: int,
     task_in: TaskUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TaskPublic:
     task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
@@ -217,7 +217,7 @@ async def update_task(
 async def delete_task(
     case_id: int,
     task_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     task, is_owner, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
@@ -237,7 +237,7 @@ async def delete_task(
 async def flag_task(
     case_id: int,
     task_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
@@ -255,7 +255,7 @@ async def flag_task(
 async def unflag_task(
     case_id: int,
     task_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
@@ -271,7 +271,7 @@ async def unflag_task(
 async def list_task_logs(
     case_id: int,
     task_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -293,7 +293,7 @@ async def create_task_log(
     case_id: int,
     task_id: int,
     log_in: LogCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> LogPublic:
     _, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)

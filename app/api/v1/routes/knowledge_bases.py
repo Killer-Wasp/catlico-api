@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import knowledge_base as kb_crud
 from app.models.common import Page
@@ -16,7 +16,7 @@ from app.models.knowledge_base import (
 router = APIRouter(prefix="/knowledge-base", tags=["knowledge-base"])
 
 
-def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
+def _require_perm(ctx: ActiveOrgOrApiKeyContext, permission: str) -> None:
     if permission not in ctx.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -26,7 +26,7 @@ def _require_perm(ctx: ActiveOrgContext, permission: str) -> None:
 
 @router.get("/", response_model=Page[KnowledgeBasePagePublic])
 async def list_kb_pages(
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
@@ -47,7 +47,7 @@ async def list_kb_pages(
 @router.post("/", response_model=KnowledgeBasePagePublic, status_code=status.HTTP_201_CREATED)
 async def create_kb_page(
     page_in: KnowledgeBasePageCreate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> KnowledgeBasePagePublic:
     _require_perm(ctx, "write:knowledge_base")
@@ -64,7 +64,7 @@ async def create_kb_page(
 async def update_kb_page(
     page_id: int,
     page_in: KnowledgeBasePageUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> KnowledgeBasePagePublic:
     _require_perm(ctx, "write:knowledge_base")
@@ -82,7 +82,7 @@ async def update_kb_page(
 @router.delete("/{page_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_kb_page(
     page_id: int,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     _require_perm(ctx, "write:knowledge_base")

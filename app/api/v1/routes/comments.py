@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import comment as comment_crud
 from app.crud import user as user_crud
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/comments", tags=["comments"])
 
 
 async def _resolve_comment(
-    session: AsyncSession, ctx: ActiveOrgContext, comment_id: uuid.UUID
+    session: AsyncSession, ctx: ActiveOrgOrApiKeyContext, comment_id: uuid.UUID
 ) -> Comment:
     """Comments ride the parent's visibility. Today the only parent is a case, so the
     active org must be able to see that case."""
@@ -37,7 +37,7 @@ async def _resolve_comment(
 async def update_comment(
     comment_id: uuid.UUID,
     comment_in: CommentUpdate,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CommentPublic:
     comment = await _resolve_comment(session, ctx, comment_id)
@@ -70,7 +70,7 @@ async def update_comment(
 @router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_comment(
     comment_id: uuid.UUID,
-    ctx: ActiveOrgContext,
+    ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     comment = await _resolve_comment(session, ctx, comment_id)

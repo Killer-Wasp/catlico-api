@@ -325,7 +325,7 @@ async def delete_case(session: AsyncSession, case: Case, deleted_by: str) -> Non
     — its tasks, those tasks' logs, its observables, and its comments. Mirrors
     delete_task's task->log cascade, widened to the case scope. CaseShare rows are
     left intact; reads exclude the case via its deleted_at, so they never surface it."""
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(tzinfo=None)
     case.deleted_at = now
     case.deleted_by = deleted_by
     session.add(case)
@@ -767,7 +767,7 @@ async def merge_cases(
     )
 
     # Freeze sources + record lineage.
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(tzinfo=None)
     for case in sources:
         case.status = CaseStatus.duplicated
         case.resolution_status = CaseResolutionStatus.duplicated

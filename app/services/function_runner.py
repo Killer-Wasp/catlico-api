@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import AsyncSessionLocal
+from app.core.configs import settings
 from app.crud.audit import record_audit
 from app.crud.function import (
     create_run,
@@ -44,11 +45,63 @@ RUNNER_POLL_INTERVAL = 5.0
 async def _execute_function(
     session: AsyncSession, func: Function, run: FunctionRun
 ) -> None:
-    """Execute a single function run. v1 test stub: mark success immediately.
-    Real implementation would sandbox-execute func.code with the scoped token.
+    """Execute a single function run.
 
-    ponytail: test stub; replace with subprocess/jail sandbox when needed.
+    In "disabled" mode (production default), marks the run as failure with a
+    clear status. In "stub" mode (local/test), marks immediate success without
+    executing user code.
+
+    ponytail: test stub or disabled; replace with subprocess/jail sandbox when
+    the real sandbox exists.
     """
+    if settings.FUNCTION_RUNNER_MODE == "disabled":
+        await update_run_status(
+            session,
+            run,
+            FunctionRunStatus.failure,
+            error="Function sandbox not available (FUNCTION_RUNNER_MODE=disabled)",
+        )
+        await record_audit(
+            session,
+            action="function.run.failed",
+            obj=run,
+            actor=f"function:{func.id}",
+            organisation_id=func.organisation_id,
+            details={
+                "function_id": func.id,
+                "sandbox_policy": "disabled",
+                "status": FunctionRunStatus.failure.value,
+                "error": "Function sandbox not available (FUNCTION_RUNNER_MODE=disabled)",
+            },
+        )
+        return
+    if settings.FUNCTION_RUNNER_MODE == "stub" and settings.ENVIRONMENT != "local":
+        error = (
+            "Function test stub is only allowed when ENVIRONMENT=local "
+            f"(current: {settings.ENVIRONMENT})"
+        )
+        await update_run_status(
+            session,
+            run,
+            FunctionRunStatus.failure,
+            error=error,
+        )
+        await record_audit(
+            session,
+            action="function.run.failed",
+            obj=run,
+            actor=f"function:{func.id}",
+            organisation_id=func.organisation_id,
+            details={
+                "function_id": func.id,
+                "sandbox_policy": "stub-disallowed",
+                "status": FunctionRunStatus.failure.value,
+                "error": error,
+            },
+        )
+        return
+
+    # Test stub: always succeeds after a brief delay simulating work
     token = create_function_token(
         function_id=func.id,
         organisation_id=func.organisation_id,
@@ -56,7 +109,6 @@ async def _execute_function(
         context_id=run.context_id,
         expiry_seconds=func.timeout_ms // 1000,
     )
-    # Test runner: always succeeds after a brief delay simulating work
     await asyncio.sleep(0.1)
     output = {
         "message": "Function executed successfully (test runner)",
