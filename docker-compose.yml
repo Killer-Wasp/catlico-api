@@ -14,7 +14,8 @@ services:
   # filer and the S3 API on :8333 in one process — fine for dev.
   seaweedfs:
     image: chrislusf/seaweedfs:latest
-    command: >
+    entrypoint: []
+    command: |
       sh -ec 'cat > /etc/seaweedfs/s3.json <<EOF
       {
         "identities": [
