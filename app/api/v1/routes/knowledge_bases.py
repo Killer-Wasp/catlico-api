@@ -11,6 +11,7 @@ from app.models.knowledge_base import (
     KnowledgeBasePageCreate,
     KnowledgeBasePagePublic,
     KnowledgeBasePageUpdate,
+    KnowledgeBasePageVersionPublic,
 )
 
 router = APIRouter(prefix="/knowledge-base", tags=["knowledge-base"])
@@ -37,7 +38,7 @@ async def list_kb_pages(
         session, ctx.organisation_id, skip=skip, limit=limit, search=search
     )
     return Page(
-        items=[KnowledgeBasePagePublic.model_validate(p, from_attributes=True) for p in pages],
+        items=[await kb_crud.public_page(session, p) for p in pages],
         total=total,
         skip=skip,
         limit=limit,
@@ -55,9 +56,9 @@ async def create_kb_page(
         session,
         page_in,
         organisation_id=ctx.organisation_id,
-        created_by=str(ctx.user.id),
+        actor=ctx.user,
     )
-    return KnowledgeBasePagePublic.model_validate(page, from_attributes=True)
+    return await kb_crud.public_page(session, page)
 
 
 @router.patch("/{page_id}", response_model=KnowledgeBasePagePublic)
@@ -73,10 +74,51 @@ async def update_kb_page(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base page not found"
         )
-    page = await kb_crud.update_page(
-        session, page, page_in, updated_by=str(ctx.user.id)
+    page = await kb_crud.update_page(session, page, page_in, actor=ctx.user)
+    return await kb_crud.public_page(session, page)
+
+
+@router.get("/{page_id}/versions", response_model=list[KnowledgeBasePageVersionPublic])
+async def list_kb_page_versions(
+    page_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[KnowledgeBasePageVersionPublic]:
+    _require_perm(ctx, "read:knowledge_base")
+    page = await kb_crud.get_page(session, page_id, ctx.organisation_id)
+    if not page:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base page not found"
+        )
+    versions = await kb_crud.list_versions(session, page_id, ctx.organisation_id)
+    return [
+        KnowledgeBasePageVersionPublic.model_validate(v, from_attributes=True)
+        for v in versions
+    ]
+
+
+@router.post("/{page_id}/versions/{version_id}/revert", response_model=KnowledgeBasePagePublic)
+async def revert_kb_page(
+    page_id: int,
+    version_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> KnowledgeBasePagePublic:
+    _require_perm(ctx, "write:knowledge_base")
+    page = await kb_crud.get_page(session, page_id, ctx.organisation_id)
+    if not page:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base page not found"
+        )
+    version = await kb_crud.get_version(
+        session, page_id, version_id, ctx.organisation_id
     )
-    return KnowledgeBasePagePublic.model_validate(page, from_attributes=True)
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base version not found"
+        )
+    page = await kb_crud.revert_page(session, page, version, actor=ctx.user)
+    return await kb_crud.public_page(session, page)
 
 
 @router.delete("/{page_id}", status_code=status.HTTP_204_NO_CONTENT)

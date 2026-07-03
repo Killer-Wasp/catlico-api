@@ -1,14 +1,75 @@
 from datetime import UTC, datetime
+from collections.abc import Iterable
 
+from sqlalchemy import desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.pagination import paginate
 from app.models.knowledge_base import (
+    KnowledgeBaseContributor,
     KnowledgeBasePage,
     KnowledgeBasePageCreate,
+    KnowledgeBasePagePublic,
     KnowledgeBasePageUpdate,
+    KnowledgeBasePageVersion,
+    KnowledgeBaseVersionAction,
 )
+from app.models.user import User
+
+
+SNAPSHOT_FIELDS = ("title", "summary", "tags", "content")
+
+
+def page_snapshot(page: KnowledgeBasePage) -> dict:
+    return {
+        "title": page.title,
+        "summary": page.summary,
+        "tags": list(page.tags),
+        "content": page.content,
+    }
+
+
+def changed_fields(before: dict | None, after: dict) -> list[str]:
+    if before is None:
+        return list(SNAPSHOT_FIELDS)
+    return [field for field in SNAPSHOT_FIELDS if before.get(field) != after.get(field)]
+
+
+async def next_version_number(session: AsyncSession, page_id: int) -> int:
+    result = await session.execute(
+        select(func.max(KnowledgeBasePageVersion.version_number)).where(
+            KnowledgeBasePageVersion.page_id == page_id
+        )
+    )
+    return int(result.scalar_one_or_none() or 0) + 1
+
+
+async def record_version(
+    session: AsyncSession,
+    page: KnowledgeBasePage,
+    *,
+    action: KnowledgeBaseVersionAction,
+    actor: User,
+    before: dict | None = None,
+    reverted_from_version_id: int | None = None,
+) -> KnowledgeBasePageVersion:
+    after = page_snapshot(page)
+    version = KnowledgeBasePageVersion(
+        page_id=page.id,
+        organisation_id=page.organisation_id,
+        version_number=await next_version_number(session, page.id),
+        action=action,
+        snapshot=after,
+        changed_fields=changed_fields(before, after),
+        edited_by=str(actor.id),
+        edited_by_email=actor.email,
+        reverted_from_version_id=reverted_from_version_id,
+        created_by=str(actor.id),
+    )
+    session.add(version)
+    await session.flush()
+    return version
 
 
 async def get_page(session: AsyncSession, page_id: int, organisation_id: str) -> KnowledgeBasePage | None:
@@ -44,7 +105,7 @@ async def create_page(
     page_in: KnowledgeBasePageCreate,
     *,
     organisation_id: str,
-    created_by: str,
+    actor: User,
 ) -> KnowledgeBasePage:
     page = KnowledgeBasePage(
         organisation_id=organisation_id,
@@ -52,10 +113,11 @@ async def create_page(
         summary=page_in.summary,
         tags=page_in.tags,
         content=page_in.content,
-        created_by=created_by,
+        created_by=str(actor.id),
     )
     session.add(page)
     await session.flush()
+    await record_version(session, page, action="create", actor=actor)
     return page
 
 
@@ -63,15 +125,17 @@ async def update_page(
     session: AsyncSession,
     page: KnowledgeBasePage,
     page_in: KnowledgeBasePageUpdate,
-    updated_by: str,
+    actor: User,
 ) -> KnowledgeBasePage:
+    before = page_snapshot(page)
     update_data = page_in.model_dump(exclude_unset=True)
     for k, v in update_data.items():
         setattr(page, k, v)
     page.updated_at = datetime.now(UTC).replace(tzinfo=None)
-    page.updated_by = updated_by
+    page.updated_by = str(actor.id)
     session.add(page)
     await session.flush()
+    await record_version(session, page, action="update", actor=actor, before=before)
     return page
 
 
@@ -82,3 +146,95 @@ async def delete_page(
     page.deleted_by = deleted_by
     session.add(page)
     await session.flush()
+
+
+async def list_versions(
+    session: AsyncSession, page_id: int, organisation_id: str
+) -> list[KnowledgeBasePageVersion]:
+    result = await session.execute(
+        select(KnowledgeBasePageVersion)
+        .where(
+            KnowledgeBasePageVersion.page_id == page_id,
+            KnowledgeBasePageVersion.organisation_id == organisation_id,
+        )
+        .order_by(desc(KnowledgeBasePageVersion.version_number))
+    )
+    return list(result.scalars().all())
+
+
+async def get_version(
+    session: AsyncSession, page_id: int, version_id: int, organisation_id: str
+) -> KnowledgeBasePageVersion | None:
+    result = await session.execute(
+        select(KnowledgeBasePageVersion).where(
+            KnowledgeBasePageVersion.id == version_id,
+            KnowledgeBasePageVersion.page_id == page_id,
+            KnowledgeBasePageVersion.organisation_id == organisation_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def contributors_for_pages(
+    session: AsyncSession, page_ids: Iterable[int]
+) -> dict[int, list[KnowledgeBaseContributor]]:
+    ids = list(page_ids)
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(KnowledgeBasePageVersion)
+        .where(KnowledgeBasePageVersion.page_id.in_(ids))
+        .order_by(desc(KnowledgeBasePageVersion.edited_at))
+    )
+    contributors = {page_id: [] for page_id in ids}
+    seen = {page_id: set() for page_id in ids}
+    for version in result.scalars().all():
+        if version.edited_by in seen[version.page_id]:
+            continue
+        seen[version.page_id].add(version.edited_by)
+        contributors[version.page_id].append(
+            KnowledgeBaseContributor(
+                id=version.edited_by,
+                email=version.edited_by_email,
+                last_edited_at=version.edited_at,
+            )
+        )
+    return contributors
+
+
+async def public_page(session: AsyncSession, page: KnowledgeBasePage) -> KnowledgeBasePagePublic:
+    contributors = (await contributors_for_pages(session, [page.id])).get(page.id, [])
+    base = KnowledgeBasePagePublic.model_validate(page, from_attributes=True)
+    return base.model_copy(
+        update={
+            "contributors": contributors,
+            "last_edited_by": contributors[0] if contributors else None,
+        }
+    )
+
+
+async def revert_page(
+    session: AsyncSession,
+    page: KnowledgeBasePage,
+    version: KnowledgeBasePageVersion,
+    actor: User,
+) -> KnowledgeBasePage:
+    before = page_snapshot(page)
+    snapshot = version.snapshot
+    page.title = snapshot["title"]
+    page.summary = snapshot.get("summary", "")
+    page.tags = list(snapshot.get("tags", []))
+    page.content = snapshot.get("content", "")
+    page.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    page.updated_by = str(actor.id)
+    session.add(page)
+    await session.flush()
+    await record_version(
+        session,
+        page,
+        action="revert",
+        actor=actor,
+        before=before,
+        reverted_from_version_id=version.id,
+    )
+    return page

@@ -263,6 +263,91 @@ async def test_kb_crud(client: AsyncClient, org_a, analyst_a_token):
     assert lst.json()["total"] == 0
 
 
+async def test_kb_versions_list_and_revert(client: AsyncClient, org_a, analyst_a, analyst_a_token):
+    h = _h(analyst_a_token, org_a.id)
+    created = await client.post(
+        "/api/v1/knowledge-base/",
+        json={"title": "Runbook", "summary": "v1", "tags": ["one"], "content": "first"},
+        headers=h,
+    )
+    assert created.status_code == 201, created.text
+    page_id = created.json()["id"]
+
+    updated = await client.patch(
+        f"/api/v1/knowledge-base/{page_id}",
+        json={"summary": "v2", "tags": ["two"], "content": "second"},
+        headers=h,
+    )
+    assert updated.status_code == 200, updated.text
+
+    history = await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=h)
+    assert history.status_code == 200, history.text
+    versions = history.json()
+    assert [v["version_number"] for v in versions] == [2, 1]
+    assert versions[0]["action"] == "update"
+    assert versions[0]["changed_fields"] == ["summary", "tags", "content"]
+    assert versions[0]["edited_by_email"] == analyst_a.email
+
+    create_version = next(v for v in versions if v["action"] == "create")
+    reverted = await client.post(
+        f"/api/v1/knowledge-base/{page_id}/versions/{create_version['id']}/revert",
+        headers=h,
+    )
+    assert reverted.status_code == 200, reverted.text
+    assert reverted.json()["summary"] == "v1"
+    assert reverted.json()["tags"] == ["one"]
+    assert reverted.json()["content"] == "first"
+
+    reverted_history = (
+        await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=h)
+    ).json()
+    assert reverted_history[0]["action"] == "revert"
+    assert reverted_history[0]["reverted_from_version_id"] == create_version["id"]
+
+
+async def test_kb_readonly_can_view_versions_but_cannot_revert(
+    client: AsyncClient, org_a, analyst_a_token, readonly_a_token
+):
+    writer_h = _h(analyst_a_token, org_a.id)
+    reader_h = _h(readonly_a_token, org_a.id)
+    created = await client.post(
+        "/api/v1/knowledge-base/",
+        json={"title": "Protected", "content": "current"},
+        headers=writer_h,
+    )
+    page_id = created.json()["id"]
+    versions = (await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=reader_h)).json()
+    assert len(versions) == 1
+
+    reverted = await client.post(
+        f"/api/v1/knowledge-base/{page_id}/versions/{versions[0]['id']}/revert",
+        headers=reader_h,
+    )
+    assert reverted.status_code == 403
+
+
+async def test_kb_versions_are_org_scoped(
+    client: AsyncClient, org_a, org_b, analyst_a_token, analyst_b_token
+):
+    ha = _h(analyst_a_token, org_a.id)
+    hb = _h(analyst_b_token, org_b.id)
+    created = await client.post(
+        "/api/v1/knowledge-base/",
+        json={"title": "Org A page", "content": "private"},
+        headers=ha,
+    )
+    page_id = created.json()["id"]
+    version_id = (await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=ha)).json()[0]["id"]
+
+    assert (await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=hb)).status_code == 404
+    assert (
+        await client.post(
+            f"/api/v1/knowledge-base/{page_id}/versions/{version_id}/revert",
+            headers=hb,
+        )
+    ).status_code == 404
+
+
 # ── Phase 3: Notifiers ──────────────────────────────────────────────────────
 
 async def test_notifier_crud(client: AsyncClient, org_a, analyst_a_token):
