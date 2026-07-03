@@ -46,16 +46,12 @@ async def create_page(
     organisation_id: str,
     created_by: str,
 ) -> KnowledgeBasePage:
-    blocks = [
-        b.model_dump() if hasattr(b, "model_dump") else b
-        for b in page_in.blocks
-    ]
     page = KnowledgeBasePage(
         organisation_id=organisation_id,
         title=page_in.title,
         summary=page_in.summary,
         tags=page_in.tags,
-        blocks=blocks,
+        content=page_in.content,
         created_by=created_by,
     )
     session.add(page)
@@ -70,11 +66,6 @@ async def update_page(
     updated_by: str,
 ) -> KnowledgeBasePage:
     update_data = page_in.model_dump(exclude_unset=True)
-    if "blocks" in update_data:
-        update_data["blocks"] = [
-            b.model_dump() if hasattr(b, "model_dump") else b
-            for b in update_data["blocks"]
-        ]
     for k, v in update_data.items():
         setattr(page, k, v)
     page.updated_at = datetime.now(UTC).replace(tzinfo=None)

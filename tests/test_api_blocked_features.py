@@ -231,7 +231,7 @@ async def test_kb_crud(client: AsyncClient, org_a, analyst_a_token):
             "title": "Phishing Runbook",
             "summary": "How to handle phishing",
             "tags": ["phishing", "runbook"],
-            "blocks": [{"type": "paragraph", "text": "Check headers"}],
+            "content": "## Triage\n\nCheck headers",
         },
         headers=h,
     )
@@ -239,6 +239,7 @@ async def test_kb_crud(client: AsyncClient, org_a, analyst_a_token):
     page_id = r.json()["id"]
     assert r.json()["title"] == "Phishing Runbook"
     assert r.json()["tags"] == ["phishing", "runbook"]
+    assert r.json()["content"] == "## Triage\n\nCheck headers"
 
     lst = await client.get("/api/v1/knowledge-base/", headers=h)
     assert lst.json()["total"] == 1
@@ -248,11 +249,12 @@ async def test_kb_crud(client: AsyncClient, org_a, analyst_a_token):
 
     r = await client.patch(
         f"/api/v1/knowledge-base/{page_id}",
-        json={"title": "Updated Runbook"},
+        json={"title": "Updated Runbook", "content": "Updated steps"},
         headers=h,
     )
     assert r.status_code == 200
     assert r.json()["title"] == "Updated Runbook"
+    assert r.json()["content"] == "Updated steps"
 
     r = await client.delete(f"/api/v1/knowledge-base/{page_id}", headers=h)
     assert r.status_code == 204

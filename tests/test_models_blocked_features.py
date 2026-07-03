@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.core.db import init_db
 from app.models.api_key import ApiKey
@@ -214,10 +215,7 @@ async def test_knowledge_base_page_insert(session, org):
         title="Runbook: Phishing",
         summary="How to triage phishing alerts",
         tags=["phishing", "triage"],
-        blocks=[
-            {"type": "paragraph", "text": "Step 1: check headers", "code": None},
-            {"type": "section", "title": "Indicators", "items": ["SPF fail", "DKIM mismatch"]},
-        ],
+        content="## Indicators\n\n- SPF fail\n- DKIM mismatch",
         created_by="system",
     )
     session.add(page)
@@ -227,8 +225,7 @@ async def test_knowledge_base_page_insert(session, org):
     assert row.title == "Runbook: Phishing"
     assert row.summary == "How to triage phishing alerts"
     assert row.tags == ["phishing", "triage"]
-    assert len(row.blocks) == 2
-    assert row.blocks[0]["type"] == "paragraph"
+    assert row.content == "## Indicators\n\n- SPF fail\n- DKIM mismatch"
     assert row.deleted_at is None
 
 
@@ -247,6 +244,132 @@ async def test_knowledge_base_page_soft_delete(session, org):
 
     row = (await session.execute(select(KnowledgeBasePage).where(KnowledgeBasePage.id == page.id))).scalar_one()
     assert row.deleted_at is not None
+
+
+async def test_knowledge_base_page_version_insert(session, org_a, analyst_a):
+    from sqlmodel import select
+
+    from app.models.knowledge_base import (
+        KnowledgeBasePage,
+        KnowledgeBasePageVersion,
+    )
+
+    page = KnowledgeBasePage(
+        organisation_id=org_a.id,
+        title="Runbook",
+        summary="A phishing runbook",
+        tags=["phishing"],
+        content="Initial content",
+        created_by=str(analyst_a.id),
+    )
+    session.add(page)
+    await session.flush()
+
+    version = KnowledgeBasePageVersion(
+        page_id=page.id,
+        organisation_id=org_a.id,
+        version_number=1,
+        action="create",
+        snapshot={
+            "title": "Runbook",
+            "summary": "A phishing runbook",
+            "tags": ["phishing"],
+            "content": "Initial content",
+        },
+        changed_fields=["title", "summary", "tags", "content"],
+        edited_by=str(analyst_a.id),
+        edited_by_email=analyst_a.email,
+    )
+    session.add(version)
+    await session.flush()
+
+    result = await session.execute(select(KnowledgeBasePageVersion))
+    saved = result.scalar_one()
+    assert saved.page_id == page.id
+    assert saved.version_number == 1
+    assert saved.action == "create"
+    assert saved.snapshot["content"] == "Initial content"
+    assert saved.changed_fields == ["title", "summary", "tags", "content"]
+    assert saved.edited_by_email == analyst_a.email
+
+
+async def test_knowledge_base_page_version_rejects_duplicate_page_version(
+    session, org_a, analyst_a
+):
+    from app.models.knowledge_base import (
+        KnowledgeBasePage,
+        KnowledgeBasePageVersion,
+    )
+
+    page = KnowledgeBasePage(
+        organisation_id=org_a.id,
+        title="Runbook",
+        created_by=str(analyst_a.id),
+    )
+    session.add(page)
+    await session.flush()
+
+    session.add(
+        KnowledgeBasePageVersion(
+            page_id=page.id,
+            organisation_id=org_a.id,
+            version_number=1,
+            action="create",
+            snapshot={"title": "Runbook", "summary": "", "tags": [], "content": ""},
+            changed_fields=["title"],
+            edited_by=str(analyst_a.id),
+            edited_by_email=analyst_a.email,
+        )
+    )
+    await session.flush()
+
+    session.add(
+        KnowledgeBasePageVersion(
+            page_id=page.id,
+            organisation_id=org_a.id,
+            version_number=1,
+            action="update",
+            snapshot={"title": "Runbook", "summary": "", "tags": [], "content": ""},
+            changed_fields=["content"],
+            edited_by=str(analyst_a.id),
+            edited_by_email=analyst_a.email,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.flush()
+
+
+async def test_knowledge_base_page_version_rejects_unknown_action(
+    session, org_a, analyst_a
+):
+    from app.models.knowledge_base import (
+        KnowledgeBasePage,
+        KnowledgeBasePageVersion,
+    )
+
+    page = KnowledgeBasePage(
+        organisation_id=org_a.id,
+        title="Runbook",
+        created_by=str(analyst_a.id),
+    )
+    session.add(page)
+    await session.flush()
+
+    session.add(
+        KnowledgeBasePageVersion(
+            page_id=page.id,
+            organisation_id=org_a.id,
+            version_number=1,
+            action="publish",
+            snapshot={"title": "Runbook", "summary": "", "tags": [], "content": ""},
+            changed_fields=["content"],
+            edited_by=str(analyst_a.id),
+            edited_by_email=analyst_a.email,
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        await session.flush()
 
 
 async def test_knowledge_base_page_title_index(session):
