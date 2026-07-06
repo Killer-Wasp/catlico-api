@@ -74,6 +74,7 @@ class CaseTemplatePublic(SQLModel):
     pap: int | None
     summary: str | None
     organisation_id: str
+    created_by: str
     tasks: list[CaseTemplateTaskPublic] = []
     tags: list[str] = []
     created_at: datetime

@@ -1,14 +1,19 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, SuperAdminUser
+from app.api.deps import ActiveOrgContext, CurrentUser, SuperAdminUser
+from app.api.v1.routes._files import ingest_upload
 from app.core.db import get_session
 from app.core.security import verify_password
+from app.core.storage import BlobStorage, get_storage
+from app.crud import attachment as attachment_crud
 from app.crud import user as user_crud
 from app.crud.audit import record_audit
+from app.models.attachment import Attachment
 from app.models.user import UserCreate, UserMeUpdate, UserPublic, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -45,6 +50,12 @@ async def update_current_user(
         update_data.email = body.email
     if body.new_password is not None:
         update_data.password = body.new_password
+    # Names are editable without re-entering the current password.
+    fields_set = body.model_fields_set
+    if "first_name" in fields_set:
+        update_data.first_name = body.first_name
+    if "last_name" in fields_set:
+        update_data.last_name = body.last_name
 
     user = await user_crud.update_user(session, current_user, update_data)
     await record_audit(
@@ -55,6 +66,83 @@ async def update_current_user(
         details=update_data.model_dump(exclude_unset=True),
     )
     return user
+
+
+@router.put("/me/avatar", response_model=UserPublic)
+async def upload_avatar(
+    file: UploadFile,
+    current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    storage: Annotated[BlobStorage, Depends(get_storage)],
+) -> UserPublic:
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Profile picture must be an image",
+        )
+    sha256, size, content_type = await ingest_upload(storage, file)
+    blob = await attachment_crud.get_or_create_blob(
+        session,
+        sha256=sha256,
+        size=size,
+        content_type=content_type,
+        created_by=str(current_user.id),
+    )
+    user = await user_crud.set_avatar(session, current_user, blob.id)
+    await record_audit(
+        session, action="update", obj=user, actor=str(current_user.id),
+        details={"avatar": True},
+    )
+    return user
+
+
+@router.delete("/me/avatar", response_model=UserPublic)
+async def delete_avatar(
+    current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> UserPublic:
+    user = await user_crud.set_avatar(session, current_user, None)
+    await record_audit(
+        session, action="update", obj=user, actor=str(current_user.id),
+        details={"avatar": False},
+    )
+    return user
+
+
+@router.get("/{user_id}/avatar")
+async def get_avatar(
+    user_id: uuid.UUID,
+    _: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    storage: Annotated[BlobStorage, Depends(get_storage)],
+) -> StreamingResponse:
+    user = await user_crud.get_user_by_id(session, user_id)
+    if not user or user.avatar_attachment_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No avatar")
+    blob = await session.get(Attachment, user.avatar_attachment_id)
+    if blob is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No avatar")
+    return StreamingResponse(
+        storage.stream(blob.sha256),
+        media_type=blob.content_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@router.get("/search", response_model=list[UserPublic])
+async def search_users(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    q: str = "",
+    limit: int = 20,
+) -> list[UserPublic]:
+    """Find users by email or name — used by the assignee picker. Scoped to members
+    of the active org (from X-Organisation-Id) so it only offers users who can
+    actually be assigned; open to any member of that org."""
+    limit = max(1, min(limit, 50))
+    return await user_crud.search_users(
+        session, q, limit=limit, organisation_id=ctx.organisation_id
+    )
 
 
 @router.get("/", response_model=list[UserPublic])

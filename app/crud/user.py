@@ -1,10 +1,12 @@
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.security import get_password_hash, verify_password
+from app.models.organisation_member import OrganisationMember
 from app.models.user import User, UserCreate, UserUpdate
 
 
@@ -28,6 +30,50 @@ async def get_users(session: AsyncSession, skip: int = 0, limit: int = 100) -> l
     return list(result.scalars().all())
 
 
+async def search_users(
+    session: AsyncSession,
+    query: str,
+    limit: int = 20,
+    organisation_id: str | None = None,
+) -> list[User]:
+    """Case-insensitive search over email, first_name and last_name for the
+    assignee picker. A query matching any of the three fields returns the user;
+    also matches a "first last" full-name query. Only active users are returned.
+    Blank query returns the first `limit` active users.
+
+    When `organisation_id` is given, results are limited to members of that org —
+    the assignee picker uses this so it only offers users who can actually be
+    assigned (assignment requires org membership)."""
+    stmt = select(User).where(User.is_active == True)  # noqa: E712
+    if organisation_id is not None:
+        stmt = stmt.join(
+            OrganisationMember, OrganisationMember.user_id == User.id
+        ).where(OrganisationMember.organisation_id == organisation_id)
+    q = query.strip()
+    if q:
+        like = f"%{q.lower()}%"
+        full_name = func.lower(
+            func.trim(
+                func.concat(
+                    func.coalesce(User.first_name, ""),
+                    " ",
+                    func.coalesce(User.last_name, ""),
+                )
+            )
+        )
+        stmt = stmt.where(
+            or_(
+                func.lower(User.email).like(like),
+                func.lower(User.first_name).like(like),
+                func.lower(User.last_name).like(like),
+                full_name.like(like),
+            )
+        )
+    stmt = stmt.order_by(User.email).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def emails_for_ids(
     session: AsyncSession, user_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, str]:
@@ -43,6 +89,8 @@ async def emails_for_ids(
 async def create_user(session: AsyncSession, user_in: UserCreate) -> User:
     db_user = User(
         email=_normalize_email(str(user_in.email)),
+        first_name=user_in.first_name,
+        last_name=user_in.last_name,
         is_superadmin=user_in.is_superadmin,
         is_active=True,
         hashed_password=get_password_hash(user_in.password) if user_in.password else None,
@@ -62,6 +110,19 @@ async def update_user(session: AsyncSession, db_user: User, user_in: UserUpdate)
         update_data["email"] = _normalize_email(str(update_data["email"]))
     update_data["updated_at"] = datetime.now(UTC)
     db_user.sqlmodel_update(update_data)
+    session.add(db_user)
+    await session.commit()
+    await session.refresh(db_user)
+    return db_user
+
+
+async def set_avatar(
+    session: AsyncSession, db_user: User, attachment_id: uuid.UUID | None
+) -> User:
+    """Point the user's profile picture at a content-addressed blob (or clear it
+    with None). The blob itself lives in the shared attachment store."""
+    db_user.avatar_attachment_id = attachment_id
+    db_user.updated_at = datetime.now(UTC)
     session.add(db_user)
     await session.commit()
     await session.refresh(db_user)

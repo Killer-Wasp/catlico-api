@@ -24,17 +24,29 @@ from app.models.organisation_member import (
     OrganisationMemberPublic,
     OrganisationMemberUpdate,
 )
+from app.models.user import User
 
 router = APIRouter(prefix="/organisations", tags=["organisations"])
 
 
-def _member_public(member: OrganisationMember, email: str) -> OrganisationMemberPublic:
-    return OrganisationMemberPublic.model_validate({**member.model_dump(), "email": email})
+def _member_public(
+    member: OrganisationMember, user: User | None
+) -> OrganisationMemberPublic:
+    return OrganisationMemberPublic.model_validate(
+        {
+            **member.model_dump(),
+            "email": user.email if user else "",
+            "first_name": user.first_name if user else None,
+            "last_name": user.last_name if user else None,
+            "has_avatar": user.has_avatar if user else False,
+        }
+    )
 
 
-async def _member_email(session: AsyncSession, member: OrganisationMember) -> str:
-    user = await user_crud.get_user_by_id(session, member.user_id)
-    return user.email if user else ""
+async def _member_user(
+    session: AsyncSession, member: OrganisationMember
+) -> User | None:
+    return await user_crud.get_user_by_id(session, member.user_id)
 
 
 @router.get("/", response_model=list[OrganisationPublic])
@@ -124,7 +136,7 @@ async def list_members(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[OrganisationMemberPublic]:
     rows = await member_crud.get_members(session, ctx.organisation_id)
-    return [_member_public(member, email) for member, email in rows]
+    return [_member_public(member, user) for member, user in rows]
 
 
 @router.post(
@@ -158,7 +170,7 @@ async def add_member(
         actor=str(ctx.user.id),
         details={"user_id": str(member.user_id), "role_id": str(member.role_id)},
     )
-    return _member_public(member, await _member_email(session, member))
+    return _member_public(member, await _member_user(session, member))
 
 
 @router.patch(
@@ -189,7 +201,7 @@ async def update_member(
         actor=str(ctx.user.id),
         details={"role_id": str(member.role_id)},
     )
-    return _member_public(member, await _member_email(session, member))
+    return _member_public(member, await _member_user(session, member))
 
 
 @router.delete(

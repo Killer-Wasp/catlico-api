@@ -26,16 +26,16 @@ async def get_member(
 
 async def get_members(
     session: AsyncSession, organisation_id: str
-) -> list[tuple[OrganisationMember, str]]:
-    """Org members paired with their email (joined from User), for member lists
-    and @-mention pickers."""
+) -> list[tuple[OrganisationMember, User]]:
+    """Org members paired with their User (joined), for member lists and
+    @-mention pickers — carries email, name and avatar flag per row."""
     result = await session.execute(
-        select(OrganisationMember, User.email)
+        select(OrganisationMember, User)
         .join(User, User.id == OrganisationMember.user_id)
         .where(OrganisationMember.organisation_id == organisation_id)
         .order_by(User.email)
     )
-    return [(member, email) for member, email in result.all()]
+    return [(member, user) for member, user in result.all()]
 
 
 async def get_user_organisations(

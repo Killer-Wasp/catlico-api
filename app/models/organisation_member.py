@@ -28,9 +28,14 @@ class OrganisationMemberPublic(SQLModel):
     organisation_id: str
     role_id: uuid.UUID
     created_at: datetime
-    #: The member's email, joined from User — lets clients show/mention a member
-    #: without an extra lookup per row.
+    #: The member's identity, joined from User — lets clients show/mention a member
+    #: (name + avatar) without an extra lookup per row.
     email: str
+    first_name: str | None = None
+    last_name: str | None = None
+    #: Whether the user has uploaded a profile picture; clients fetch it from
+    #: GET /users/{user_id}/avatar and fall back to initials when false.
+    has_avatar: bool = False
 
 
 class OrganisationMemberUpdate(SQLModel):
