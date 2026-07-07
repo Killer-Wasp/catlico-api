@@ -118,6 +118,15 @@ class AlertUpdate(SQLModel):
     assignee_id: uuid.UUID | None = None
 
 
+class AlertFacets(SQLModel):
+    """Filterable values across the org's alerts, for the list's filter dropdowns."""
+
+    #: Distinct alert sources.
+    sources: list[str] = []
+    #: Filterable tag keys → their distinct values (free tags excluded).
+    tag_keys: dict[str, list[str]] = {}
+
+
 class AlertPromote(SQLModel):
     """Optional overrides when promoting an alert into a case."""
 

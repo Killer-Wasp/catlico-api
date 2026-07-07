@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -25,6 +25,7 @@ from app.models.enrichment import (
 )
 from app.models.observable import (
     Observable,
+    ObservableFacets,
     ObservablePublic,
     ObservableShare,
     ObservableUpdate,
@@ -92,23 +93,43 @@ async def list_observables(
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
+    filter: Annotated[list[str] | None, Query()] = None,
+    sort: Annotated[str, Query()] = "",
+    order: Annotated[str, Query()] = "desc",
 ) -> Page[ObservablePublic]:
     """Global observable list for the active org: case observables on cases it owns
     (owner sees all) plus observables explicitly shared to it, and observables on alerts
-    it owns. Tenant isolation rides the same case_share / observable_share /
-    alert-ownership joins as the per-item visibility check; newest first."""
+    it owns. Each `filter` term is `key~op~value` (keys: type, tlp, flag, source,
+    value), OR-within-key / AND-across-key."""
     if "read:observable" not in ctx.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Missing permission: read:observable",
         )
+    filters = obs_crud.ObservableListFilter.from_query(filter, sort=sort, order=order)
     obs, total = await obs_crud.list_observables_for_org(
         session,
         organisation_id=ctx.organisation_id,
         skip=skip,
         limit=limit,
+        filters=filters,
     )
     return Page(items=obs, total=total, skip=skip, limit=limit)
+
+
+@router.get("/filters", response_model=ObservableFacets)
+async def list_observable_filters(
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ObservableFacets:
+    """Distinct source values across the org's observables, for the list view's
+    Source filter dropdown. Declared before `/{observable_id}` so the literal wins."""
+    if "read:observable" not in ctx.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing permission: read:observable",
+        )
+    return await obs_crud.observable_facets(session, ctx.organisation_id)
 
 
 @router.get("/{observable_id}", response_model=ObservablePublic)

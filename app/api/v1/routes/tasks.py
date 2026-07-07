@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -20,6 +20,7 @@ from app.models.task import (
     TASK_STATUS_TRANSITIONS,
     Task,
     TaskPublic,
+    TaskQueueFacets,
     TaskQueuePublic,
     TaskUpdate,
 )
@@ -106,13 +107,23 @@ async def list_task_queue(
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
+    filter: Annotated[list[str] | None, Query()] = None,
+    sort: Annotated[str, Query()] = "caseId",
+    order: Annotated[str, Query()] = "asc",
 ) -> Page[TaskQueuePublic]:
     """Cross-case task queue: every task the active org may see across all its cases
-    (owned + shared via task_share), enriched with case + assignee context. Read-only
-    aggregate — item mutations go through the nested /cases/{case_id}/tasks routes."""
+    (owned + shared via task_share), enriched with case + assignee context. Each
+    `filter` term is `key~op~value` (keys: status, assignee, kind, case, title),
+    OR-within-key / AND-across-key. Read-only aggregate — item mutations go through
+    the nested /cases/{case_id}/tasks routes."""
     _require("read:task", ctx.permissions)
+    filters = task_crud.TaskListFilter.from_query(filter, sort=sort, order=order)
     tasks, total = await task_crud.list_tasks_for_org(
-        session, organisation_id=ctx.organisation_id, skip=skip, limit=limit
+        session,
+        organisation_id=ctx.organisation_id,
+        skip=skip,
+        limit=limit,
+        filters=filters,
     )
 
     flagged = await flag_crud.flagged_ids(
@@ -156,6 +167,17 @@ async def list_task_queue(
         skip=skip,
         limit=limit,
     )
+
+
+@queue_router.get("/filters", response_model=TaskQueueFacets)
+async def list_task_queue_filters(
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TaskQueueFacets:
+    """Distinct assignee/kind values across the org's task queue, for the list
+    view's filter dropdowns."""
+    _require("read:task", ctx.permissions)
+    return await task_crud.task_queue_facets(session, ctx.organisation_id)
 
 
 @router.get("/{task_id}", response_model=TaskPublic)

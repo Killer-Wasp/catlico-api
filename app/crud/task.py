@@ -1,9 +1,16 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, tuple_, update
+from sqlalchemy import String, cast, func, or_, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud._filters import (
+    FilterClause,
+    enum_condition,
+    group_by_key,
+    parse_clauses,
+)
 from app.crud._seq import next_task_ids
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
@@ -16,10 +23,99 @@ from app.models.task import (
     TASK_TERMINAL_STATUSES,
     Task,
     TaskCreate,
+    TaskQueueFacets,
     TaskStatus,
     TaskUpdate,
 )
 from app.models.task_share import TaskShare
+from app.models.user import User
+
+
+#: Assignee sentinel meaning "no assignee". #: "General" is the UI kind for tasks
+#: with no group.
+_UNASSIGNED = "Unassigned"
+_GENERAL_KIND = "General"
+
+_TASK_SORT_COLUMNS = {
+    "caseId": Task.case_id,
+    "title": Task.title,
+    "assignee": Task.assignee_id,
+    "due": Task.due_date,
+    "status": Task.status,
+}
+
+
+@dataclass(frozen=True)
+class TaskListFilter:
+    """Clause filter + sort for the task queue (OR-within-key / AND-across-key).
+    Keys: status, assignee, kind, case, title."""
+
+    clauses: tuple[FilterClause, ...] = ()
+    sort: str = "caseId"
+    order: str = "asc"
+
+    @classmethod
+    def from_query(
+        cls, raw_filters: list[str] | None = None, *, sort="caseId", order="asc"
+    ) -> "TaskListFilter":
+        return cls(clauses=parse_clauses(raw_filters), sort=sort, order=order)
+
+
+def _task_clause_cond(key: str, clause: FilterClause):
+    v = clause.value
+    contains = clause.contains
+    if key == "status":
+        # Native enum column: resolve values in Python (see enum_condition).
+        return enum_condition(Task.status, TaskStatus, clause)
+    if key == "assignee":
+        if v == _UNASSIGNED:
+            return Task.assignee_id.is_(None)
+        email_cond = User.email.ilike(f"%{v}%") if contains else User.email == v
+        return Task.assignee_id.in_(select(User.id).where(email_cond))
+    if key == "kind":
+        # "General" is the UI label for the empty group.
+        if v == _GENERAL_KIND and not contains:
+            return or_(Task.group == "", Task.group == _GENERAL_KIND)
+        return Task.group.ilike(f"%{v}%") if contains else Task.group == v
+    if key == "case":
+        id_str = cast(Task.case_id, String)
+        vv = v.lstrip("#")
+        return id_str.ilike(f"%{vv}%") if contains else id_str == vv
+    if key == "title":
+        return Task.title.ilike(f"%{v}%") if contains else Task.title == v
+    return None
+
+
+def _apply_task_filters(stmt, f: TaskListFilter):
+    for _key, clauses in group_by_key(f.clauses).items():
+        conds = [
+            c for c in (_task_clause_cond(_key, cl) for cl in clauses) if c is not None
+        ]
+        if conds:
+            stmt = stmt.where(or_(*conds))
+    return stmt
+
+
+def _task_order_by(f: TaskListFilter):
+    col = _TASK_SORT_COLUMNS.get(f.sort, Task.case_id)
+    direction = col.asc() if f.order == "asc" else col.desc()
+    return direction, Task.id.desc()
+
+
+def _visible_task_condition(organisation_id: str):
+    """Visibility predicate: tasks on cases the org owns, plus tasks shared to
+    it via TaskShare. Shared by the queue list and its facets."""
+    owner_case_ids = select(CaseShare.case_id).where(
+        CaseShare.organisation_id == organisation_id,
+        CaseShare.is_owner == True,  # noqa: E712
+    )
+    shared_task_keys = select(TaskShare.case_id, TaskShare.task_id).where(
+        TaskShare.organisation_id == organisation_id
+    )
+    return or_(
+        Task.case_id.in_(owner_case_ids),
+        tuple_(Task.case_id, Task.id).in_(shared_task_keys),
+    )
 
 
 async def summaries_for_cases(
@@ -82,26 +178,56 @@ async def list_tasks_for_org(
     organisation_id: str,
     skip: int = 0,
     limit: int = 100,
+    filters: TaskListFilter | None = None,
 ) -> tuple[list[Task], int]:
     """Every live task the active org may see, across all its cases: tasks on
     cases it owns (owner sees all) plus tasks explicitly shared to it via
-    TaskShare. Same visibility rule as `list_tasks_for_case`, generalised across
-    cases. Newest first."""
-    owner_case_ids = select(CaseShare.case_id).where(
-        CaseShare.organisation_id == organisation_id,
-        CaseShare.is_owner == True,  # noqa: E712
-    )
-    shared_task_keys = select(TaskShare.case_id, TaskShare.task_id).where(
-        TaskShare.organisation_id == organisation_id
-    )
+    TaskShare. Filtered, sorted and paginated server-side."""
+    filters = filters or TaskListFilter()
     base = select(Task).where(
         Task.deleted_at.is_(None),
-        or_(
-            Task.case_id.in_(owner_case_ids),
-            tuple_(Task.case_id, Task.id).in_(shared_task_keys),
-        ),
+        _visible_task_condition(organisation_id),
     )
-    return await paginate(session, base, Task.created_at.desc(), skip=skip, limit=limit)
+    base = _apply_task_filters(base, filters)
+    return await paginate(
+        session, base, *_task_order_by(filters), skip=skip, limit=limit
+    )
+
+
+async def task_queue_facets(
+    session: AsyncSession, organisation_id: str
+) -> TaskQueueFacets:
+    """Distinct assignee/kind values across the org's visible tasks, plus whether
+    any is unassigned — powers the queue's filter dropdowns across all pages."""
+    visible = (
+        select(Task.id, Task.assignee_id, Task.group)
+        .where(Task.deleted_at.is_(None), _visible_task_condition(organisation_id))
+        .subquery()
+    )
+    emails = list(
+        (
+            await session.execute(
+                select(User.email)
+                .join(visible, visible.c.assignee_id == User.id)
+                .distinct()
+                .order_by(User.email)
+            )
+        ).scalars()
+    )
+    unassigned = bool(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(visible)
+                .where(visible.c.assignee_id.is_(None))
+            )
+        ).scalar_one()
+    )
+    groups = (
+        (await session.execute(select(visible.c.group).distinct())).scalars().all()
+    )
+    kinds = sorted({g or _GENERAL_KIND for g in groups})
+    return TaskQueueFacets(assignees=emails, unassigned=unassigned, kinds=kinds)
 
 
 async def list_groups_for_case(

@@ -129,8 +129,9 @@ class CaseListFacets(SQLModel):
     assignees: list[str] = []
     #: Whether any case is unassigned (offers the "Unassigned" filter option).
     unassigned: bool = False
-    #: Distinct tag strings on the org's cases.
-    tags: list[str] = []
+    #: Filterable tag keys → their distinct values (value-aware grouping; free
+    #: tags excluded). E.g. {"tlp": ["amber", "red"], "kill-chain:phase": [...]}.
+    tag_keys: dict[str, list[str]] = {}
 
 
 class CaseUpdate(SQLModel):

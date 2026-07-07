@@ -1,4 +1,8 @@
-"""Server-side filtering, sorting, pagination and facets for GET /cases."""
+"""Server-side filtering, sorting, pagination and facets for GET /cases.
+
+Filters are sent as repeated `filter=key~op~value` terms: OR within a key,
+AND across keys. Keys are status, severity, assignee, title, case, and
+`tag:<group-key>` for tag values (free tags are not filterable)."""
 
 from httpx import AsyncClient
 
@@ -36,6 +40,11 @@ async def _seed_case(
     return case
 
 
+def _f(key: str, op: str, value: str) -> str:
+    """Encode a single `key~op~value` filter term."""
+    return f"{key}~{op}~{value}"
+
+
 def _headers(token, org):
     return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org.id}
 
@@ -69,11 +78,12 @@ async def test_filter_by_status_multi(
         status=CaseStatus.duplicated,
     )
 
+    # Same key, two values → OR.
     body = await _list(
         client,
         analyst_a_token,
         org_a,
-        {"status_filter": ["Open", "Resolved"]},
+        {"filter": [_f("status", "eq", "Open"), _f("status", "eq", "Resolved")]},
     )
     titles = {c["title"] for c in body["items"]}
     assert titles == {"open-one", "resolved-one"}
@@ -88,7 +98,12 @@ async def test_filter_by_severity_multi(
             session, org_a, builtin_roles, analyst_a.id, title=f"sev{sev}", severity=sev
         )
 
-    body = await _list(client, analyst_a_token, org_a, {"severity": [3, 4]})
+    body = await _list(
+        client,
+        analyst_a_token,
+        org_a,
+        {"filter": [_f("severity", "eq", "3"), _f("severity", "eq", "4")]},
+    )
     assert {c["title"] for c in body["items"]} == {"sev3", "sev4"}
 
 
@@ -106,12 +121,12 @@ async def test_filter_by_assignee_email_and_unassigned(
     await _seed_case(session, org_a, builtin_roles, analyst_a.id, title="nobody")
 
     only_mine = await _list(
-        client, analyst_a_token, org_a, {"assignee": [analyst_a.email]}
+        client, analyst_a_token, org_a, {"filter": [_f("assignee", "eq", analyst_a.email)]}
     )
     assert {c["title"] for c in only_mine["items"]} == {"mine"}
 
     only_unassigned = await _list(
-        client, analyst_a_token, org_a, {"assignee": ["Unassigned"]}
+        client, analyst_a_token, org_a, {"filter": [_f("assignee", "eq", "Unassigned")]}
     )
     assert {c["title"] for c in only_unassigned["items"]} == {"nobody"}
 
@@ -119,27 +134,129 @@ async def test_filter_by_assignee_email_and_unassigned(
         client,
         analyst_a_token,
         org_a,
-        {"assignee": [analyst_a.email, "Unassigned"]},
+        {
+            "filter": [
+                _f("assignee", "eq", analyst_a.email),
+                _f("assignee", "eq", "Unassigned"),
+            ]
+        },
     )
     assert {c["title"] for c in both["items"]} == {"mine", "nobody"}
 
 
-async def test_filter_by_tag(
+async def test_filter_by_tag_equals(
     client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
 ):
     await _seed_case(
-        session, org_a, builtin_roles, analyst_a.id, title="phish", tags=["phishing"]
+        session, org_a, builtin_roles, analyst_a.id, title="amber", tags=["tlp:amber"]
     )
     await _seed_case(
-        session, org_a, builtin_roles, analyst_a.id, title="malware", tags=["malware"]
+        session, org_a, builtin_roles, analyst_a.id, title="red", tags=["tlp:red"]
     )
     await _seed_case(session, org_a, builtin_roles, analyst_a.id, title="untagged")
 
-    body = await _list(client, analyst_a_token, org_a, {"tag": ["phishing"]})
-    assert {c["title"] for c in body["items"]} == {"phish"}
+    body = await _list(
+        client, analyst_a_token, org_a, {"filter": [_f("tag:tlp", "eq", "amber")]}
+    )
+    assert {c["title"] for c in body["items"]} == {"amber"}
 
 
-async def test_filter_by_title_substring(
+async def test_filter_by_tag_or_within_key(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    # tlp:amber OR tlp:red — same group key → union. (The regression that a
+    # namespace:predicate grouping would have broken.)
+    await _seed_case(
+        session, org_a, builtin_roles, analyst_a.id, title="amber", tags=["tlp:amber"]
+    )
+    await _seed_case(
+        session, org_a, builtin_roles, analyst_a.id, title="red", tags=["tlp:red"]
+    )
+    await _seed_case(
+        session, org_a, builtin_roles, analyst_a.id, title="green", tags=["tlp:green"]
+    )
+
+    body = await _list(
+        client,
+        analyst_a_token,
+        org_a,
+        {"filter": [_f("tag:tlp", "eq", "amber"), _f("tag:tlp", "eq", "red")]},
+    )
+    assert {c["title"] for c in body["items"]} == {"amber", "red"}
+
+
+async def test_filter_by_tag_and_across_keys(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    # Different tag keys → intersection.
+    await _seed_case(
+        session,
+        org_a,
+        builtin_roles,
+        analyst_a.id,
+        title="both",
+        tags=["tlp:amber", "kill-chain:phase=exploit"],
+    )
+    await _seed_case(
+        session, org_a, builtin_roles, analyst_a.id, title="amber-only", tags=["tlp:amber"]
+    )
+    await _seed_case(
+        session,
+        org_a,
+        builtin_roles,
+        analyst_a.id,
+        title="phase-only",
+        tags=["kill-chain:phase=exploit"],
+    )
+
+    body = await _list(
+        client,
+        analyst_a_token,
+        org_a,
+        {
+            "filter": [
+                _f("tag:tlp", "eq", "amber"),
+                _f("tag:kill-chain:phase", "eq", "exploit"),
+            ]
+        },
+    )
+    assert {c["title"] for c in body["items"]} == {"both"}
+
+
+async def test_filter_invalid_values_match_nothing(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """Unusable values on known keys (bogus enum member, non-numeric severity)
+    must return an empty page, not a 500 — status is a native Postgres enum."""
+    await _seed_case(session, org_a, builtin_roles, analyst_a.id, title="one")
+
+    for term in ("status~eq~bogus", "severity~eq~abc"):
+        body = await _list(client, analyst_a_token, org_a, {"filter": [term]})
+        assert body["total"] == 0, term
+
+
+async def test_filter_by_status_contains(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """Contains on the enum status resolves members in Python (ilike doesn't
+    compile against a Postgres enum column)."""
+    await _seed_case(session, org_a, builtin_roles, analyst_a.id, title="open-one")
+    await _seed_case(
+        session,
+        org_a,
+        builtin_roles,
+        analyst_a.id,
+        title="resolved-one",
+        status=CaseStatus.resolved,
+    )
+
+    body = await _list(
+        client, analyst_a_token, org_a, {"filter": [_f("status", "co", "resol")]}
+    )
+    assert {c["title"] for c in body["items"]} == {"resolved-one"}
+
+
+async def test_filter_by_title_contains_multi(
     client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
 ):
     await _seed_case(
@@ -148,9 +265,19 @@ async def test_filter_by_title_substring(
     await _seed_case(
         session, org_a, builtin_roles, analyst_a.id, title="Ransomware outbreak"
     )
+    await _seed_case(session, org_a, builtin_roles, analyst_a.id, title="quiet day")
 
-    body = await _list(client, analyst_a_token, org_a, {"title": ["consent"]})
-    assert {c["title"] for c in body["items"]} == {"OAuth consent grant"}
+    # Two Contains clauses on the same key → OR.
+    body = await _list(
+        client,
+        analyst_a_token,
+        org_a,
+        {"filter": [_f("title", "co", "consent"), _f("title", "co", "ransom")]},
+    )
+    assert {c["title"] for c in body["items"]} == {
+        "OAuth consent grant",
+        "Ransomware outbreak",
+    }
 
 
 async def test_filter_by_case_number(
@@ -161,7 +288,7 @@ async def test_filter_by_case_number(
 
     # The "#" prefix is tolerated and stripped.
     body = await _list(
-        client, analyst_a_token, org_a, {"case_q": [f"#{target.id}"]}
+        client, analyst_a_token, org_a, {"filter": [_f("case", "eq", f"#{target.id}")]}
     )
     assert [c["id"] for c in body["items"]] == [target.id]
 
@@ -204,7 +331,8 @@ async def test_facets(
         analyst_a.id,
         title="assigned",
         assignee_id=analyst_a.id,
-        tags=["phishing", "malware"],
+        # Two-part (tlp), three-part (kill-chain), and a free tag (excluded).
+        tags=["tlp:amber", "tlp:red", "kill-chain:phase=exploit", "phishing"],
     )
     await _seed_case(session, org_a, builtin_roles, analyst_a.id, title="unassigned")
 
@@ -215,7 +343,12 @@ async def test_facets(
     facets = resp.json()
     assert facets["assignees"] == [analyst_a.email]
     assert facets["unassigned"] is True
-    assert set(facets["tags"]) == {"phishing", "malware"}
+    assert facets["tag_keys"] == {
+        "tlp": ["amber", "red"],
+        "kill-chain:phase": ["exploit"],
+    }
+    # Free tags are not filterable.
+    assert "phishing" not in facets["tag_keys"]
 
 
 async def test_facets_isolated_per_org(
@@ -235,7 +368,7 @@ async def test_facets_isolated_per_org(
         analyst_a.id,
         title="a-case",
         assignee_id=analyst_a.id,
-        tags=["phishing"],
+        tags=["tlp:amber"],
     )
 
     resp = await client.get(
@@ -244,5 +377,5 @@ async def test_facets_isolated_per_org(
     assert resp.status_code == 200, resp.text
     facets = resp.json()
     assert facets["assignees"] == []
-    assert facets["tags"] == []
+    assert facets["tag_keys"] == {}
     assert facets["unassigned"] is False

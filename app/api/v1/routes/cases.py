@@ -26,10 +26,17 @@ from app.api.v1.routes._files import (
     ingest_upload,
     stream_blob,
 )
+from app.api.v1.routes.case_common import (
+    OWNER_ROLE_NAME,
+    assert_assignee_in_org,
+    case_public,
+    case_public_resolved,
+    require_perm,
+)
+from app.api.v1.routes.case_detail import router as case_detail_router
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
 from app.crud import audit as audit_crud
-from app.crud import attachment as attachment_crud
 from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
 from app.crud import comment as comment_crud
@@ -38,12 +45,10 @@ from app.crud import enrichment as enrichment_crud
 from app.crud import flag as flag_crud
 from app.crud import case_template as ct_crud
 from app.crud import observable as obs_crud
-from app.crud import organisation_member as member_crud
 from app.crud import role as role_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
 from app.crud import user as user_crud
-from app.crud import task as task_crud
 from app.models.attachment import AttachmentPublic
 from app.models.audit import AuditPublic
 from app.models.case_ import (
@@ -52,9 +57,7 @@ from app.models.case_ import (
     CaseListFacets,
     CaseMergeRequest,
     CasePublic,
-    CaseStatus,
     CaseTaskSummary,
-    CaseUpdate,
 )
 from app.models.comment import (
     CommentCreate,
@@ -71,66 +74,6 @@ from app.models.task import Task, TaskCreate, TaskPublic
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
-_OWNER_ROLE_NAME = "org-admin"
-
-
-def _case_public(
-    case: Case,
-    flagged: bool,
-    custom_fields: dict[str, Any] | None = None,
-    lineage: tuple[int | None, list[int]] | None = None,
-) -> CasePublic:
-    pub = CasePublic.model_validate(case, from_attributes=True)
-    pub.flagged = flagged
-    pub.custom_fields = custom_fields or {}
-    if lineage is not None:
-        pub.merged_into, pub.merged_from = lineage
-    return pub
-
-
-async def _case_public_resolved(
-    case: Case,
-    session: AsyncSession,
-    flagged: bool,
-    custom_fields: dict[str, Any] | None = None,
-    lineage: tuple[int | None, list[int]] | None = None,
-) -> CasePublic:
-    """Single-case projection that also resolves assignee_email, tags, and task
-    summaries — fields the list endpoint does in bulk but that single-case
-    endpoints were previously leaving as defaults."""
-    pub = _case_public(case, flagged, custom_fields, lineage)
-    if case.assignee_id:
-        emails = await user_crud.emails_for_ids(session, [case.assignee_id])
-        pub.assignee_email = emails.get(case.assignee_id)
-    pub.tags = await tag_crud.list_tag_strings_for(
-        session, TaggableType.case, str(case.id)
-    )
-    tasks_map = await task_crud.summaries_for_cases(session, [case.id])
-    pub.tasks = [
-        CaseTaskSummary(id=t.id, public_id=t.public_id, title=t.title, status=t.status)
-        for t in tasks_map.get(case.id, [])
-    ]
-    return pub
-
-
-def _require_perm(ctx: ActiveOrgOrApiKeyContext, permission: str) -> None:
-    if permission not in ctx.permissions:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission}",
-        )
-
-
-async def _assert_assignee_in_org(
-    session: AsyncSession, assignee_id: uuid.UUID, organisation_id: str
-) -> None:
-    member = await member_crud.get_member(session, assignee_id, organisation_id)
-    if not member:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Assignee must be a member of the owner organisation",
-        )
-
 
 @router.get("/", response_model=Page[CasePublic])
 async def list_cases(
@@ -138,31 +81,18 @@ async def list_cases(
     session: Annotated[AsyncSession, Depends(get_session)],
     skip: int = 0,
     limit: int = 100,
-    status_filter: Annotated[list[CaseStatus] | None, Query()] = None,
-    severity: Annotated[list[int] | None, Query()] = None,
-    assignee: Annotated[list[str] | None, Query()] = None,
-    tag: Annotated[list[str] | None, Query()] = None,
-    title: Annotated[list[str] | None, Query()] = None,
-    case_q: Annotated[list[str] | None, Query()] = None,
+    filter: Annotated[list[str] | None, Query()] = None,
     sort: Annotated[str, Query()] = "id",
     order: Annotated[str, Query()] = "desc",
 ) -> Page[CasePublic]:
-    """Filterable, sortable, paginated case list. Filters are OR-within /
-    AND-across (e.g. status in {Open, Resolved} AND severity in {3, 4}). The
-    `assignee` list takes assignee emails plus the literal `Unassigned`; `tag`,
-    `title` and `case_q` match by tag string, title substring and case-number
-    substring respectively. `sort` ∈ {id, created, updated}, `order` ∈ {asc, desc}."""
-    _require_perm(ctx, "read:case")
-    filters = case_crud.CaseListFilter.from_params(
-        statuses=[s.value for s in status_filter] if status_filter else None,
-        severities=severity,
-        assignees=assignee,
-        tags=tag,
-        titles=title,
-        case_queries=case_q,
-        sort=sort,
-        order=order,
-    )
+    """Filterable, sortable, paginated case list. Each `filter` term is
+    `key~op~value` (op ∈ {eq, co}); terms are OR-within a key and AND-across keys
+    — e.g. (status eq Open OR status eq Resolved) AND (title co "phish"). Keys:
+    status, severity, assignee (email or the literal `Unassigned`), title, case,
+    and `tag:<group-key>` for tag values. `sort` ∈ {id, created, updated},
+    `order` ∈ {asc, desc}."""
+    require_perm(ctx, "read:case")
+    filters = case_crud.CaseListFilter.from_query(filter, sort=sort, order=order)
     cases, total = await case_crud.list_cases_for_org(
         session,
         ctx.organisation_id,
@@ -186,7 +116,7 @@ async def list_cases(
     tasks_map = await task_crud.summaries_for_cases(session, [c.id for c in cases])
 
     def _public(c: Case) -> CasePublic:
-        pub = _case_public(c, str(c.id) in flagged, cfs.get(str(c.id), {}), lineage.get(c.id))
+        pub = case_public(c, str(c.id) in flagged, cfs.get(str(c.id), {}), lineage.get(c.id))
         pub.tags = tags_map.get(str(c.id), [])
         pub.assignee_email = emails.get(c.assignee_id) if c.assignee_id else None
         pub.tasks = [
@@ -215,7 +145,7 @@ async def list_case_filters(
 ) -> CaseListFacets:
     """Distinct assignee/tag values across the org's cases for the list view's
     filter dropdowns. Declared before `/{case_id}` so the literal path wins."""
-    _require_perm(ctx, "read:case")
+    require_perm(ctx, "read:case")
     return await case_crud.case_list_facets(session, ctx.organisation_id)
 
 
@@ -225,14 +155,14 @@ async def create_case(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CasePublic:
-    _require_perm(ctx, "write:case")
+    require_perm(ctx, "write:case")
     if case_in.assignee_id:
-        await _assert_assignee_in_org(session, case_in.assignee_id, ctx.organisation_id)
-    owner_role = await role_crud.get_role_by_name(session, _OWNER_ROLE_NAME)
+        await assert_assignee_in_org(session, case_in.assignee_id, ctx.organisation_id)
+    owner_role = await role_crud.get_role_by_name(session, OWNER_ROLE_NAME)
     if not owner_role:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Owner role '{_OWNER_ROLE_NAME}' not found",
+            detail=f"Owner role '{OWNER_ROLE_NAME}' not found",
         )
 
     template = None
@@ -281,7 +211,7 @@ async def create_case(
         if tpl_tags:
             await tag_crud.set_tags(session, TaggableType.case, str(case.id), tpl_tags)
 
-    return await _case_public_resolved(case, session, flagged=False)
+    return await case_public_resolved(case, session, flagged=False)
 
 
 @router.post("/merge", response_model=CasePublic, status_code=status.HTTP_201_CREATED)
@@ -293,14 +223,14 @@ async def merge_cases(
     """Merge 2+ same-owner-org cases into a fresh case. Sources are frozen as
     Duplicated and read-only; children are reparented onto the new case. The acting
     org must hold write:case and own every source. See docs/case-merge-design.md."""
-    _require_perm(ctx, "write:case")
+    require_perm(ctx, "write:case")
     if req.case.assignee_id:
-        await _assert_assignee_in_org(session, req.case.assignee_id, ctx.organisation_id)
-    owner_role = await role_crud.get_role_by_name(session, _OWNER_ROLE_NAME)
+        await assert_assignee_in_org(session, req.case.assignee_id, ctx.organisation_id)
+    owner_role = await role_crud.get_role_by_name(session, OWNER_ROLE_NAME)
     if not owner_role:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Owner role '{_OWNER_ROLE_NAME}' not found",
+            detail=f"Owner role '{OWNER_ROLE_NAME}' not found",
         )
     try:
         case = await case_crud.merge_cases(
@@ -314,70 +244,12 @@ async def merge_cases(
     except case_crud.MergeError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     lineage = await case_crud.lineage_for_many(session, [case.id])
-    return await _case_public_resolved(
+    return await case_public_resolved(
         case, session, flagged=False, lineage=lineage.get(case.id)
     )
 
 
-@router.get("/{case_id}", response_model=CasePublic)
-async def get_case(
-    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> CasePublic:
-    flagged = await flag_crud.is_flagged(
-        session, FlagEntityType.case, str(case_ctx.case.id), case_ctx.organisation_id
-    )
-    cfs = await cf_crud.values_for(
-        session, CustomFieldEntityType.case, str(case_ctx.case.id)
-    )
-    lineage = await case_crud.lineage_for_many(session, [case_ctx.case.id])
-    return await _case_public_resolved(
-        case_ctx.case, session, flagged, cfs, lineage.get(case_ctx.case.id)
-    )
-
-
-@router.patch("/{case_id}", response_model=CasePublic)
-async def update_case(
-    case_in: CaseUpdate,
-    case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> CasePublic:
-    update_data = case_in.model_dump(exclude_unset=True)
-
-    owner_only_fields = {"tlp", "pap"}
-    if update_data.keys() & owner_only_fields and not case_ctx.is_owner:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the owner organisation can change TLP/PAP",
-        )
-
-    if "assignee_id" in update_data and update_data["assignee_id"] is not None:
-        from app.crud.case_share import list_shares
-        shares = await list_shares(session, case_ctx.case.id)
-        owner_org_id = next((s.organisation_id for s in shares if s.is_owner), None)
-        if owner_org_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Case has no owner organisation",
-            )
-        await _assert_assignee_in_org(session, update_data["assignee_id"], owner_org_id)
-
-    case = await case_crud.update_case(
-        session, case_ctx.case, case_in, updated_by=str(case_ctx.user.id)
-    )
-    flagged = await flag_crud.is_flagged(
-        session, FlagEntityType.case, str(case.id), case_ctx.organisation_id
-    )
-    cfs = await cf_crud.values_for(session, CustomFieldEntityType.case, str(case.id))
-    return await _case_public_resolved(case, session, flagged, cfs)
-
-
-@router.delete("/{case_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_case(
-    case_ctx: Annotated[CaseAuthContext, require_case_owner("write:case")],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> None:
-    await case_crud.delete_case(session, case_ctx.case, deleted_by=str(case_ctx.user.id))
+router.include_router(case_detail_router)
 
 
 # --- Per-org flag ---
@@ -464,7 +336,7 @@ async def create_case_task(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TaskPublic:
     if task_in.assignee_id:
-        await _assert_assignee_in_org(
+        await assert_assignee_in_org(
             session, task_in.assignee_id, case_ctx.organisation_id
         )
     task = await task_crud.create_task(

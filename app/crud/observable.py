@@ -1,10 +1,12 @@
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import or_
+from sqlalchemy import and_, false, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud._filters import FilterClause, group_by_key, parse_clauses
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
@@ -14,12 +16,146 @@ from app.models.case_share import CaseShare
 from app.models.observable import (
     Observable,
     ObservableCreate,
+    ObservableFacets,
     ObservableShare,
     ObservableType,
     ObservableTypeCreate,
     ObservableUpdate,
 )
 from app.models.organisation_link import AutoShareMode
+
+# Raw observable_type (lower-cased) → UI category. Mirrors the web TYPE_MAP;
+# unknown raws fall into "other".
+_TYPE_TO_CATEGORY = {
+    "domain": "domain",
+    "url": "url",
+    "mail": "mail",
+    "email": "mail",
+    "ip": "ip",
+    "ipv4": "ip",
+    "ipv6": "ip",
+    "hash": "hash",
+    "file": "file",
+    "filename": "file",
+    "other": "other",
+}
+#: Category → its raw observable_type values, for the reverse (filter) direction.
+_CATEGORY_TO_RAWS: dict[str, list[str]] = {}
+for _raw, _cat in _TYPE_TO_CATEGORY.items():
+    _CATEGORY_TO_RAWS.setdefault(_cat, []).append(_raw)
+#: Raws mapped to a concrete (non-"other") category — everything else is "other".
+_NON_OTHER_RAWS = [r for r, c in _TYPE_TO_CATEGORY.items() if c != "other"]
+
+_OBSERVABLE_SORT_COLUMNS = {
+    "value": Observable.data,
+    "added": Observable.created_at,
+}
+
+
+def observable_source(case_id: int | None, alert_id: int | None) -> str:
+    """The UI 'source' of an observable: its case, else its alert, else 'feed'.
+    Mirrors the web toObservable() derivation."""
+    if case_id is not None:
+        return f"#{case_id}"
+    if alert_id is not None:
+        return f"AL-{alert_id}"
+    return "feed"
+
+
+@dataclass(frozen=True)
+class ObservableListFilter:
+    """Clause filter + sort for the observable list (OR-within / AND-across).
+    Keys: type, tlp, flag, source, value."""
+
+    clauses: tuple[FilterClause, ...] = ()
+    sort: str = ""
+    order: str = "desc"
+
+    @classmethod
+    def from_query(
+        cls, raw_filters: list[str] | None = None, *, sort="", order="desc"
+    ) -> "ObservableListFilter":
+        return cls(clauses=parse_clauses(raw_filters), sort=sort, order=order)
+
+
+def _observable_clause_cond(key: str, clause: FilterClause):
+    """Condition for one clause, None for an unknown key (ignored). A known key
+    with an unusable value yields false() — matches nothing, never widens."""
+    v = clause.value
+    contains = clause.contains
+    if key == "type":
+        # `v` is a UI category; match the raw observable_type(s) behind it.
+        col = func.lower(Observable.observable_type)
+        if v == "other":
+            return col.notin_(_NON_OTHER_RAWS)
+        raws = _CATEGORY_TO_RAWS.get(v)
+        return col.in_(raws) if raws else false()
+    if key == "tlp":
+        try:
+            return Observable.tlp == int(v)
+        except ValueError:
+            return false()
+    if key == "flag":
+        if v == "ioc":
+            return Observable.ioc.is_(True)
+        if v == "sighted":
+            return Observable.sighted.is_(True)
+        return false()
+    if key == "source":
+        if v == "feed":
+            return and_(Observable.case_id.is_(None), Observable.alert_id.is_(None))
+        if v.startswith("AL-"):
+            try:
+                return Observable.alert_id == int(v[len("AL-") :])
+            except ValueError:
+                return false()
+        try:
+            return Observable.case_id == int(v.lstrip("#"))
+        except ValueError:
+            return false()
+    if key == "value":
+        return Observable.data.ilike(f"%{v}%") if contains else Observable.data == v
+    return None
+
+
+def _apply_observable_filters(stmt, f: ObservableListFilter):
+    for key, clauses in group_by_key(f.clauses).items():
+        conds = [
+            c
+            for c in (_observable_clause_cond(key, cl) for cl in clauses)
+            if c is not None
+        ]
+        if conds:
+            stmt = stmt.where(or_(*conds))
+    return stmt
+
+
+def _observable_order_by(f: ObservableListFilter):
+    col = _OBSERVABLE_SORT_COLUMNS.get(f.sort)
+    if col is None:
+        return (Observable.created_at.desc(),)
+    direction = col.asc() if f.order == "asc" else col.desc()
+    return direction, Observable.created_at.desc()
+
+
+def _visible_observable_condition(organisation_id: str):
+    """Visibility predicate shared by the org list and its facets."""
+    owner_case_ids = select(CaseShare.case_id).where(
+        CaseShare.organisation_id == organisation_id,
+        CaseShare.is_owner == True,  # noqa: E712
+    )
+    shared_observable_ids = select(ObservableShare.observable_id).where(
+        ObservableShare.organisation_id == organisation_id
+    )
+    owned_alert_ids = select(Alert.id).where(
+        Alert.organisation_id == organisation_id,
+        Alert.deleted_at.is_(None),
+    )
+    return or_(
+        Observable.case_id.in_(owner_case_ids),
+        Observable.id.in_(shared_observable_ids),
+        Observable.alert_id.in_(owned_alert_ids),
+    )
 
 
 def _observable_context(observable: Observable) -> tuple[str | None, str | None]:
@@ -143,31 +279,40 @@ async def list_observables_for_org(
     organisation_id: str,
     skip: int = 0,
     limit: int = 100,
+    filters: ObservableListFilter | None = None,
 ) -> tuple[list[Observable], int]:
     """Every live observable the active org may see, across all its cases and alerts:
     case observables on cases it owns (owner sees all), observables explicitly shared to
-    it via ObservableShare, and observables on alerts it owns. Same visibility rule as
-    `_resolve_observable_visibility`, expressed as one filtered query. Newest first."""
-    owner_case_ids = select(CaseShare.case_id).where(
-        CaseShare.organisation_id == organisation_id,
-        CaseShare.is_owner == True,  # noqa: E712
-    )
-    shared_observable_ids = select(ObservableShare.observable_id).where(
-        ObservableShare.organisation_id == organisation_id
-    )
-    owned_alert_ids = select(Alert.id).where(
-        Alert.organisation_id == organisation_id,
-        Alert.deleted_at.is_(None),
-    )
+    it via ObservableShare, and observables on alerts it owns. Filtered, sorted and
+    paginated server-side."""
+    filters = filters or ObservableListFilter()
     base = select(Observable).where(
         Observable.deleted_at.is_(None),
-        or_(
-            Observable.case_id.in_(owner_case_ids),
-            Observable.id.in_(shared_observable_ids),
-            Observable.alert_id.in_(owned_alert_ids),
-        ),
+        _visible_observable_condition(organisation_id),
     )
-    return await paginate(session, base, Observable.created_at.desc(), skip=skip, limit=limit)
+    base = _apply_observable_filters(base, filters)
+    return await paginate(
+        session, base, *_observable_order_by(filters), skip=skip, limit=limit
+    )
+
+
+async def observable_facets(
+    session: AsyncSession, organisation_id: str
+) -> ObservableFacets:
+    """Distinct 'source' values (case / alert / feed) across the org's visible
+    observables, for the list view's Source filter dropdown."""
+    rows = (
+        await session.execute(
+            select(Observable.case_id, Observable.alert_id)
+            .where(
+                Observable.deleted_at.is_(None),
+                _visible_observable_condition(organisation_id),
+            )
+            .distinct()
+        )
+    ).all()
+    sources = sorted({observable_source(case_id, alert_id) for case_id, alert_id in rows})
+    return ObservableFacets(sources=sources)
 
 
 async def _fan_out_shares(

@@ -1,11 +1,92 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy import String, cast, false, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud._filters import (
+    TAG_PREFIX,
+    FilterClause,
+    group_by_key,
+    group_tag_facets,
+    parse_clauses,
+    tag_key_condition,
+)
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
-from app.models.alert import Alert, AlertCreate, AlertStatus, AlertUpdate
+from app.models.alert import Alert, AlertCreate, AlertFacets, AlertStatus, AlertUpdate
+from app.models.tag import Tag, Tagging, TaggableType
+
+_ALERT_SORT_COLUMNS = {
+    "id": Alert.id,
+    "age": Alert.date,
+}
+
+
+@dataclass(frozen=True)
+class AlertListFilter:
+    """Clause filter + sort for the alert list (OR-within / AND-across).
+    Keys: severity, source, tlp, alert, title, and `tag:<group-key>`."""
+
+    clauses: tuple[FilterClause, ...] = ()
+    sort: str = "id"
+    order: str = "desc"
+
+    @classmethod
+    def from_query(
+        cls, raw_filters: list[str] | None = None, *, sort="id", order="desc"
+    ) -> "AlertListFilter":
+        return cls(clauses=parse_clauses(raw_filters), sort=sort, order=order)
+
+
+def _alert_clause_cond(key: str, clause: FilterClause):
+    """Condition for one clause, None for an unknown key (ignored). A known key
+    with an unusable value yields false() — matches nothing, never widens."""
+    v = clause.value
+    contains = clause.contains
+    if key == "severity":
+        try:
+            return Alert.severity == int(v)
+        except ValueError:
+            return false()
+    if key == "tlp":
+        try:
+            return Alert.tlp == int(v)
+        except ValueError:
+            return false()
+    if key == "source":
+        return Alert.source.ilike(f"%{v}%") if contains else Alert.source == v
+    if key == "title":
+        return Alert.title.ilike(f"%{v}%") if contains else Alert.title == v
+    if key == "alert":
+        id_str = cast(Alert.id, String)
+        vv = v.lstrip("#").removeprefix("AL-")
+        return id_str.ilike(f"%{vv}%") if contains else id_str == vv
+    return None
+
+
+def _apply_alert_filters(stmt, f: AlertListFilter):
+    for key, clauses in group_by_key(f.clauses).items():
+        if key.startswith(TAG_PREFIX):
+            stmt = stmt.where(
+                tag_key_condition(
+                    TaggableType.alert, Alert.id, key[len(TAG_PREFIX) :], clauses
+                )
+            )
+            continue
+        conds = [
+            c for c in (_alert_clause_cond(key, cl) for cl in clauses) if c is not None
+        ]
+        if conds:
+            stmt = stmt.where(or_(*conds))
+    return stmt
+
+
+def _alert_order_by(f: AlertListFilter):
+    col = _ALERT_SORT_COLUMNS.get(f.sort, Alert.id)
+    direction = col.asc() if f.order == "asc" else col.desc()
+    return direction, Alert.id.desc()
 
 
 async def get_alert(session: AsyncSession, alert_id: int) -> Alert | None:
@@ -47,10 +128,13 @@ async def list_alerts_for_org(
     type_filter: str | None = None,
     source_filter: str | None = None,
     severity: int | None = None,
+    filters: AlertListFilter | None = None,
 ) -> tuple[list[Alert], int]:
+    filters = filters or AlertListFilter()
     base = select(Alert).where(
         Alert.organisation_id == organisation_id, Alert.deleted_at.is_(None)
     )
+    # Legacy scalar params (kept for API consumers) AND-in alongside clauses.
     if status_filter is not None:
         base = base.where(Alert.status == status_filter)
     if type_filter is not None:
@@ -60,7 +144,48 @@ async def list_alerts_for_org(
     if severity is not None:
         base = base.where(Alert.severity == severity)
 
-    return await paginate(session, base, Alert.id.desc(), skip=skip, limit=limit)
+    base = _apply_alert_filters(base, filters)
+    return await paginate(
+        session, base, *_alert_order_by(filters), skip=skip, limit=limit
+    )
+
+
+async def alert_facets(session: AsyncSession, organisation_id: str) -> AlertFacets:
+    """Distinct source + tag-key values across the org's alerts, for the list
+    view's filter dropdowns."""
+    org_alerts = (
+        select(Alert.id)
+        .where(Alert.organisation_id == organisation_id, Alert.deleted_at.is_(None))
+        .subquery()
+    )
+    sources = list(
+        (
+            await session.execute(
+                select(Alert.source)
+                .where(
+                    Alert.organisation_id == organisation_id,
+                    Alert.deleted_at.is_(None),
+                )
+                .distinct()
+                .order_by(Alert.source)
+            )
+        ).scalars()
+    )
+    tag_rows = (
+        (
+            await session.execute(
+                select(Tag)
+                .join(Tagging, Tagging.tag_id == Tag.id)
+                .join(org_alerts, cast(org_alerts.c.id, String) == Tagging.taggable_id)
+                .where(Tagging.taggable_type == TaggableType.alert)
+                .distinct()
+                .order_by(Tag.namespace, Tag.predicate, Tag.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return AlertFacets(sources=sources, tag_keys=group_tag_facets(tag_rows))
 
 
 async def ingest_alert(

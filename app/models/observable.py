@@ -127,3 +127,10 @@ class ObservableUpdate(SQLModel):
     ioc: bool | None = None
     sighted: bool | None = None
     ignore_similarity: bool | None = None
+
+
+class ObservableFacets(SQLModel):
+    """Filterable values across the org's observables, for the filter dropdowns."""
+
+    #: Distinct 'source' strings (#case / AL-alert / feed).
+    sources: list[str] = []

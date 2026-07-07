@@ -103,6 +103,17 @@ class TaskQueuePublic(TaskPublic):
     assignee_email: str | None = None
 
 
+class TaskQueueFacets(SQLModel):
+    """Filterable values across the org's task queue, for the list's dropdowns."""
+
+    #: Distinct assignee emails on visible tasks.
+    assignees: list[str] = []
+    #: Whether any visible task is unassigned.
+    unassigned: bool = False
+    #: Distinct task kinds (the `group`, with empty shown as "General").
+    kinds: list[str] = []
+
+
 class TaskUpdate(SQLModel):
     title: str | None = None
     group: str | None = None

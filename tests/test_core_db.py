@@ -3,8 +3,10 @@ from sqlmodel import select
 from app.core.db import ensure_default_superadmin, init_db
 from app.crud.user import get_user_by_email
 from app.models.audit import Audit
+from app.models.alert import Alert
 from app.models.case_ import Case
 from app.models.comment import Comment
+from app.models.knowledge_base import KnowledgeBasePage
 from app.models.observable import Observable
 from app.models.task import Task
 from app.models.user import User
@@ -102,3 +104,35 @@ async def test_init_db_seeds_demo_case_once_in_local(session, monkeypatch):
     assert len(observables) >= 1
     assert len(comments) >= 1
     assert len(activity) >= 1
+
+
+async def test_init_db_seeds_demo_operational_content_once_in_local(
+    session, monkeypatch
+):
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "ENVIRONMENT", "local")
+
+    await init_db(session)
+    await init_db(session)
+
+    alerts = (await session.execute(select(Alert))).scalars().all()
+    tasks = (await session.execute(select(Task))).scalars().all()
+    pages = (await session.execute(select(KnowledgeBasePage))).scalars().all()
+
+    assert {alert.title for alert in alerts} >= {
+        "Possible ransomware staging — mass file rename on FILESRV-AU02",
+        "OAuth consent grant to unverified app for 3 privileged users",
+        "Credential-phish campaign targeting retail billing team (38 rcpts)",
+    }
+    assert {task.title for task in tasks} >= {
+        "Disable malicious app registration tenant-wide",
+        "Remove mailbox rules and check forwarding",
+        "Publish executive situation summary",
+    }
+    assert {page.title for page in pages} == {
+        "Phishing response runbook",
+        "BEC investigation guide",
+        "TLP & PAP handling policy",
+        "Analyst onboarding checklist",
+    }

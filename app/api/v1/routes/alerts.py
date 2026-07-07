@@ -6,6 +6,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Response,
     UploadFile,
     status,
@@ -37,6 +38,7 @@ from app.models.alert import (
     Alert,
     AlertBulkMerge,
     AlertCreate,
+    AlertFacets,
     AlertPromote,
     AlertPublic,
     AlertStatus,
@@ -94,8 +96,15 @@ async def list_alerts(
     type_filter: str | None = None,
     source_filter: str | None = None,
     severity: int | None = None,
+    filter: Annotated[list[str] | None, Query()] = None,
+    sort: Annotated[str, Query()] = "id",
+    order: Annotated[str, Query()] = "desc",
 ) -> Page[AlertPublic]:
+    """Each `filter` term is `key~op~value` (keys: severity, source, tlp, alert,
+    title, and `tag:<group-key>`), OR-within-key / AND-across-key. The legacy
+    scalar params (status_filter/type_filter/…) still apply, AND-ed with clauses."""
     _require_perm(ctx, "read:alert")
+    filters = alert_crud.AlertListFilter.from_query(filter, sort=sort, order=order)
     alerts, total = await alert_crud.list_alerts_for_org(
         session,
         ctx.organisation_id,
@@ -105,6 +114,7 @@ async def list_alerts(
         type_filter=type_filter,
         source_filter=source_filter,
         severity=severity,
+        filters=filters,
     )
     flagged = await flag_crud.flagged_ids(
         session, FlagEntityType.alert, [str(a.id) for a in alerts], ctx.organisation_id
@@ -121,6 +131,17 @@ async def list_alerts(
         skip=skip,
         limit=limit,
     )
+
+
+@router.get("/filters", response_model=AlertFacets)
+async def list_alert_filters(
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertFacets:
+    """Distinct source + tag-key values across the org's alerts, for the list
+    view's filter dropdowns. Declared before `/{alert_id}` so the literal wins."""
+    _require_perm(ctx, "read:alert")
+    return await alert_crud.alert_facets(session, ctx.organisation_id)
 
 
 @router.post("/", response_model=AlertPublic)
