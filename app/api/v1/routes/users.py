@@ -136,9 +136,11 @@ async def search_users(
     q: str = "",
     limit: int = 20,
 ) -> list[UserPublic]:
-    """Find users by email or name — used by the assignee picker. Scoped to members
-    of the active org (from X-Organisation-Id) so it only offers users who can
-    actually be assigned; open to any member of that org."""
+    """Find users by email or name for assignee pickers.
+
+    Results are scoped to members of the active org so the picker only offers
+    users who can actually be assigned.
+    """
     limit = max(1, min(limit, 50))
     return await user_crud.search_users(
         session, q, limit=limit, organisation_id=ctx.organisation_id

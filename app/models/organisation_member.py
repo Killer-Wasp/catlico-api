@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 
+from pydantic import EmailStr
 from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
@@ -18,8 +19,11 @@ class OrganisationMember(TimestampMixin, table=True):
 
 
 class OrganisationMemberCreate(SQLModel):
-    user_id: uuid.UUID
     role_id: uuid.UUID
+    user_id: uuid.UUID | None = None
+    email: EmailStr | None = None
+    first_name: str | None = None
+    last_name: str | None = None
 
 
 class OrganisationMemberPublic(SQLModel):

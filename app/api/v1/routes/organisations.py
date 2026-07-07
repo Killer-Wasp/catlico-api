@@ -24,7 +24,7 @@ from app.models.organisation_member import (
     OrganisationMemberPublic,
     OrganisationMemberUpdate,
 )
-from app.models.user import User
+from app.models.user import User, UserCreate
 
 router = APIRouter(prefix="/organisations", tags=["organisations"])
 
@@ -149,7 +149,36 @@ async def add_member(
     ctx: Annotated[OrgContext, require_permission("write:user")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> OrganisationMemberPublic:
-    existing = await member_crud.get_member(session, member_in.user_id, ctx.organisation_id)
+    user_id = member_in.user_id
+    if user_id is None:
+        if member_in.email is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Either user_id or email is required",
+            )
+        user = await user_crud.get_user_by_email(session, str(member_in.email))
+        if user is None:
+            user = await user_crud.create_user(
+                session,
+                UserCreate(
+                    email=member_in.email,
+                    first_name=member_in.first_name,
+                    last_name=member_in.last_name,
+                ),
+            )
+            await record_audit(
+                session,
+                action="create",
+                obj=user,
+                context_type="organisation",
+                context_id=ctx.organisation_id,
+                actor=str(ctx.user.id),
+                details={"email": user.email, "is_superadmin": user.is_superadmin},
+                main_action=False,
+            )
+        user_id = user.id
+
+    existing = await member_crud.get_member(session, user_id, ctx.organisation_id)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -159,7 +188,10 @@ async def add_member(
     if not role:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
     member = await member_crud.add_member(
-        session, ctx.organisation_id, member_in, created_by=str(ctx.user.id)
+        session,
+        ctx.organisation_id,
+        OrganisationMemberCreate(user_id=user_id, role_id=member_in.role_id),
+        created_by=str(ctx.user.id),
     )
     await record_audit(
         session,

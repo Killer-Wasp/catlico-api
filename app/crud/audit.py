@@ -34,6 +34,15 @@ def _type_of(obj: Any) -> str:
     return obj.__tablename__.removesuffix("_")
 
 
+def _object_id_of(obj: Any) -> str:
+    value = (
+        getattr(obj, "public_id", None)
+        or getattr(obj, "id", None)
+        or getattr(obj, "name", None)
+    )
+    return str(value)
+
+
 def _is_sensitive(key: str) -> bool:
     k = key.lower()
     return k in _REDACT_EXACT or any(s in k for s in _REDACT_SUBSTR)
@@ -101,7 +110,7 @@ async def record_audit(
         # public_id (e.g. T-1234-1) that is globally unique and human-readable;
         # the bare integer `id` is only unique within its case. Fall back to id
         # for entities without one (case = its number, comment/observable = UUID).
-        object_id=str(getattr(obj, "public_id", None) or obj.id),
+        object_id=_object_id_of(obj),
         context_type=context_type,
         context_id=context_id,
         actor=actor,

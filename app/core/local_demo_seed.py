@@ -231,7 +231,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
         for obs_in in [
             ObservableCreate(
                 observable_type="domain",
-                data="login-originenergy.support",
+                data="login-paylink.support",
                 message="Lookalike billing portal domain",
                 tlp=2,
                 ioc=True,
@@ -246,7 +246,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
             ),
             ObservableCreate(
                 observable_type="mail",
-                data="accounts@billing-origin.co",
+                data="accounts@billing-paylink.co",
                 message="Sender observed in phish lure",
                 tlp=2,
                 ioc=True,

@@ -69,6 +69,8 @@ async def add_member(
     member_in: OrganisationMemberCreate,
     created_by: str,
 ) -> OrganisationMember:
+    if member_in.user_id is None:
+        raise ValueError("user_id is required to persist an organisation member")
     member = OrganisationMember(
         user_id=member_in.user_id,
         organisation_id=organisation_id,

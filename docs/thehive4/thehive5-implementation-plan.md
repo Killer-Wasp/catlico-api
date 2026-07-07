@@ -47,7 +47,7 @@ demand and a per-feature implementation breakdown on this stack.
 | Internal async backbone | **DB-table-as-queue (`SELECT … FOR UPDATE SKIP LOCKED` on PG; single-proc poll on SQLite)** | No broker needed for v1. Kafka/Redis are *notifier sinks*, not the internal bus. |
 | Deploy shape | **Monolith app + separable worker processes** (dispatcher, scheduler, Cortex/MISP pollers, function workers) off one codebase/DB | Tenancy correctness depends on one gate + one audit/outbox path; microservices multiply where that must be re-proven. |
 | Dropped (matches existing decisions) | WebDAV/TheHiveFS, HDFS blob provider, exact ScalliGraph query grammar, v0 wire compat | Optional/legacy; not load-bearing for the product shape. |
-| Dependencies | **All pip installs from the internal Nexus PyPI proxy** (`https://nexus.apps.origin.com.au/repository/shared-pypi-proxy/`), never pypi.org | Org policy. **M0 must verify every dependency is mirrored; if one is missing, STOP and notify — no public fallback.** |
+| Dependencies | **All pip installs from the internal Nexus PyPI proxy**, never pypi.org | Org policy. **M0 must verify every dependency is mirrored; if one is missing, STOP and notify — no public fallback.** |
 
 ---
 

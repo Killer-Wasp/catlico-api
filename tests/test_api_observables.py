@@ -193,3 +193,23 @@ async def test_promote_imports_alert_observables(
     assert obs.json()["total"] == 2
     datas = {o["data"] for o in obs.json()["items"]}
     assert datas == {"5.5.5.5", "bad.test"}
+
+
+async def test_superadmin_can_create_and_delete_observable_type(
+    client: AsyncClient, admin_token
+):
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    created = await client.post(
+        "/api/v1/observable-types/",
+        json={"name": "x-test-agent", "is_attachment": False},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json() == {"name": "x-test-agent", "is_attachment": False}
+
+    deleted = await client.delete(
+        "/api/v1/observable-types/x-test-agent",
+        headers=headers,
+    )
+    assert deleted.status_code == 204, deleted.text

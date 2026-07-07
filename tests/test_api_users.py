@@ -251,40 +251,76 @@ async def test_avatar_rejects_non_image(client: AsyncClient, admin_user, admin_t
 # --- search ---
 
 
-async def test_search_users_by_email(client: AsyncClient, admin_user, admin_token, viewer_user):
+async def test_search_users_by_email(
+    client: AsyncClient, org_a, analyst_a, analyst_b, analyst_a_token
+):
     response = await client.get(
         "/api/v1/users/search",
-        params={"q": "viewer"},
-        headers={"Authorization": f"Bearer {admin_token}"},
+        params={"q": "analyst"},
+        headers={
+            "Authorization": f"Bearer {analyst_a_token}",
+            "X-Organisation-Id": org_a.id,
+        },
     )
     assert response.status_code == 200
     emails = [u["email"] for u in response.json()]
-    assert "viewer@test.com" in emails
-    assert "admin@test.com" not in emails
+    assert analyst_a.email in emails
+    assert analyst_b.email not in emails
 
 
-async def test_search_users_by_name(client: AsyncClient, admin_user, admin_token):
-    auth = {"Authorization": f"Bearer {admin_token}"}
-    await client.post(
-        "/api/v1/users/",
-        json={"email": "grace@test.com", "first_name": "Grace", "last_name": "Hopper"},
-        headers=auth,
+async def test_search_users_by_name(
+    client: AsyncClient, session, org_a, builtin_roles, admin_user, analyst_a_token
+):
+    from app.crud.organisation_member import add_member
+    from app.crud.user import create_user
+    from app.models.organisation_member import OrganisationMemberCreate
+    from app.models.user import UserCreate
+
+    user = await create_user(
+        session,
+        UserCreate(email="grace@test.com", first_name="Grace", last_name="Hopper"),
+    )
+    await add_member(
+        session,
+        org_a.id,
+        OrganisationMemberCreate(user_id=user.id, role_id=builtin_roles["analyst"].id),
+        created_by=str(admin_user.id),
     )
     # full-name query spanning both fields
     response = await client.get(
-        "/api/v1/users/search", params={"q": "grace hopper"}, headers=auth
+        "/api/v1/users/search",
+        params={"q": "grace hopper"},
+        headers={
+            "Authorization": f"Bearer {analyst_a_token}",
+            "X-Organisation-Id": org_a.id,
+        },
     )
     assert response.status_code == 200
     emails = [u["email"] for u in response.json()]
     assert "grace@test.com" in emails
 
 
-async def test_search_users_available_to_non_admin(
-    client: AsyncClient, viewer_user, viewer_token
+async def test_search_users_requires_active_org(
+    client: AsyncClient, analyst_a_token
 ):
     response = await client.get(
         "/api/v1/users/search",
-        params={"q": "admin"},
-        headers={"Authorization": f"Bearer {viewer_token}"},
+        params={"q": "analyst"},
+        headers={"Authorization": f"Bearer {analyst_a_token}"},
+    )
+    assert response.status_code == 400
+
+
+async def test_search_users_available_to_non_admin(
+    client: AsyncClient, org_a, analyst_a, analyst_a_token
+):
+    response = await client.get(
+        "/api/v1/users/search",
+        params={"q": "analyst-a"},
+        headers={
+            "Authorization": f"Bearer {analyst_a_token}",
+            "X-Organisation-Id": org_a.id,
+        },
     )
     assert response.status_code == 200
+    assert [u["email"] for u in response.json()] == [analyst_a.email]
