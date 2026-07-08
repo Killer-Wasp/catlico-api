@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     # Default admin seeding
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
     DEFAULT_ADMIN_PASSWORD: str = "changeme"
+    DEFAULT_ADMIN_FIRST_NAME: str = "Catlico"
+    DEFAULT_ADMIN_LAST_NAME: str = "Administrator"
 
     # Password reset delivery. If SMTP_HOST is unset, reset tokens are stored but
     # not delivered (same public response, no raw-token logging).

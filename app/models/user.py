@@ -7,8 +7,10 @@ from sqlmodel import Field, SQLModel
 
 class UserBase(SQLModel):
     email: EmailStr = Field(unique=True, index=True)
-    first_name: str | None = Field(default=None)
-    last_name: str | None = Field(default=None)
+    # Every user must have a name. Enforced non-null at the DB level and
+    # non-empty on the input schemas (UserCreate / UserUpdate / UserMeUpdate).
+    first_name: str = Field(min_length=1)
+    last_name: str = Field(min_length=1)
     is_active: bool = True
     is_superadmin: bool = False
 
@@ -33,16 +35,17 @@ class User(UserBase, table=True):
 class UserCreate(SQLModel):
     email: EmailStr
     password: str | None = None
-    first_name: str | None = None
-    last_name: str | None = None
+    # Required: a user cannot be created without a name.
+    first_name: str = Field(min_length=1)
+    last_name: str = Field(min_length=1)
     is_superadmin: bool = False
 
 
 class UserPublic(SQLModel):
     id: uuid.UUID
     email: EmailStr
-    first_name: str | None
-    last_name: str | None
+    first_name: str
+    last_name: str
     is_active: bool
     is_superadmin: bool
     has_avatar: bool
@@ -53,15 +56,17 @@ class UserPublic(SQLModel):
 class UserUpdate(SQLModel):
     email: EmailStr | None = None
     password: str | None = None
-    first_name: str | None = None
-    last_name: str | None = None
+    # Omit to leave unchanged; when provided it must be non-empty (no clearing).
+    first_name: str | None = Field(default=None, min_length=1)
+    last_name: str | None = Field(default=None, min_length=1)
     is_active: bool | None = None
     is_superadmin: bool | None = None
 
 
 class UserMeUpdate(SQLModel):
     email: EmailStr | None = None
-    first_name: str | None = None
-    last_name: str | None = None
+    # Omit to leave unchanged; when provided it must be non-empty (no clearing).
+    first_name: str | None = Field(default=None, min_length=1)
+    last_name: str | None = Field(default=None, min_length=1)
     current_password: str | None = None
     new_password: str | None = None

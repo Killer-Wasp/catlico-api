@@ -29,7 +29,7 @@ async def _make_case(session, org, builtin_roles, user, title="c"):
 async def plain_analyst_a(session, org_a, builtin_roles, admin_user):
     """A user with the *analyst* role in org-a: has write:case but NOT write:custom_field."""
     user = await create_user(
-        session, UserCreate(email="plain-analyst-a@test.com", password="password123")
+        session, UserCreate(first_name="Test", last_name="User", email="plain-analyst-a@test.com", password="password123")
     )
     await add_member(
         session,

@@ -158,6 +158,11 @@ async def add_member(
             )
         user = await user_crud.get_user_by_email(session, str(member_in.email))
         if user is None:
+            if not member_in.first_name or not member_in.last_name:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="first_name and last_name are required when inviting a new user",
+                )
             user = await user_crud.create_user(
                 session,
                 UserCreate(

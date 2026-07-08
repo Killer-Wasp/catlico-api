@@ -47,7 +47,13 @@ from app.models.alert import (
     AlertStatus,
     AlertUpdate,
 )
-from app.models.case_ import CaseCreate, CasePublic, CaseStatus, SimilarCasePublic
+from app.models.case_ import (
+    CaseCreate,
+    CasePublic,
+    CaseStatus,
+    LinkedCasePublic,
+    SimilarCasePublic,
+)
 from app.models.comment import (
     CommentCreate,
     CommentEntityType,
@@ -685,6 +691,38 @@ async def list_alert_similar_cases(
             shared_observables=shared,
         )
         for case, shared in rows
+    ]
+
+
+@router.get("/{alert_id}/linked-cases", response_model=list[LinkedCasePublic])
+async def list_alert_linked_cases(
+    alert_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[LinkedCasePublic]:
+    """The case this alert is directly linked to (via `Alert.case_id`, e.g. after
+    promotion or merge) — the drawer's "Linked case", symmetric to a case's
+    "Linked alerts". Empty when the alert is unpromoted or the case isn't visible."""
+    _require_perm(ctx, "read:case")
+    alert = await _resolve_owned_alert(session, ctx, alert_id)
+    if alert.case_id is None:
+        return []
+    case = await case_crud.get_case(session, alert.case_id)
+    if case is None:
+        return []
+    if not ctx.user.is_superadmin:
+        share = await case_share_crud.get_share(
+            session, case.id, ctx.organisation_id
+        )
+        if share is None:
+            return []
+    return [
+        LinkedCasePublic(
+            id=case.id,
+            title=case.title,
+            severity=case.severity,
+            status=case.status,
+        )
     ]
 
 

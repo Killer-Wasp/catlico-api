@@ -210,7 +210,7 @@ def analyzer_secret(monkeypatch):
 async def admin_user(session):
     return await create_user(
         session,
-        UserCreate(email="admin@test.com", password="password123", is_superadmin=True),
+        UserCreate(first_name="Test", last_name="User", email="admin@test.com", password="password123", is_superadmin=True),
     )
 
 
@@ -218,7 +218,7 @@ async def admin_user(session):
 async def viewer_user(session):
     return await create_user(
         session,
-        UserCreate(email="viewer@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="viewer@test.com", password="password123"),
     )
 
 
@@ -280,7 +280,7 @@ async def analyst_a(session, org_a, builtin_roles, admin_user):
     """A user who is org-admin of org-a."""
     user = await create_user(
         session,
-        UserCreate(email="analyst-a@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="analyst-a@test.com", password="password123"),
     )
     await add_member(
         session,
@@ -304,7 +304,7 @@ def analyst_a_token(analyst_a, org_a):
 async def analyst_b(session, org_b, builtin_roles, admin_user):
     user = await create_user(
         session,
-        UserCreate(email="analyst-b@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="analyst-b@test.com", password="password123"),
     )
     await add_member(
         session,
@@ -329,7 +329,7 @@ async def readonly_a(session, org_a, builtin_roles, admin_user):
     """A read-only user in org-a (no write:case)."""
     user = await create_user(
         session,
-        UserCreate(email="ro-a@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="ro-a@test.com", password="password123"),
     )
     await add_member(
         session,

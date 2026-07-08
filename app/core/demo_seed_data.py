@@ -5,6 +5,14 @@ from app.models.alert import AlertCreate
 from app.models.knowledge_base import KnowledgeBasePageCreate
 from app.models.task import TaskCreate, TaskStatus
 
+# Source refs of the alerts that seed each demo case. The local seeder ingests
+# these alerts, then promotes them into the matching case (status -> Imported,
+# case_id set) so every demo case has a real originating alert in its "Linked
+# alerts" panel. Keep these in sync with the AlertCreate specs below.
+OAUTH_CASE_ALERT_REF = "AL-9119"
+RANSOMWARE_CASE_ALERT_REF = "AL-9123"
+EXFILTRATION_CASE_ALERT_REF = "AL-9088"
+
 
 def demo_alert_specs(now: datetime) -> list[AlertCreate]:
     return [
@@ -108,6 +116,17 @@ def demo_alert_specs(now: datetime) -> list[AlertCreate]:
             tlp=0,
             date=now - timedelta(minutes=402),
         ),
+        # Originating alert for the "Data exfiltration via unapproved SaaS" case.
+        AlertCreate(
+            type="casb",
+            source="Netskope",
+            source_ref=EXFILTRATION_CASE_ALERT_REF,
+            title="Bulk OneDrive download to unapproved file-sharing service",
+            description="Netskope CASB flagged ~4.2 GB moved from OneDrive to tempfileshare[.]io over a 45-minute window by marcus.johnson@example.com. Files carried 'PII' and 'Financial' sensitivity labels; transfer occurred from an unmanaged device.",
+            severity=3,
+            tlp=2,
+            date=now - timedelta(hours=8, minutes=15),
+        ),
     ]
 
 
@@ -123,6 +142,7 @@ def demo_alert_tags() -> dict[str, list[str]]:
         "AL-9090": ["dns", "ci-runner", "exfiltration"],
         "AL-9084": ["endpoint", "sensor-health"],
         "AL-9080": ["certificate", "partner-api", "hygiene"],
+        "AL-9088": ["casb", "exfiltration", "data-loss", "T1567.002"],
     }
 
 

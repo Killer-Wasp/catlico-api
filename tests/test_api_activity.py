@@ -144,7 +144,12 @@ async def test_admin_user_mutations_are_audited(
     headers = {"Authorization": f"Bearer {admin_token}"}
     r = await client.post(
         "/api/v1/users/",
-        json={"email": "new@test.com", "password": "password123"},
+        json={
+            "email": "new@test.com",
+            "password": "password123",
+            "first_name": "New",
+            "last_name": "User",
+        },
         headers=headers,
     )
     assert r.status_code == 201, r.text

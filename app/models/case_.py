@@ -132,6 +132,16 @@ class SimilarCasePublic(SQLModel):
     shared_observables: int
 
 
+class LinkedCasePublic(SQLModel):
+    """A case the alert is directly linked to (via `Alert.case_id`) — the alert
+    drawer's "Linked case" list, mirroring a case's "Linked alerts"."""
+
+    id: int
+    title: str
+    severity: int
+    status: CaseStatus
+
+
 class CaseCounts(SQLModel):
     """Per-section counts for a single case, powering the detail page's tab
     badges without materialising each section's full list on load."""

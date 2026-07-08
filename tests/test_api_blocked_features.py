@@ -138,7 +138,7 @@ async def test_api_key_read_enforces_org_admin(
     from app.models.user import UserCreate
 
     reader = await create_user(
-        session, UserCreate(email="api-reader@test.com", password="password123")
+        session, UserCreate(first_name="Test", last_name="User", email="api-reader@test.com", password="password123")
     )
     await add_member(
         session,
@@ -481,7 +481,7 @@ async def test_functions_read_only(client: AsyncClient, session, org_a, builtin_
     from app.models.user import UserCreate
 
     reader = await create_user(
-        session, UserCreate(email="reader@test.com", password="password123")
+        session, UserCreate(first_name="Test", last_name="User", email="reader@test.com", password="password123")
     )
     await add_member(
         session,

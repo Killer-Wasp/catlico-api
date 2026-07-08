@@ -6,6 +6,9 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
     from datetime import UTC, datetime, timedelta
 
     from app.core.demo_seed_data import (
+        EXFILTRATION_CASE_ALERT_REF,
+        OAUTH_CASE_ALERT_REF,
+        RANSOMWARE_CASE_ALERT_REF,
         data_exfiltration_demo_tasks,
         demo_alert_tags,
         demo_alert_specs,
@@ -57,7 +60,12 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
     if analyst is None:
         analyst = await create_user(
             session,
-            UserCreate(email="analyst@example.com", password="changeme"),
+            UserCreate(
+                email="analyst@example.com",
+                password="changeme",
+                first_name="Alex",
+                last_name="Analyst",
+            ),
         )
 
     admin_role = await role_crud.get_role_by_name(session, "org-admin")
@@ -75,6 +83,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
     # --- Inbound alerts ---
     now = datetime.now(UTC).replace(microsecond=0)
     alert_tags = demo_alert_tags()
+    alerts_by_ref = {}
     for alert_in in demo_alert_specs(now):
         alert, _created = await alert_crud.ingest_alert(
             session,
@@ -82,12 +91,23 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
             organisation_id=org.id,
             created_by=actor,
         )
+        alerts_by_ref[alert_in.source_ref] = alert
         await tag_crud.set_tags(
             session,
             TaggableType.alert,
             str(alert.id),
             alert_tags.get(alert_in.source_ref, []),
         )
+
+    async def link_alert_to_case(source_ref: str, case_id: int) -> None:
+        """Promote the demo alert with `source_ref` into the given case so the
+        case shows a real originating alert (and the alert leaves the triage
+        queue as Imported). No-op if the alert is missing or already promoted."""
+        origin = alerts_by_ref.get(source_ref)
+        if origin is not None and origin.case_id is None:
+            await alert_crud.mark_promoted(
+                session, origin, case_id=case_id, updated_by=str(analyst.id)
+            )
 
     for page_in in demo_knowledge_base_pages():
         existing_page = await session.execute(
@@ -136,6 +156,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
             owner_role_id=admin_role.id,
             created_by=str(analyst.id),
         )
+        await link_alert_to_case(OAUTH_CASE_ALERT_REF, case.id)
 
         for name, display, field_type in [
             ("business_unit", "Business unit", CustomFieldType.string),
@@ -319,6 +340,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
             owner_role_id=admin_role.id,
             created_by=str(analyst.id),
         )
+        await link_alert_to_case(RANSOMWARE_CASE_ALERT_REF, rw_case.id)
         await tag_crud.set_tags(
             session,
             TaggableType.case,
@@ -447,6 +469,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
             owner_role_id=admin_role.id,
             created_by=str(analyst.id),
         )
+        await link_alert_to_case(EXFILTRATION_CASE_ALERT_REF, dx_case.id)
         await tag_crud.set_tags(
             session,
             TaggableType.case,

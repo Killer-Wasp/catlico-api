@@ -137,7 +137,7 @@ async def test_login_unknown_user(client: AsyncClient):
 
 
 async def test_login_inactive_user(client: AsyncClient, session, admin_user):
-    user = await create_user(session, UserCreate(email="inactive@test.com", password="pass123"))
+    user = await create_user(session, UserCreate(first_name="Test", last_name="User", email="inactive@test.com", password="pass123"))
     await update_user(session, user, UserUpdate(is_active=False))
 
     response = await client.post(
@@ -148,7 +148,7 @@ async def test_login_inactive_user(client: AsyncClient, session, admin_user):
 
 
 async def test_login_no_password_user(client: AsyncClient, session):
-    await create_user(session, UserCreate(email="oauth@test.com"))
+    await create_user(session, UserCreate(first_name="Test", last_name="User", email="oauth@test.com"))
 
     response = await client.post(
         "/api/v1/auth/login",

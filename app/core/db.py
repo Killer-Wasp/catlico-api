@@ -50,6 +50,8 @@ async def ensure_default_superadmin(session: AsyncSession) -> None:
         session.add(
             User(
                 email=settings.DEFAULT_ADMIN_EMAIL.lower().strip(),
+                first_name=settings.DEFAULT_ADMIN_FIRST_NAME,
+                last_name=settings.DEFAULT_ADMIN_LAST_NAME,
                 hashed_password=get_password_hash(settings.DEFAULT_ADMIN_PASSWORD),
                 is_superadmin=True,
                 is_active=True,
@@ -58,10 +60,21 @@ async def ensure_default_superadmin(session: AsyncSession) -> None:
         await session.commit()
         return
 
+    dirty = False
     if not user.hashed_password or not verify_password(
         settings.DEFAULT_ADMIN_PASSWORD, user.hashed_password
     ):
         user.hashed_password = get_password_hash(settings.DEFAULT_ADMIN_PASSWORD)
+        dirty = True
+    # Backfill a name onto a pre-existing superadmin that predates the
+    # names-required rule, so the constraint is never violated on upgrade.
+    if not user.first_name:
+        user.first_name = settings.DEFAULT_ADMIN_FIRST_NAME
+        dirty = True
+    if not user.last_name:
+        user.last_name = settings.DEFAULT_ADMIN_LAST_NAME
+        dirty = True
+    if dirty:
         session.add(user)
         await session.commit()
 

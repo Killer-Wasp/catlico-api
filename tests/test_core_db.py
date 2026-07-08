@@ -37,6 +37,8 @@ async def test_ensure_default_superadmin_rotates_password_when_changed(session, 
 
     user = User(
         email="root@example.com",
+        first_name="Root",
+        last_name="Admin",
         hashed_password=get_password_hash("old-password"),
         is_superadmin=True,
         is_active=True,

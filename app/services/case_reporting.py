@@ -32,7 +32,7 @@ async def render_report(
         "pap": str(case.pap),
         "created_at": case.created_at.isoformat() if case.created_at else "",
         "updated_at": case.updated_at.isoformat() if case.updated_at else "",
-        "assignee": case.assignee or "",
+        "assignee": str(case.assignee_id) if case.assignee_id else "",
         "date": datetime.now().isoformat(),
     }
 

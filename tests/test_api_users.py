@@ -93,18 +93,39 @@ async def test_list_users_non_superadmin_forbidden(client: AsyncClient, viewer_u
 async def test_create_user(client: AsyncClient, admin_user, admin_token):
     response = await client.post(
         "/api/v1/users/",
-        json={"email": "new@test.com", "password": "pass123"},
+        json={
+            "email": "new@test.com",
+            "password": "pass123",
+            "first_name": "New",
+            "last_name": "User",
+        },
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 201
     data = response.json()
     assert data["email"] == "new@test.com"
+    assert data["first_name"] == "New"
+    assert data["last_name"] == "User"
     assert "id" in data
     assert "hashed_password" not in data
 
 
+async def test_create_user_requires_names(client: AsyncClient, admin_user, admin_token):
+    response = await client.post(
+        "/api/v1/users/",
+        json={"email": "noname@test.com", "password": "pass123"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 422
+
+
 async def test_create_user_duplicate_email(client: AsyncClient, admin_user, admin_token):
-    payload = {"email": "dup@test.com", "password": "pass123"}
+    payload = {
+        "email": "dup@test.com",
+        "password": "pass123",
+        "first_name": "Dup",
+        "last_name": "User",
+    }
     await client.post(
         "/api/v1/users/",
         json=payload,
@@ -121,7 +142,12 @@ async def test_create_user_duplicate_email(client: AsyncClient, admin_user, admi
 async def test_create_user_non_superadmin_forbidden(client: AsyncClient, viewer_user, viewer_token):
     response = await client.post(
         "/api/v1/users/",
-        json={"email": "x@test.com", "password": "pass"},
+        json={
+            "email": "x@test.com",
+            "password": "pass",
+            "first_name": "X",
+            "last_name": "User",
+        },
         headers={"Authorization": f"Bearer {viewer_token}"},
     )
     assert response.status_code == 403
