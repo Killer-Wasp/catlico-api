@@ -29,6 +29,22 @@ async def get_log(
     return log
 
 
+async def log_counts_for_case(
+    session: AsyncSession, case_id: int
+) -> dict[int, int]:
+    """Live (non-deleted) work-log count per task for a case, in one grouped
+    query. Lets the task list show an "N logs" hint without loading each task's
+    logs. Tasks with no logs are simply absent from the map."""
+    rows = (
+        await session.execute(
+            select(Log.task_id, func.count())
+            .where(Log.case_id == case_id, Log.deleted_at.is_(None))
+            .group_by(Log.task_id)
+        )
+    ).all()
+    return {task_id: count for task_id, count in rows}
+
+
 async def list_logs_for_task(
     session: AsyncSession,
     case_id: int,

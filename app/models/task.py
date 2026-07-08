@@ -87,6 +87,9 @@ class TaskPublic(SQLModel):
     assignee_id: uuid.UUID | None
     order: int
     flagged: bool = False
+    #: Live work-log count, populated by a batched lookup in the list view so the
+    #: client can show an "N logs" hint without loading each task's logs.
+    log_count: int = 0
     start_date: datetime | None
     due_date: datetime | None
     end_date: datetime | None

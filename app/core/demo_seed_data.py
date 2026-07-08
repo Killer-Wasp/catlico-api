@@ -111,6 +111,21 @@ def demo_alert_specs(now: datetime) -> list[AlertCreate]:
     ]
 
 
+def demo_alert_tags() -> dict[str, list[str]]:
+    return {
+        "AL-9123": ["ransomware", "T1486", "finance"],
+        "AL-9119": ["identity", "oauth", "privileged-access"],
+        "AL-9111": ["identity", "mfa-fatigue", "impossible-travel"],
+        "AL-9108": ["ot", "beaconing", "network"],
+        "AL-9102": ["phishing", "retail", "credential-theft"],
+        "AL-9097": ["endpoint", "local-admin", "change-control"],
+        "AL-9093": ["misp", "c2", "blocked"],
+        "AL-9090": ["dns", "ci-runner", "exfiltration"],
+        "AL-9084": ["endpoint", "sensor-health"],
+        "AL-9080": ["certificate", "partner-api", "hygiene"],
+    }
+
+
 def demo_knowledge_base_pages() -> list[KnowledgeBasePageCreate]:
     return [
         KnowledgeBasePageCreate(

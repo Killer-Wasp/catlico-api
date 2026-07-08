@@ -36,6 +36,7 @@ from app.api.v1.routes.case_common import (
 from app.api.v1.routes.case_detail import router as case_detail_router
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
+from app.crud import alert as alert_crud
 from app.crud import audit as audit_crud
 from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
@@ -43,16 +44,19 @@ from app.crud import comment as comment_crud
 from app.crud import custom_field as cf_crud
 from app.crud import enrichment as enrichment_crud
 from app.crud import flag as flag_crud
+from app.crud import log as log_crud
 from app.crud import case_template as ct_crud
 from app.crud import observable as obs_crud
 from app.crud import role as role_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
 from app.crud import user as user_crud
+from app.models.alert import AlertPublic
 from app.models.attachment import AttachmentPublic
 from app.models.audit import AuditPublic
 from app.models.case_ import (
     Case,
+    CaseCounts,
     CaseCreate,
     CaseListFacets,
     CaseMergeRequest,
@@ -304,8 +308,15 @@ async def list_case_tasks(
     flagged = await flag_crud.flagged_ids(
         session, FlagEntityType.task, [t.public_id for t in tasks], case_ctx.organisation_id
     )
+    log_counts = await log_crud.log_counts_for_case(session, case_ctx.case.id)
+
+    def _public(task: Task) -> TaskPublic:
+        pub = _task_public(task, task.public_id in flagged)
+        pub.log_count = log_counts.get(task.id, 0)
+        return pub
+
     return Page(
-        items=[_task_public(t, t.public_id in flagged) for t in tasks],
+        items=[_public(t) for t in tasks],
         total=total,
         skip=skip,
         limit=limit,
@@ -459,6 +470,35 @@ async def create_case_file_observable(
     return observable
 
 
+@router.get("/{case_id}/alerts", response_model=Page[AlertPublic])
+async def list_case_alerts(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:alert")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+) -> Page[AlertPublic]:
+    """Alerts promoted into this case (the 'Linked alerts' panel)."""
+    alerts, total = await alert_crud.list_alerts_for_case(
+        session, case_ctx.case.id, skip=skip, limit=limit
+    )
+    flagged = await flag_crud.flagged_ids(
+        session,
+        FlagEntityType.alert,
+        [str(a.id) for a in alerts],
+        case_ctx.organisation_id,
+    )
+    cfs = await cf_crud.values_for_entities(
+        session, CustomFieldEntityType.alert, [str(a.id) for a in alerts]
+    )
+    items = []
+    for a in alerts:
+        pub = AlertPublic.model_validate(a, from_attributes=True)
+        pub.flagged = str(a.id) in flagged
+        pub.custom_fields = cfs.get(str(a.id), {})
+        items.append(pub)
+    return Page(items=items, total=total, skip=skip, limit=limit)
+
+
 # --- Comments on a case ---
 
 @router.get("/{case_id}/comments", response_model=Page[CommentPublic])
@@ -576,6 +616,46 @@ async def get_case_custom_fields(
 ) -> dict[str, Any]:
     return await cf_crud.values_for(
         session, CustomFieldEntityType.case, str(case_ctx.case.id)
+    )
+
+
+@router.get("/{case_id}/counts", response_model=CaseCounts)
+async def get_case_counts(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CaseCounts:
+    """Per-section counts for the detail page's tab badges. Each list CRUD is
+    called with ``limit=0`` so only its COUNT runs (no rows materialised)."""
+    case_id = case_ctx.case.id
+    _, tasks_total = await task_crud.list_tasks_for_case(
+        session,
+        case_id,
+        organisation_id=case_ctx.organisation_id,
+        is_owner=case_ctx.is_owner,
+        limit=0,
+    )
+    _, observables_total = await obs_crud.list_observables_for_case(
+        session,
+        case_id,
+        organisation_id=case_ctx.organisation_id,
+        is_owner=case_ctx.is_owner,
+        limit=0,
+    )
+    _, comments_total = await comment_crud.list_comments(
+        session, CommentEntityType.case, str(case_id), limit=0
+    )
+    _, attachments_total = await attachment_crud.list_links(
+        session, case_id, case_only=True, limit=0
+    )
+    custom_fields = await cf_crud.values_for(
+        session, CustomFieldEntityType.case, str(case_id)
+    )
+    return CaseCounts(
+        tasks=tasks_total,
+        custom_fields=len(custom_fields),
+        comments=comments_total,
+        attachments=attachments_total,
+        observables=observables_total,
     )
 
 

@@ -150,6 +150,22 @@ async def list_alerts_for_org(
     )
 
 
+async def list_alerts_for_case(
+    session: AsyncSession,
+    case_id: int,
+    *,
+    skip: int = 0,
+    limit: int = 100,
+) -> tuple[list[Alert], int]:
+    """Alerts promoted into the given case (newest first), for the case's
+    'Linked alerts' panel. Scoped by case_id — org ownership is already
+    established by the case-permission dependency at the route."""
+    base = select(Alert).where(
+        Alert.case_id == case_id, Alert.deleted_at.is_(None)
+    )
+    return await paginate(session, base, Alert.id.desc(), skip=skip, limit=limit)
+
+
 async def alert_facets(session: AsyncSession, organisation_id: str) -> AlertFacets:
     """Distinct source + tag-key values across the org's alerts, for the list
     view's filter dropdowns."""

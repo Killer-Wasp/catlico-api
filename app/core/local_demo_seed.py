@@ -7,6 +7,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
 
     from app.core.demo_seed_data import (
         data_exfiltration_demo_tasks,
+        demo_alert_tags,
         demo_alert_specs,
         demo_knowledge_base_pages,
         oauth_demo_tasks,
@@ -73,12 +74,19 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
 
     # --- Inbound alerts ---
     now = datetime.now(UTC).replace(microsecond=0)
+    alert_tags = demo_alert_tags()
     for alert_in in demo_alert_specs(now):
-        await alert_crud.ingest_alert(
+        alert, _created = await alert_crud.ingest_alert(
             session,
             alert_in,
             organisation_id=org.id,
             created_by=actor,
+        )
+        await tag_crud.set_tags(
+            session,
+            TaggableType.alert,
+            str(alert.id),
+            alert_tags.get(alert_in.source_ref, []),
         )
 
     for page_in in demo_knowledge_base_pages():

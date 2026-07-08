@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import and_, false, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from app.crud._filters import FilterClause, group_by_key, parse_clauses
@@ -12,6 +13,7 @@ from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
 from app.models.alert import Alert
+from app.models.case_ import Case
 from app.models.case_share import CaseShare
 from app.models.observable import (
     Observable,
@@ -271,6 +273,61 @@ async def list_observables_for_alert(
         Observable.alert_id == alert_id, Observable.deleted_at.is_(None)
     )
     return await paginate(session, base, Observable.created_at, skip=skip, limit=limit)
+
+
+async def similar_cases_for_alert(
+    session: AsyncSession,
+    alert_id: int,
+    *,
+    organisation_id: str,
+    exclude_case_id: int | None = None,
+    limit: int = 20,
+) -> list[tuple[Case, int]]:
+    """Cases that share at least one observable (same type + value) with the
+    alert — the drawer's "Similar cases". Observables flagged `ignore_similarity`
+    on either side are excluded, and only cases visible to `organisation_id`
+    (via a CaseShare) are returned, ordered by overlap size then recency. Each
+    result carries its shared-observable count."""
+    alert_pairs = (
+        select(
+            Observable.observable_type.label("t"),
+            Observable.data.label("d"),
+        )
+        .where(
+            Observable.alert_id == alert_id,
+            Observable.deleted_at.is_(None),
+            Observable.ignore_similarity.is_(False),
+        )
+        .distinct()
+        .subquery()
+    )
+    case_obs = aliased(Observable)
+    overlap = func.count(func.distinct(case_obs.id))
+    stmt = (
+        select(Case, overlap)
+        .join(case_obs, case_obs.case_id == Case.id)
+        .join(
+            alert_pairs,
+            and_(
+                case_obs.observable_type == alert_pairs.c.t,
+                case_obs.data == alert_pairs.c.d,
+            ),
+        )
+        .join(CaseShare, CaseShare.case_id == Case.id)
+        .where(
+            Case.deleted_at.is_(None),
+            case_obs.deleted_at.is_(None),
+            case_obs.ignore_similarity.is_(False),
+            CaseShare.organisation_id == organisation_id,
+        )
+        .group_by(Case.id)
+        .order_by(overlap.desc(), Case.id.desc())
+        .limit(limit)
+    )
+    if exclude_case_id is not None:
+        stmt = stmt.where(Case.id != exclude_case_id)
+    rows = (await session.execute(stmt)).all()
+    return [(case, count) for case, count in rows]
 
 
 async def list_observables_for_org(

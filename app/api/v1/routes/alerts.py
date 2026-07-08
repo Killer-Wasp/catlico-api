@@ -1,3 +1,4 @@
+import uuid
 from typing import Annotated, Any
 
 from fastapi import (
@@ -26,6 +27,7 @@ from app.crud import audit as audit_crud
 from app.crud import case_ as case_crud
 from app.crud import case_share as case_share_crud
 from app.crud import case_template as ct_crud
+from app.crud import comment as comment_crud
 from app.crud import custom_field as cf_crud
 from app.crud import enrichment as enrichment_crud
 from app.crud import flag as flag_crud
@@ -33,6 +35,7 @@ from app.crud import observable as obs_crud
 from app.crud import organisation_member as member_crud
 from app.crud import role as role_crud
 from app.crud import tag as tag_crud
+from app.crud import user as user_crud
 from app.models.alert import (
     ALERT_STATUS_TRANSITIONS,
     Alert,
@@ -44,7 +47,13 @@ from app.models.alert import (
     AlertStatus,
     AlertUpdate,
 )
-from app.models.case_ import CaseCreate, CasePublic, CaseStatus
+from app.models.case_ import CaseCreate, CasePublic, CaseStatus, SimilarCasePublic
+from app.models.comment import (
+    CommentCreate,
+    CommentEntityType,
+    CommentPublic,
+    _display_name_from_email,
+)
 from app.models.common import Page
 from app.models.custom_field import CustomFieldEntityType, CustomFieldValuesSet
 from app.models.flag import FlagEntityType
@@ -647,6 +656,110 @@ async def create_alert_file_observable(
         created_by=str(ctx.user.id),
     )
     return observable
+
+
+@router.get("/{alert_id}/similar-cases", response_model=list[SimilarCasePublic])
+async def list_alert_similar_cases(
+    alert_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: int = 20,
+) -> list[SimilarCasePublic]:
+    """Cases sharing one or more observables with this alert (the alert already
+    belongs to, if promoted, is excluded)."""
+    _require_perm(ctx, "read:case")
+    alert = await _resolve_owned_alert(session, ctx, alert_id)
+    rows = await obs_crud.similar_cases_for_alert(
+        session,
+        alert_id,
+        organisation_id=ctx.organisation_id,
+        exclude_case_id=alert.case_id,
+        limit=limit,
+    )
+    return [
+        SimilarCasePublic(
+            id=case.id,
+            title=case.title,
+            severity=case.severity,
+            status=case.status,
+            shared_observables=shared,
+        )
+        for case, shared in rows
+    ]
+
+
+# --- Comments on an alert ---
+
+def _comment_public(comment, author_name: str) -> CommentPublic:
+    return CommentPublic(
+        id=comment.id,
+        entity_type=comment.entity_type,
+        entity_id=comment.entity_id,
+        message=comment.message,
+        organisation_id=comment.organisation_id,
+        created_at=comment.created_at,
+        created_by=comment.created_by,
+        updated_at=comment.updated_at,
+        author_name=author_name,
+    )
+
+
+@router.get("/{alert_id}/comments", response_model=Page[CommentPublic])
+async def list_alert_comments(
+    alert_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    skip: int = 0,
+    limit: int = 100,
+    sort_order: str = "desc",
+) -> Page[CommentPublic]:
+    _require_perm(ctx, "read:alert")
+    await _resolve_owned_alert(session, ctx, alert_id)
+    comments, total = await comment_crud.list_comments(
+        session,
+        CommentEntityType.alert,
+        str(alert_id),
+        skip=skip,
+        limit=limit,
+        sort_order=sort_order,
+    )
+    emails = await user_crud.emails_for_ids(
+        session, [uuid.UUID(c.created_by) for c in comments]
+    )
+    items = [
+        _comment_public(
+            c,
+            _display_name_from_email(emails.get(uuid.UUID(c.created_by), "")),
+        )
+        for c in comments
+    ]
+    return Page(items=items, total=total, skip=skip, limit=limit)
+
+
+@router.post(
+    "/{alert_id}/comments",
+    response_model=CommentPublic,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_alert_comment(
+    alert_id: int,
+    comment_in: CommentCreate,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CommentPublic:
+    _require_perm(ctx, "write:alert")
+    await _resolve_owned_alert(session, ctx, alert_id)
+    comment = await comment_crud.create_comment(
+        session,
+        comment_in,
+        entity_type=CommentEntityType.alert,
+        entity_id=str(alert_id),
+        organisation_id=ctx.organisation_id,
+        created_by=str(ctx.user.id),
+    )
+    emails = await user_crud.emails_for_ids(session, [ctx.user.id])
+    author_name = _display_name_from_email(emails.get(ctx.user.id, ""))
+    return _comment_public(comment, author_name)
 
 
 # --- Tags on an alert ---

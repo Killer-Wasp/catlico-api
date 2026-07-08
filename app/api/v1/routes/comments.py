@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
+from app.crud import alert as alert_crud
 from app.crud import comment as comment_crud
 from app.crud import user as user_crud
 from app.crud.case_share import get_share, list_shares
@@ -27,6 +28,13 @@ async def _resolve_comment(
     if comment.entity_type == CommentEntityType.case:
         share = await get_share(session, int(comment.entity_id), ctx.organisation_id)
         if share is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found"
+            )
+    elif comment.entity_type == CommentEntityType.alert:
+        # Alerts are org-owned with no sharing — the active org must own the alert.
+        alert = await alert_crud.get_alert(session, int(comment.entity_id))
+        if alert is None or alert.organisation_id != ctx.organisation_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found"
             )

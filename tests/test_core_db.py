@@ -2,12 +2,14 @@ from sqlmodel import select
 
 from app.core.db import ensure_default_superadmin, init_db
 from app.crud.user import get_user_by_email
+from app.crud import tag as tag_crud
 from app.models.audit import Audit
 from app.models.alert import Alert
 from app.models.case_ import Case
 from app.models.comment import Comment
 from app.models.knowledge_base import KnowledgeBasePage
 from app.models.observable import Observable
+from app.models.tag import TaggableType
 from app.models.task import Task
 from app.models.user import User
 
@@ -125,6 +127,21 @@ async def test_init_db_seeds_demo_operational_content_once_in_local(
         "OAuth consent grant to unverified app for 3 privileged users",
         "Credential-phish campaign targeting retail billing team (38 rcpts)",
     }
+    alert_by_ref = {alert.source_ref: alert for alert in alerts}
+    assert set(
+        await tag_crud.list_tag_strings_for(
+            session,
+            TaggableType.alert,
+            str(alert_by_ref["AL-9080"].id),
+        )
+    ) == {"certificate", "partner-api", "hygiene"}
+    assert set(
+        await tag_crud.list_tag_strings_for(
+            session,
+            TaggableType.alert,
+            str(alert_by_ref["AL-9123"].id),
+        )
+    ) == {"ransomware", "T1486", "finance"}
     assert {task.title for task in tasks} >= {
         "Disable malicious app registration tenant-wide",
         "Remove mailbox rules and check forwarding",

@@ -121,6 +121,28 @@ class CasePublic(SQLModel):
     updated_at: datetime | None
 
 
+class SimilarCasePublic(SQLModel):
+    """A case that shares one or more observables with an alert — the alert
+    drawer's "Similar cases" list. `shared_observables` is the overlap count."""
+
+    id: int
+    title: str
+    severity: int
+    status: CaseStatus
+    shared_observables: int
+
+
+class CaseCounts(SQLModel):
+    """Per-section counts for a single case, powering the detail page's tab
+    badges without materialising each section's full list on load."""
+
+    tasks: int = 0
+    custom_fields: int = 0
+    comments: int = 0
+    attachments: int = 0
+    observables: int = 0
+
+
 class CaseListFacets(SQLModel):
     """Filterable values present across an org's case list, for the list view's
     filter dropdowns."""

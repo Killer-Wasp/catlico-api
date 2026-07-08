@@ -9,7 +9,7 @@ from app.models.common import MARKDOWN_NOTE, SoftDeleteMixin, TimestampMixin
 
 class CommentEntityType(str, Enum):
     case = "case"
-    # alert comments are a trivial later add — model is polymorphic-ready.
+    alert = "alert"
 
 
 class Comment(TimestampMixin, SoftDeleteMixin, table=True):

@@ -330,3 +330,61 @@ async def test_multiorg_autoshare_task_visible(
     titles = [t["title"] for t in items]
     assert titles == ["investigate"]
     assert items[0]["public_id"] == f"T-{case.id}-1"
+
+
+async def test_case_counts_endpoint(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="counts"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await session.commit()
+    h = {
+        "Authorization": f"Bearer {analyst_a_token}",
+        "X-Organisation-Id": org_a.id,
+    }
+
+    # A fresh case has zero of everything.
+    empty = await client.get(f"/api/v1/cases/{case.id}/counts", headers=h)
+    assert empty.status_code == 200, empty.text
+    assert empty.json() == {
+        "tasks": 0,
+        "custom_fields": 0,
+        "comments": 0,
+        "attachments": 0,
+        "observables": 0,
+    }
+
+    # Add one task, two comments, and one observable.
+    assert (
+        await client.post(
+            f"/api/v1/cases/{case.id}/tasks", json={"title": "t1"}, headers=h
+        )
+    ).status_code == 201
+    for msg in ("c1", "c2"):
+        assert (
+            await client.post(
+                f"/api/v1/cases/{case.id}/comments", json={"message": msg}, headers=h
+            )
+        ).status_code == 201
+    assert (
+        await client.post(
+            f"/api/v1/cases/{case.id}/observables",
+            json={"observable_type": "ip", "data": "1.2.3.4"},
+            headers=h,
+        )
+    ).status_code == 201
+
+    counts = await client.get(f"/api/v1/cases/{case.id}/counts", headers=h)
+    assert counts.status_code == 200, counts.text
+    assert counts.json() == {
+        "tasks": 1,
+        "custom_fields": 0,
+        "comments": 2,
+        "attachments": 0,
+        "observables": 1,
+    }
