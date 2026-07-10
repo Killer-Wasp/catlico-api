@@ -245,6 +245,7 @@ async def search_comments(
             .order_by(
                 func.ts_rank(_COMMENT_TSV, tsq).desc(),
                 Comment.created_at.desc(),
+                Comment.id.desc(),
             )
             .offset(skip)
             .limit(limit)
