@@ -198,15 +198,6 @@ async def client(session, tmp_path) -> AsyncGenerator[AsyncClient, None]:
 
 
 @pytest.fixture
-def analyzer_secret(monkeypatch):
-    """Configure the platform-level analyzer shared secret for the test."""
-    from app.core.configs import settings
-
-    monkeypatch.setattr(settings, "ANALYZER_SHARED_SECRET", "test-analyzer-secret")
-    return "test-analyzer-secret"
-
-
-@pytest.fixture
 def runner_secret(monkeypatch):
     """Configure the platform-level plugin-runner shared secret for the test."""
     from app.core.configs import settings

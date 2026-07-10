@@ -12,13 +12,7 @@ from app.models.case_merge import CaseMerge  # noqa: F401
 from app.models.case_share import CaseShare  # noqa: F401
 from app.models.case_template import CaseTemplate, CaseTemplateTask  # noqa: F401
 from app.models.comment import Comment  # noqa: F401
-from app.models.connector import (  # noqa: F401
-    Connector,
-    ConnectorSecret,
-    OrgConnector,
-)
 from app.models.custom_field import CustomField, CustomFieldValue  # noqa: F401
-from app.models.enrichment import EnrichmentJob, ReportTag  # noqa: F401
 from app.models.flag import Flag  # noqa: F401
 from app.models.function import Function, FunctionRun  # noqa: F401
 from app.models.knowledge_base import KnowledgeBasePage, KnowledgeBasePageVersion  # noqa: F401
@@ -31,7 +25,6 @@ from app.models.observable import (  # noqa: F401
     ObservableShare,
     ObservableType,
 )
-from app.models.observable_provenance import ObservableProvenance  # noqa: F401
 from app.models.organisation import Organisation  # noqa: F401
 from app.models.plugin_runner import PluginRunner  # noqa: F401
 from app.models.plugin_runner import PluginDefinition  # noqa: F401

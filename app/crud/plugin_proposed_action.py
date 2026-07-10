@@ -46,12 +46,11 @@ ACTION_TYPES = {
 #
 # `execute_responder_action` is deliberately never added here: there is no
 # post-approval execution path from a PluginProposedAction to a responder.
-# Responder-style actions run through a separate pipeline entirely (connector
-# jobs claimed/submitted via app/api/internal/routes/responder.py and applied
-# by app/services/connector_operations.py), which the plugin runtime/runner
-# has no callback into after a proposal is approved. Building that bridge is
-# architectural work beyond this module, so approval fails explicitly instead
-# of guessing at a mapping — see the dedicated message in `apply()` below.
+# The legacy connector-job responder pipeline that once backed these actions
+# has been retired, and the plugin runtime/runner has no responder-execution
+# path of its own. Until a plugin-native responder capability exists, approval
+# fails explicitly instead of guessing at a mapping — see the dedicated message
+# in `apply()` below.
 _APPLICABLE = {
     "add_tag",
     "create_task",
@@ -230,9 +229,8 @@ async def apply(
                 detail=(
                     "execute_responder_action cannot be approved: there is no "
                     "post-approval path from a proposed action to a responder "
-                    "run. Responder actions execute through the separate "
-                    "connector-job pipeline (claimed and submitted by the "
-                    "konnect worker), not proposed-action approval."
+                    "run. The platform has no responder-execution capability, so "
+                    "this action type is never applicable."
                 ),
             )
         raise HTTPException(

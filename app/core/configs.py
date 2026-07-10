@@ -80,11 +80,6 @@ class Settings(BaseSettings):
     PASSWORD_RESET_PATH: str = "/reset-password"
     PASSWORD_RESET_THROTTLE_SECONDS: int = 300
 
-    # Connector / analyzer engine.
-    # Shared secret the catlico-connector-engine service presents (Bearer) to register and
-    # pull work. Unset ⇒ analyzer endpoints reject all callers. Per-org API keys
-    # replace this later behind the same header.
-    ANALYZER_SHARED_SECRET: str | None = None
     # Plugin runner engine.
     # Legacy shared secret kept only as a deprecated config knob while the
     # enrollment flow rolls out. Internal plugin-runner endpoints authenticate

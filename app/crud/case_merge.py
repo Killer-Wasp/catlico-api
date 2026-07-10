@@ -13,7 +13,6 @@ from app.models.case_ import Case, CaseCreate, CaseResolutionStatus, CaseStatus
 from app.models.case_merge import CaseMerge
 from app.models.case_share import CaseShare
 from app.models.comment import Comment, CommentEntityType
-from app.models.enrichment import EnrichmentJob, ReportTag
 from app.models.flag import Flag, FlagEntityType
 from app.models.log import Log
 from app.models.observable import Observable, ObservableShare
@@ -73,16 +72,6 @@ async def _reparent_observables(
                 else obs.message
             )
         session.add(survivor)
-        await session.execute(
-            update(EnrichmentJob)
-            .where(EnrichmentJob.observable_id == obs.id)
-            .values(observable_id=survivor.id)
-        )
-        await session.execute(
-            update(ReportTag)
-            .where(ReportTag.observable_id == obs.id)
-            .values(observable_id=survivor.id)
-        )
         await _union_observable_shares(session, obs.id, survivor.id)
         obs.deleted_at = now
         obs.deleted_by = actor

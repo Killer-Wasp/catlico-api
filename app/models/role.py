@@ -22,6 +22,8 @@ class Permission(str, Enum):
     write_organisation = "write:organisation"
     read_role = "read:role"
     write_role = "write:role"
+    # Plugin management + manual plugin-run authorization reuses these strings
+    # (legacy connector-era names kept as the plugin system's permission surface).
     read_connector = "read:connector"
     write_connector = "write:connector"
     run_enrichment = "run:enrichment"

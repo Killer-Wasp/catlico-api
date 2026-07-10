@@ -1,5 +1,4 @@
 import hashlib
-import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,7 +9,6 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.configs import settings
 from app.core.db import get_session
 from app.core.security import TokenPayload, decode_access_token
 from app.crud.api_key import get_key_by_hash, touch_key
@@ -345,32 +343,6 @@ def require_case_owner(permission: str = "write:case"):
 
 
 @dataclass
-class AnalyzerPrincipal:
-    """The catlico-connector-engine service, authenticated by shared secret. v1 has one
-    platform-level secret; this is the seam where a per-org API-key lookup slots in
-    later (same Bearer header, richer principal)."""
-
-    pass
-
-
-async def get_analyzer_principal(
-    authorization: Annotated[str | None, Header()] = None,
-) -> AnalyzerPrincipal:
-    expected = settings.ANALYZER_SHARED_SECRET
-    presented = ""
-    if authorization and authorization.lower().startswith("bearer "):
-        presented = authorization[7:]
-    # Constant-time compare; reject when no secret is configured at all.
-    if not expected or not secrets.compare_digest(presented, expected):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid analyzer credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return AnalyzerPrincipal()
-
-
-@dataclass
 class PluginRunnerPrincipal:
     """A registered catlico-plugin-runner authenticated by machine credential."""
 
@@ -431,7 +403,6 @@ async def get_plugin_runner_principal(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 SuperAdminUser = Annotated[User, Depends(get_superadmin_user)]
 OrgContext = Annotated[AuthContext, Depends(get_org_context)]
-Analyzer = Annotated[AnalyzerPrincipal, Depends(get_analyzer_principal)]
 PluginRunner = Annotated[PluginRunnerPrincipal, Depends(get_plugin_runner_principal)]
 
 

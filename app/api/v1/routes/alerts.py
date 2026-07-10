@@ -29,7 +29,6 @@ from app.crud import case_share as case_share_crud
 from app.crud import case_template as ct_crud
 from app.crud import comment as comment_crud
 from app.crud import custom_field as cf_crud
-from app.crud import enrichment as enrichment_crud
 from app.crud import flag as flag_crud
 from app.crud import observable as obs_crud
 from app.crud import organisation_member as member_crud
@@ -603,13 +602,6 @@ async def create_alert_observable(
         session,
         obs_in,
         alert_id=alert.id,
-        organisation_id=ctx.organisation_id,
-        created_by=str(ctx.user.id),
-    )
-    # Auto-enqueue enrichment for matching auto-run connectors
-    await enrichment_crud.enqueue_auto_for_observable(
-        session,
-        observable,
         organisation_id=ctx.organisation_id,
         created_by=str(ctx.user.id),
     )

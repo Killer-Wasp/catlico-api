@@ -1,7 +1,5 @@
 """Tests for blob attachments: file observables and task-log file uploads,
 content-addressed dedup, size cap, streaming download, visibility."""
-import hashlib
-
 from httpx import AsyncClient
 
 from app.crud import case_ as case_crud
@@ -14,10 +12,6 @@ from app.models.task import TaskCreate
 
 def _headers(token, org_id):
     return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org_id}
-
-
-def _analyzer_headers(secret):
-    return {"Authorization": f"Bearer {secret}"}
 
 
 async def _make_case(session, org, builtin_roles, user):
@@ -51,75 +45,6 @@ async def test_upload_and_download_file_observable(
     assert d.status_code == 200
     assert d.content == content
     assert "evil.bin" in d.headers["content-disposition"]
-
-
-async def test_file_analyzer_claim_includes_downloadable_file_ref(
-    client: AsyncClient,
-    session,
-    org_a,
-    builtin_roles,
-    analyzer_secret,
-    observable_types,
-    analyst_a,
-    analyst_a_token,
-):
-    connector = {
-        "name": "file_analyzer",
-        "display_name": "File Analyzer",
-        "connector_type": "analyzer",
-        "version": "1.0.0",
-        "data_types": ["file"],
-        "description": "file analyzer",
-        "max_runtime_seconds": 5,
-    }
-    reg = await client.post(
-        "/api/internal/analyzer/register",
-        json={"connectors": [connector]},
-        headers=_analyzer_headers(analyzer_secret),
-    )
-    assert reg.status_code == 200, reg.text
-
-    h = _headers(analyst_a_token, org_a.id)
-    enable = await client.post("/api/v1/connectors/file_analyzer/enable", headers=h)
-    assert enable.status_code == 200, enable.text
-
-    case = await _make_case(session, org_a, builtin_roles, analyst_a)
-    content = b"file-ref-bytes"
-    upload = await client.post(
-        f"/api/v1/cases/{case.id}/observables/file",
-        files={"file": ("sample.bin", content, "application/octet-stream")},
-        data={"observable_type": "file"},
-        headers=h,
-    )
-    assert upload.status_code == 201, upload.text
-    obs_id = upload.json()["id"]
-
-    enrich = await client.post(
-        f"/api/v1/observables/{obs_id}/enrich",
-        json={"connector": "file_analyzer", "force_refresh": True},
-        headers=h,
-    )
-    assert enrich.status_code == 200, enrich.text
-
-    claim = await client.post(
-        "/api/internal/analyzer/work",
-        params={"connectors": "file_analyzer", "limit": 1},
-        headers=_analyzer_headers(analyzer_secret),
-    )
-    assert claim.status_code == 200, claim.text
-    file_ref = claim.json()["items"][0]["file_ref"]
-    assert file_ref["attachment_id"]
-    assert file_ref["filename"] == "sample.bin"
-    assert file_ref["sha256"] == hashlib.sha256(content).hexdigest()
-    assert file_ref["size"] == len(content)
-    assert file_ref["expires_at"]
-
-    downloaded = await client.get(
-        file_ref["download_url"], headers=_analyzer_headers(analyzer_secret)
-    )
-    assert downloaded.status_code == 200
-    assert downloaded.content == content
-    assert "sample.bin" in downloaded.headers["content-disposition"]
 
 
 async def test_string_endpoint_rejects_file_type(

@@ -7,22 +7,13 @@ from sqlmodel import select
 
 from app.api.deps import ActiveOrgOrApiKeyContext
 from app.api.v1.routes._files import stream_blob
-from app.core.configs import settings
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
 from app.crud import attachment as attachment_crud
-from app.crud import connector as connector_crud
-from app.crud import enrichment as enrichment_crud
 from app.crud import observable as obs_crud
 from app.crud import tag as tag_crud
 from app.crud.case_share import get_share
 from app.models.common import Page
-from app.models.enrichment import (
-    EnrichmentJobPublic,
-    EnrichmentOverview,
-    EnrichRequest,
-    ReportTagPublic,
-)
 from app.models.observable import (
     Observable,
     ObservableFacets,
@@ -220,60 +211,7 @@ async def set_observable_tags(
     )
 
 
-# --- Enrichment ---
-
-@router.post("/{observable_id}/enrich", response_model=list[EnrichmentJobPublic])
-async def enrich_observable(
-    observable_id: uuid.UUID,
-    body: EnrichRequest,
-    ctx: ActiveOrgOrApiKeyContext,
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> list[EnrichmentJobPublic]:
-    """Dispatch enrichment to enabled connectors that accept this observable's type.
-    Returns one job per connector (reusing a fresh cached job unless force_refresh)."""
-    obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
-    _require("run:enrichment", perms)
-
-    if body.connector:
-        c = await connector_crud.get(session, body.connector)
-        if c is None or not c.available:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found"
-            )
-        if not await connector_crud.is_enabled_for_org(
-            session, ctx.organisation_id, c.name
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Connector is not enabled for this organisation",
-            )
-        candidates = [c]
-    else:
-        candidates = await connector_crud.list_enabled_for_org(
-            session, ctx.organisation_id
-        )
-
-    targets = [c for c in candidates if obs.observable_type in (c.data_types or [])]
-    if not targets:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="No enabled connector accepts this observable type",
-        )
-
-    jobs = []
-    for c in targets:
-        job, _created = await enrichment_crud.enqueue(
-            session,
-            obs,
-            c,
-            organisation_id=ctx.organisation_id,
-            created_by=str(ctx.user.id),
-            force_refresh=body.force_refresh,
-            ttl_seconds=settings.CONNECTOR_CACHE_TTL_SECONDS,
-        )
-        jobs.append(job)
-    return jobs
-
+# --- Plugin runs ---
 
 @router.post("/{observable_id}/plugin-runs")
 async def run_plugin_for_observable(
@@ -292,20 +230,4 @@ async def run_plugin_for_observable(
         plugin_id=body["plugin_id"],
         entity_type="observable",
         entity_id=str(obs.id),
-    )
-
-
-@router.get("/{observable_id}/enrichments", response_model=EnrichmentOverview)
-async def list_observable_enrichments(
-    observable_id: uuid.UUID,
-    ctx: ActiveOrgOrApiKeyContext,
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> EnrichmentOverview:
-    obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
-    _require("read:observable", perms)
-    jobs = await enrichment_crud.list_for_observable(session, obs.id)
-    tags = await enrichment_crud.list_report_tags(session, obs.id)
-    return EnrichmentOverview(
-        jobs=[EnrichmentJobPublic.model_validate(j, from_attributes=True) for j in jobs],
-        tags=[ReportTagPublic.model_validate(t, from_attributes=True) for t in tags],
     )
