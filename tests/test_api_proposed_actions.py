@@ -112,6 +112,25 @@ async def _propose_case_patch(client, token, case_id, description):
     return r.json()["proposed_action_id"]
 
 
+async def _enable_auto_apply(session, org_id, plugin_id, actions):
+    """Opt the org's plugin into auto-applying `actions`. `_runtime_run_id`
+    has already created the OrgPlugin (enabling the plugin); we just flip the
+    policy. `ppa_crud.create` reads this row to decide whether to auto-apply."""
+    from app.models.plugin_runner import OrgPlugin
+
+    org_plugin = await session.get(OrgPlugin, (org_id, plugin_id))
+    assert org_plugin is not None, "plugin must be enabled before setting a policy"
+    org_plugin.auto_apply_actions = list(actions)
+    await session.flush()
+
+
+# The generic, non-leaking reason auto-apply/decide store on an IntegrityError.
+_GENERIC_INTEGRITY_REASON = (
+    "Could not apply: the change conflicted with existing data "
+    "(database integrity constraint)."
+)
+
+
 # --- Propose -> list -> approve applies ---
 
 
@@ -382,6 +401,123 @@ async def test_add_related_observable_non_dedup_integrity_not_swallowed(
     obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
     assert obs.status_code == 200, obs.text
     assert not [o for o in obs.json()["items"] if o["data"] == "203.0.113.7"]
+
+
+async def test_auto_apply_non_dedup_integrity_error_ends_failed_not_500(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """The org-policy auto-apply path in create() must survive a genuine
+    (non-dedup) IntegrityError out of apply(): the row lands at status='failed',
+    never an unhandled 500 / InFailedSQLTransactionError, never stuck 'proposed'.
+
+    Savepoint regression guard: boom_apply's INSERT aborts the transaction, so
+    without create()'s begin_nested savepoint the terminal status='failed' flush
+    would itself fail on the poisoned transaction. Removing the savepoint makes
+    this test error with InFailedSQLTransactionError."""
+    from sqlalchemy import text
+
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+    await _enable_auto_apply(session, org_a.id, run.plugin_id, ["add_tag"])
+
+    async def boom_apply(session, action, *, approver_user_id):
+        # A real NOT NULL violation (observable.message is NOT NULL with no DB
+        # default): genuinely aborts the transaction, standing in for a non-dedup
+        # IntegrityError bubbling out of a CRUD call during auto-apply.
+        await session.execute(
+            text(
+                "INSERT INTO observable (id, observable_type, data) "
+                "VALUES (gen_random_uuid(), 'ip', 'boom')"
+            )
+        )
+
+    monkeypatch.setattr(ppa_crud, "apply", boom_apply)
+
+    # No exception escapes create(): the auto-apply record reaches a terminal
+    # status instead of poisoning the request.
+    action = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "x"},
+    )
+    assert action.status == "failed"
+    assert action.decided_by == "system:auto-apply"
+    assert action.decision_reason, "a genuine failure must carry an informative reason"
+
+
+async def test_auto_apply_integrity_error_stores_generic_reason_not_driver_text(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """decision_reason is exposed by public(): on an auto-apply IntegrityError the
+    stored reason must be the generic message, never the raw driver detail
+    (column/constraint names, SQL)."""
+    from sqlalchemy import text
+
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+    await _enable_auto_apply(session, org_a.id, run.plugin_id, ["add_tag"])
+
+    async def boom_apply(session, action, *, approver_user_id):
+        await session.execute(
+            text(
+                "INSERT INTO observable (id, observable_type, data) "
+                "VALUES (gen_random_uuid(), 'ip', 'boom')"
+            )
+        )
+
+    monkeypatch.setattr(ppa_crud, "apply", boom_apply)
+
+    action = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "x"},
+    )
+    assert action.status == "failed"
+    assert action.decision_reason == _GENERIC_INTEGRITY_REASON
+    # None of the raw driver internals leak into the persisted/public reason.
+    leaked = ("null value", "NotNullViolation", "column", "INSERT", "observable")
+    lowered = action.decision_reason.lower()
+    assert not any(bit.lower() in lowered for bit in leaked), action.decision_reason
+
+
+async def test_auto_apply_add_related_observable_dedup_race_resolves_as_applied_noop(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """The dedup TOCTOU race during auto-apply (add_related_observable) must
+    resolve as a benign no-op: born 'applied', exactly one observable, never a
+    500. The add_related_observable branch's own inner savepoint absorbs the
+    collision; create()'s outer savepoint must not turn it into a failure."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+    await _enable_auto_apply(session, org_a.id, run.plugin_id, ["add_related_observable"])
+
+    # First find (pre-check) reports the row absent as if a concurrent approver's
+    # insert hadn't landed; the post-IntegrityError re-check sees the truth.
+    real_find = obs_crud.find_case_observable
+    calls = {"n": 0}
+
+    async def racy_find(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real_find(*args, **kwargs)
+
+    monkeypatch.setattr(obs_crud, "find_case_observable", racy_find)
+
+    action = await ppa_crud.create(
+        session, run=run, action_type="add_related_observable", entity_type="case",
+        entity_id=str(case_id), payload={"observable_type": "ip", "data": "1.2.3.4"},
+    )
+    assert action.status == "applied"
+    assert action.decided_by == "system:auto-apply"
+
+    monkeypatch.undo()
+    h = _user_h(analyst_a_token, org_a.id)
+    obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    assert obs.status_code == 200, obs.text
+    matches = [o for o in obs.json()["items"] if o["data"] == "1.2.3.4"]
+    assert len(matches) == 1
 
 
 async def test_execute_responder_action_rejected_on_apply(

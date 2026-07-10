@@ -126,9 +126,40 @@ async def create(
         )
         if opted_in:
             try:
-                await apply(session, action, approver_user_id=None)
+                # Mirror decide(): run apply() inside a savepoint so a genuine
+                # IntegrityError (any constraint other than the observable dedup
+                # race, which add_related_observable resolves in its own inner
+                # savepoint) rolls back to the SAVEPOINT instead of poisoning the
+                # outer transaction. Without it, the terminal-status flush below
+                # would itself fail on the aborted transaction and surface as an
+                # unhandled 500 with the row stuck "proposed".
+                async with session.begin_nested():
+                    await apply(session, action, approver_user_id=None)
             except HTTPException:
-                # Best-effort: fall back to analyst approval on failure.
+                # Best-effort: fall back to analyst approval on validation
+                # failures (target gone, unsupported type). The savepoint
+                # rollback leaves the row "proposed" for later approval.
+                return action
+            except IntegrityError as exc:
+                # Generic backstop mirroring decide(): an unexpected constraint
+                # violation is a real failure, so record a terminal "failed"
+                # status. decision_reason is exposed by public(), so keep it
+                # generic and log the raw driver detail server-side instead of
+                # leaking column/constraint names or SQL to API consumers.
+                logger.warning(
+                    "Auto-apply of proposed action %s failed: database integrity "
+                    "error: %s",
+                    action.id,
+                    exc.orig,
+                )
+                action.status = "failed"
+                action.decided_by = "system:auto-apply"
+                action.decided_at = datetime.now(UTC)
+                action.decision_reason = (
+                    "Could not apply: the change conflicted with existing data "
+                    "(database integrity constraint)."
+                )
+                await session.flush()
                 return action
             action.status = "applied"
             action.decided_by = "system:auto-apply"
