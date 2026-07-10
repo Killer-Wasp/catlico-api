@@ -225,3 +225,70 @@ class TestSearchComments:
         assert hit["entity_type"] == "case" and hit["entity_id"] == str(case.id)
         assert "<mark>" in hit["snippet"]
         assert hit["author_name"] != ""
+
+
+class TestSearchObservables:
+    async def _seed(self, session, org_a, builtin_roles, admin_user):
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="infra case")
+        await _seed_observable(session, case, org_a, admin_user.id, data="10.0.1.5")
+        await _seed_observable(session, case, org_a, admin_user.id, data="10.0.0.0/24")
+        await _seed_observable(session, case, org_a, admin_user.id, data="192.168.7.7")
+        await _seed_observable(
+            session, case, org_a, admin_user.id, type_="url",
+            data="http://10.0.1.5/malware.bin",
+        )
+        await _seed_observable(
+            session, case, org_a, admin_user.id, type_="hash",
+            data="D41D8CD98F00B204E9800998ECF8427E".lower(),
+        )
+        await session.commit()
+        return case
+
+    async def test_cidr_finds_contained_ips_and_subranges(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
+        await self._seed(session, org_a, builtin_roles, admin_user)
+        r = await client.get("/api/v1/search", params={"q": "10.0.0.0/16"}, headers=_headers(admin_token, org_a))
+        data = {h["data"] for h in r.json()["results"]["observable"]}
+        assert "10.0.1.5" in data and "10.0.0.0/24" in data
+        assert "192.168.7.7" not in data
+
+    async def test_netmask_notation(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
+        await self._seed(session, org_a, builtin_roles, admin_user)
+        r = await client.get(
+            "/api/v1/search", params={"q": "10.0.0.0/255.255.0.0"}, headers=_headers(admin_token, org_a)
+        )
+        assert r.json()["counts"]["observable"] >= 2
+
+    async def test_bare_ip_finds_exact_containing_range_and_url(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
+        await self._seed(session, org_a, builtin_roles, admin_user)
+        r = await client.get("/api/v1/search", params={"q": "10.0.0.77"}, headers=_headers(admin_token, org_a))
+        data = {h["data"] for h in r.json()["results"]["observable"]}
+        assert data == {"10.0.0.0/24"}  # inside the stored /24; no exact/url match
+
+        r = await client.get("/api/v1/search", params={"q": "10.0.1.5"}, headers=_headers(admin_token, org_a))
+        data = {h["data"] for h in r.json()["results"]["observable"]}
+        assert "10.0.1.5" in data  # exact
+        assert "http://10.0.1.5/malware.bin" in data  # substring inside URL
+
+    async def test_uppercase_hash_fragment_matches(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
+        await self._seed(session, org_a, builtin_roles, admin_user)
+        r = await client.get("/api/v1/search", params={"q": "8CD98F00B2"}, headers=_headers(admin_token, org_a))
+        data = {h["data"] for h in r.json()["results"]["observable"]}
+        assert "d41d8cd98f00b204e9800998ecf8427e" in data
+
+    async def test_grouped_mode(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
+        case1 = await self._seed(session, org_a, builtin_roles, admin_user)
+        case2 = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="second case")
+        await _seed_observable(session, case2, org_a, admin_user.id, data="10.0.1.5")
+        await session.commit()
+
+        r = await client.get(
+            "/api/v1/search",
+            params={"q": "10.0.1.5", "group_observables": "true"},
+            headers=_headers(admin_token, org_a),
+        )
+        body = r.json()
+        assert body["results"]["observable"] == []
+        groups = {g["data"]: g["occurrences"] for g in body["results"]["observable_groups"]}
+        assert groups["10.0.1.5"] == 2
+        # counts stay per-occurrence: 2x 10.0.1.5 + 1 url containing it
+        assert body["counts"]["observable"] == 3

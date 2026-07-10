@@ -63,4 +63,12 @@ async def global_search(
         results.comment, counts.comment = await search_crud.search_comments(
             session, org, query, skip=offset, limit=limit
         )
+    if "observable" in wanted:
+        (
+            results.observable,
+            results.observable_groups,
+            counts.observable,
+        ) = await search_crud.search_observables(
+            session, org, query, skip=offset, limit=limit, group=group_observables
+        )
     return SearchResponse(counts=counts, results=results)

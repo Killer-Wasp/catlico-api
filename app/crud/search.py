@@ -10,16 +10,20 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import String, Text, and_, cast, func, literal_column, or_
+from sqlalchemy import case as sa_case
+from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud import user as user_crud
+from app.crud.observable import _visible_observable_condition
 from app.crud.task import _visible_task_condition
 from app.models.alert import Alert
 from app.models.case_ import Case
 from app.models.case_share import CaseShare
 from app.models.comment import Comment, CommentEntityType, _display_name_from_email
-from app.models.search import AlertHit, CaseHit, CommentHit, TaskHit
+from app.models.observable import Observable
+from app.models.search import AlertHit, CaseHit, CommentHit, ObservableGroupHit, ObservableHit, TaskHit
 from app.models.task import Task
 from app.util.ids import format_task_id
 
@@ -278,3 +282,102 @@ async def search_comments(
         for comment, snippet in rows
     ]
     return hits, total
+
+
+_OBSERVABLE_TSV = literal_column("observable.search_tsv")
+
+
+def _observable_match_and_rank(cq: ClassifiedQuery):
+    """(match condition, rank ordering) for the observable bucket, by query
+    class. inet matches rank above trigram matches; text mode ranks by
+    trigram similarity."""
+    pattern = like_pattern(cq.text)
+    text_cond = or_(
+        Observable.data.ilike(pattern, escape="\\"),
+        _OBSERVABLE_TSV.op("@@")(prefix_tsquery(cq.text)),
+    )
+    if cq.net is None:
+        return text_cond, [func.similarity(Observable.data, cq.text).desc()]
+    net = cast(cq.net, INET)
+    if cq.is_bare_ip:
+        # exact, inside a stored range, or textual (IP embedded in a URL etc.)
+        inet_cond = or_(Observable.ip == net, net.op("<<=")(Observable.ip))
+        cond = or_(inet_cond, text_cond)
+        return cond, [sa_case((inet_cond, 0), else_=1).asc()]
+    # CIDR query: stored addresses and sub-ranges inside it; no text fallback
+    # for observables (the literal string still text-matches other buckets).
+    return Observable.ip.op("<<=")(net), []
+
+
+async def search_observables(
+    session: AsyncSession,
+    organisation_id: str,
+    q: str,
+    *,
+    skip: int = 0,
+    limit: int = 10,
+    group: bool = False,
+) -> tuple[list[ObservableHit], list[ObservableGroupHit], int]:
+    cq = classify_query(q)
+    cond, rank = _observable_match_and_rank(cq)
+    where = [
+        _visible_observable_condition(organisation_id),
+        Observable.deleted_at.is_(None),
+        cond,
+    ]
+    total = (
+        await session.execute(
+            select(func.count()).select_from(
+                select(Observable.id).where(*where).subquery()
+            )
+        )
+    ).scalar_one()
+
+    if group:
+        rows = (
+            await session.execute(
+                select(
+                    Observable.observable_type,
+                    Observable.data,
+                    func.count().label("occurrences"),
+                )
+                .where(*where)
+                .group_by(Observable.observable_type, Observable.data)
+                .order_by(func.count().desc(), Observable.data.asc())
+                .offset(skip)
+                .limit(limit)
+            )
+        ).all()
+        groups = [
+            ObservableGroupHit(observable_type=t, data=d, occurrences=n)
+            for t, d, n in rows
+        ]
+        return [], groups, total
+
+    rows = (
+        await session.execute(
+            select(Observable)
+            .where(*where)
+            .order_by(
+                *rank,
+                func.coalesce(Observable.updated_at, Observable.created_at).desc(),
+                Observable.id.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+    ).scalars()
+    hits = [
+        ObservableHit(
+            id=o.id,
+            observable_type=o.observable_type,
+            data=o.data,
+            case_id=o.case_id,
+            alert_id=o.alert_id,
+            ioc=o.ioc,
+            message=o.message,
+            verdict=o.verdict,
+        )
+        for o in rows
+    ]
+    return hits, [], total
