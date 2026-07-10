@@ -292,3 +292,198 @@ class TestSearchObservables:
         assert groups["10.0.1.5"] == 2
         # counts stay per-occurrence: 2x 10.0.1.5 + 1 url containing it
         assert body["counts"]["observable"] == 3
+
+
+class TestSearchVisibility:
+    """The security gate: search must never surface a row the acting org's list
+    views would hide. Every test seeds under org_a and searches as org_b (or
+    proves soft-deleted rows drop out), trying to break isolation."""
+
+    async def test_org_b_sees_nothing_of_org_a(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token, observable_types):
+        # A superadmin token scoped (via X-Organisation-Id) to org_b must not
+        # see ANY of org_a's entities — text query, bare-IP query, or CIDR query
+        # (the inet path is separate SQL and must apply the same filter).
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="secret phishing case")
+        await _seed_observable(session, case, org_a, admin_user.id, data="10.9.9.9")
+        await _seed_task(session, case, org_a, admin_user.id, title="secret phishing task")
+        await _seed_alert(session, org_a, admin_user.id, title="secret phishing alert")
+        await _seed_comment(
+            session, org_a, admin_user.id,
+            entity_type=CommentEntityType.case, entity_id=case.id,
+            message="secret phishing comment",
+        )
+        await session.commit()
+
+        for q in ["phishing", "10.9.9.9", "10.9.0.0/16"]:
+            r = await client.get("/api/v1/search", params={"q": q}, headers=_headers(admin_token, org_b))
+            body = r.json()
+            # counts must be zero too: a non-zero count with empty results still
+            # tells org_b that org_a has a matching row.
+            assert body["counts"] == {
+                "case": 0, "alert": 0, "observable": 0, "task": 0, "comment": 0,
+            }, f"leak for query {q!r}: {body['counts']}"
+            assert body["results"]["observable_groups"] == [], f"group leak for {q!r}"
+
+    async def test_org_b_grouped_observables_no_leak(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token, observable_types):
+        # The grouped (palette) observable path is separate SQL from the
+        # ungrouped path — it must apply the same visibility filter.
+        case1 = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="grouped infra one")
+        case2 = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="grouped infra two")
+        await _seed_observable(session, case1, org_a, admin_user.id, data="10.8.8.8")
+        await _seed_observable(session, case2, org_a, admin_user.id, data="10.8.8.8")
+        await session.commit()
+
+        # Sanity: org_a's grouped view does see both occurrences.
+        r = await client.get(
+            "/api/v1/search",
+            params={"q": "10.8.8.8", "group_observables": "true"},
+            headers=_headers(admin_token, org_a),
+        )
+        body = r.json()
+        assert body["counts"]["observable"] == 2
+        assert body["results"]["observable_groups"][0]["occurrences"] == 2
+
+        r = await client.get(
+            "/api/v1/search",
+            params={"q": "10.8.8.8", "group_observables": "true"},
+            headers=_headers(admin_token, org_b),
+        )
+        body = r.json()
+        assert body["counts"]["observable"] == 0
+        assert body["results"]["observable_groups"] == []
+
+    async def test_shared_case_visible_to_recipient_org(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token):
+        # A case shared to org_b (non-owner share) must appear in org_b's search.
+        from app.models.case_share import CaseShare
+
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="jointly worked phishing case")
+        session.add(CaseShare(
+            case_id=case.id,
+            organisation_id=org_b.id,
+            is_owner=False,
+            role_id=builtin_roles["analyst"].id,
+            created_by=str(admin_user.id),
+        ))
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "jointly worked"}, headers=_headers(admin_token, org_b))
+        assert r.json()["counts"]["case"] == 1
+
+    async def test_shared_case_comment_visible_but_task_and_observable_hidden(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token, observable_types):
+        # Comments ride the case's ANY-share visibility, so a non-owner share
+        # exposes case comments. But a mere case share does NOT expose the
+        # case's tasks/observables — those need ownership or an explicit share.
+        from app.models.case_share import CaseShare
+
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="cross-org zebra case")
+        await _seed_task(session, case, org_a, admin_user.id, title="zebra remediation task")
+        await _seed_observable(session, case, org_a, admin_user.id, data="10.6.6.6")
+        await _seed_comment(
+            session, org_a, admin_user.id,
+            entity_type=CommentEntityType.case, entity_id=case.id,
+            message="zebra kit noted here",
+        )
+        session.add(CaseShare(
+            case_id=case.id,
+            organisation_id=org_b.id,
+            is_owner=False,
+            role_id=builtin_roles["analyst"].id,
+            created_by=str(admin_user.id),
+        ))
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "zebra"}, headers=_headers(admin_token, org_b))
+        body = r.json()
+        assert body["counts"]["case"] == 1
+        assert body["counts"]["comment"] == 1
+        assert body["counts"]["task"] == 0, "shared case must not expose its tasks"
+
+        r = await client.get("/api/v1/search", params={"q": "10.6.6.6"}, headers=_headers(admin_token, org_b))
+        assert r.json()["counts"]["observable"] == 0, "shared case must not expose its observables"
+
+    async def test_alert_comment_does_not_leak(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token):
+        # A comment on org_a's ALERT (alerts are org-owned, never shared) must
+        # not appear for org_b.
+        alert = await _seed_alert(session, org_a, admin_user.id, title="alert with a note")
+        await _seed_comment(
+            session, org_a, admin_user.id,
+            entity_type=CommentEntityType.alert, entity_id=alert.id,
+            message="giraffe indicator on this alert",
+        )
+        await session.commit()
+
+        # Sanity: org_a sees its own alert comment.
+        r = await client.get("/api/v1/search", params={"q": "giraffe"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["comment"] == 1
+
+        r = await client.get("/api/v1/search", params={"q": "giraffe"}, headers=_headers(admin_token, org_b))
+        assert r.json()["counts"]["comment"] == 0
+
+    async def test_task_share_grants_task_but_not_observable(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token, observable_types):
+        # A task on org_a's case, explicitly shared to org_b via TaskShare, IS
+        # returned in org_b's task bucket — while the case's observables (no
+        # ObservableShare) stay hidden. Pins the ownership/share asymmetry.
+        from app.models.task_share import TaskShare
+
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="antelope case")
+        task = await _seed_task(session, case, org_a, admin_user.id, title="antelope lateral movement")
+        await _seed_observable(session, case, org_a, admin_user.id, data="10.5.5.5")
+        session.add(TaskShare(
+            case_id=case.id,
+            task_id=task.id,
+            organisation_id=org_b.id,
+            created_by=str(admin_user.id),
+        ))
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "antelope"}, headers=_headers(admin_token, org_b))
+        body = r.json()
+        assert body["counts"]["task"] == 1, "task shared via TaskShare must be visible"
+        assert body["counts"]["case"] == 0, "no CaseShare — parent case stays hidden"
+
+        r = await client.get("/api/v1/search", params={"q": "10.5.5.5"}, headers=_headers(admin_token, org_b))
+        assert r.json()["counts"]["observable"] == 0, "no ObservableShare — observable stays hidden"
+
+    async def test_soft_deleted_case_excluded(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="deleted phishing case")
+        await session.commit()
+        await case_crud.delete_case(session, case, deleted_by=str(admin_user.id))
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "deleted phishing"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["case"] == 0
+
+    async def test_soft_deleted_observable_task_alert_comment_excluded(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
+        # One combined soft-delete test across the remaining entity types, each
+        # via its real crud delete helper.
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="kangaroo case")
+        obs = await _seed_observable(session, case, org_a, admin_user.id, data="10.4.4.4")
+        task = await _seed_task(session, case, org_a, admin_user.id, title="kangaroo task")
+        alert = await _seed_alert(session, org_a, admin_user.id, title="kangaroo alert")
+        comment = await _seed_comment(
+            session, org_a, admin_user.id,
+            entity_type=CommentEntityType.case, entity_id=case.id,
+            message="kangaroo comment",
+        )
+        await session.commit()
+
+        # Sanity before deletion: everything is findable.
+        r = await client.get("/api/v1/search", params={"q": "kangaroo"}, headers=_headers(admin_token, org_a))
+        pre = r.json()["counts"]
+        assert pre["task"] == 1 and pre["alert"] == 1 and pre["comment"] == 1
+        r = await client.get("/api/v1/search", params={"q": "10.4.4.4"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["observable"] == 1
+
+        await obs_crud.delete_observable(session, obs, deleted_by=str(admin_user.id))
+        await task_crud.delete_task(session, task, deleted_by=str(admin_user.id))
+        await alert_crud.delete_alert(session, alert, deleted_by=str(admin_user.id))
+        await comment_crud.delete_comment(session, comment, deleted_by=str(admin_user.id))
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "kangaroo"}, headers=_headers(admin_token, org_a))
+        body = r.json()
+        assert body["counts"]["task"] == 0
+        assert body["counts"]["alert"] == 0
+        assert body["counts"]["comment"] == 0
+        r = await client.get("/api/v1/search", params={"q": "10.4.4.4"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["observable"] == 0
