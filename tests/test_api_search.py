@@ -471,6 +471,26 @@ class TestSearchVisibility:
         r = await client.get("/api/v1/search", params={"q": "deleted phishing"}, headers=_headers(admin_token, org_a))
         assert r.json()["counts"]["case"] == 0
 
+    async def test_comment_on_soft_deleted_case_excluded(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        """A live comment must not outlive its case: search would otherwise be
+        the one surface where a deleted case's text is still readable."""
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="doomed case")
+        await _seed_comment(
+            session, org_a, admin_user.id,
+            entity_type=CommentEntityType.case, entity_id=case.id,
+            message="phishing kit analysis notes",
+        )
+        await session.commit()
+        # Sanity: visible while the case lives.
+        r = await client.get("/api/v1/search", params={"q": "phishing kit"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["comment"] == 1
+
+        await case_crud.delete_case(session, case, deleted_by=str(admin_user.id))
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "phishing kit"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["comment"] == 0
+
     async def test_soft_deleted_observable_task_alert_comment_excluded(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
         # One combined soft-delete test across the remaining entity types, each
         # via its real crud delete helper.
