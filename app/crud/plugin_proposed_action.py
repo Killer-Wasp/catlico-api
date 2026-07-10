@@ -19,6 +19,7 @@ from sqlmodel import select
 from app.crud import audit as audit_crud
 from app.crud import case_ as case_crud
 from app.crud import log as log_crud
+from app.crud import observable as obs_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
 from app.crud.case_share import get_share
@@ -38,10 +39,20 @@ ACTION_TYPES = {
 
 # Action types this version knows how to apply. The others are accepted as
 # proposals but reject on approval with a clear message until implemented.
+#
+# `execute_responder_action` is deliberately never added here: there is no
+# post-approval execution path from a PluginProposedAction to a responder.
+# Responder-style actions run through a separate pipeline entirely (connector
+# jobs claimed/submitted via app/api/internal/routes/responder.py and applied
+# by app/services/connector_operations.py), which the plugin runtime/runner
+# has no callback into after a proposal is approved. Building that bridge is
+# architectural work beyond this module, so approval fails explicitly instead
+# of guessing at a mapping — see the dedicated message in `apply()` below.
 _APPLICABLE = {
     "add_tag",
     "create_task",
     "append_task_log",
+    "add_related_observable",
     "change_severity_status",
     "patch_case_description",
 }
@@ -178,6 +189,17 @@ async def apply(
     """
     action_type = action.action_type
     if action_type not in _APPLICABLE:
+        if action_type == "execute_responder_action":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "execute_responder_action cannot be approved: there is no "
+                    "post-approval path from a proposed action to a responder "
+                    "run. Responder actions execute through the separate "
+                    "connector-job pipeline (claimed and submitted by the "
+                    "konnect worker), not proposed-action approval."
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Action type {action_type!r} cannot be applied yet",
@@ -238,7 +260,57 @@ async def apply(
         )
         return
 
-    # add_tag
+    if action_type == "add_related_observable":
+        from app.models.observable import ObservableCreate
+
+        if action.entity_type != "case":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "add_related_observable only supports entity_type 'case', "
+                    f"got {action.entity_type!r}"
+                ),
+            )
+        case_id = int(action.entity_id)
+        await _case_in_org_or_404(session, action.organisation_id, case_id)
+        obs_in = ObservableCreate(
+            observable_type=payload["observable_type"],
+            data=payload["data"],
+            message=payload.get("message", ""),
+            tlp=payload.get("tlp", 2),
+            ioc=payload.get("ioc", False),
+            sighted=payload.get("sighted", False),
+            ignore_similarity=payload.get("ignore_similarity", False),
+        )
+        type_error = await obs_crud.check_creatable_type(session, obs_in.observable_type)
+        if type_error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=type_error
+            )
+        # Idempotent "create/link": if this exact observable is already on the
+        # case (matches the same within-case dedup key the manual create route
+        # enforces), treat the proposal as already satisfied instead of
+        # conflicting — a plugin re-proposing an observable that's already
+        # linked isn't an error.
+        existing = await obs_crud.find_case_observable(
+            session, case_id, obs_in.observable_type, obs_in.data
+        )
+        if existing is None:
+            # No enqueue_auto_for_observable here (unlike the manual create
+            # route): derived/automated creation must not re-trigger enrichment
+            # — matches enrichment.py, which also skips it — to avoid
+            # plugin→observable→enrichment loops (plan invariant: plugin-actor
+            # events are never dispatched).
+            await obs_crud.create_case_observable(
+                session,
+                obs_in,
+                case_id=case_id,
+                organisation_id=action.organisation_id,
+                created_by=actor,
+            )
+        return
+
+    # add_tag — the only action type that reaches this fallthrough.
     case = await _case_in_org_or_404(session, action.organisation_id, int(action.entity_id))
     existing = await tag_crud.list_tag_strings_for(
         session, TaggableType.case, str(action.entity_id)

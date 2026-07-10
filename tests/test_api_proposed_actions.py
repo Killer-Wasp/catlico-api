@@ -1,22 +1,31 @@
 """Public proposed-action review: plugins propose canonical edits, analysts
 approve/reject, approval applies through normal CRUD with a combined actor.
 """
+import uuid
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import TokenPayload, create_access_token
+from app.crud import plugin_proposed_action as ppa_crud
 from app.crud.organisation_member import add_member
 from app.crud.user import create_user
 from app.models.organisation_member import OrganisationMemberCreate
+from app.models.plugin_runner import PluginRun
 from app.models.user import UserCreate
 
+from tests.test_api_plugin_runners import RUNNER1, _enable_plugin_for_org, _register_runner
 from tests.test_api_plugin_runtime import (
+    RUNTIME_MANIFEST,
     _create_case_with_observable,
+    _runner_h,
     _runtime_h,
     _runtime_token_for,
 )
 
 _RUNTIME_PREFIX = "/api/internal/plugin-runtime"
+_RUNNER_PREFIX = "/api/internal/plugin-runner"
 _ACTIONS = "/api/v1/proposed-actions"
 
 
@@ -60,6 +69,36 @@ async def _case_runtime_token(client, runner_secret, admin_token, org_a, case_id
         event_object_type="case",
         event_object_id=str(case_id),
     )
+
+
+async def _runtime_run_id(client, runner_secret, admin_token, org_id, case_id) -> str:
+    """Register a runner + plugin and start a run scoped to `case_id`, returning
+    the `PluginRun.id`. `add_related_observable`/`execute_responder_action` have
+    no runtime HTTP endpoint yet, so tests build the PluginProposedAction row
+    directly via `ppa_crud.create`, which needs a real `PluginRun` to attribute
+    the proposal to."""
+    manifest = RUNTIME_MANIFEST
+    _, credential = await _register_runner(client, admin_token, RUNNER1, plugins=[manifest])
+    h = _runner_h(credential)
+    await _enable_plugin_for_org(client, admin_token, org_id, manifest["id"])
+    r = await client.post(
+        f"{_RUNNER_PREFIX}/runs",
+        json={
+            "event_id": f"audit:{uuid.uuid4()}",
+            "event_type": "case.created",
+            "organisation_id": org_id,
+            "plugin_id": manifest["id"],
+            "plugin_version": manifest["version"],
+            "runner_id": RUNNER1["id"],
+            "event_object": {"type": "case", "id": str(case_id)},
+            "trigger_metadata": {},
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    run_id = r.json()["run_id"]
+    await client.post(f"{_RUNNER_PREFIX}/runs/{run_id}/accepted", headers=h)
+    return run_id
 
 
 async def _propose_case_patch(client, token, case_id, description):
@@ -142,6 +181,109 @@ async def test_create_task_propose_then_approve_applies(
     assert queue.status_code == 200, queue.text
     titles = [t["title"] for t in queue.json()["items"]]
     assert "Investigate IP" in titles
+
+
+async def test_add_related_observable_propose_then_approve_applies(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a, analyst_a_token, runner_secret, admin_token,
+):
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+
+    action = await ppa_crud.create(
+        session,
+        run=run,
+        action_type="add_related_observable",
+        entity_type="case",
+        entity_id=str(case_id),
+        payload={"observable_type": "ip", "data": "9.9.9.9", "ioc": True},
+    )
+    assert action.status == "proposed"
+
+    h = _user_h(analyst_a_token, org_a.id)
+    approved = await client.post(f"{_ACTIONS}/{action.id}/approve", headers=h)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "applied"
+
+    obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    assert obs.status_code == 200, obs.text
+    items = obs.json()["items"]
+    linked = next((o for o in items if o["data"] == "9.9.9.9"), None)
+    assert linked is not None
+    assert linked["observable_type"] == "ip"
+    assert linked["ioc"] is True
+
+    activity = await client.get(f"/api/v1/cases/{case_id}/activity?limit=50", headers=h)
+    assert activity.status_code == 200, activity.text
+    audit_row = next(
+        (a for a in activity.json()["items"] if a["object_id"] == linked["id"]), None
+    )
+    assert audit_row is not None
+    assert audit_row["actor"].startswith(f"plugin:{action.plugin_id}@")
+    assert audit_row["actor"].endswith(f"approved-by user:{analyst_a.id}")
+
+
+async def test_add_related_observable_already_on_case_is_idempotent(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """Proposing an observable that's already linked to the case applies as a
+    no-op (link semantics) rather than failing with a conflict."""
+    case_id, _obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+
+    # _create_case_with_observable already created type=ip data=1.2.3.4 on this case.
+    action = await ppa_crud.create(
+        session,
+        run=run,
+        action_type="add_related_observable",
+        entity_type="case",
+        entity_id=str(case_id),
+        payload={"observable_type": "ip", "data": "1.2.3.4"},
+    )
+
+    h = _user_h(analyst_a_token, org_a.id)
+    approved = await client.post(f"{_ACTIONS}/{action.id}/approve", headers=h)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "applied"
+
+    obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    assert obs.status_code == 200, obs.text
+    matches = [o for o in obs.json()["items"] if o["data"] == "1.2.3.4"]
+    assert len(matches) == 1
+
+
+async def test_execute_responder_action_rejected_on_apply(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """execute_responder_action has no post-approval execution path. Approval
+    must fail explicitly (status=failed with a clear reason) rather than
+    crash or silently fall through to the add_tag branch."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+
+    action = await ppa_crud.create(
+        session,
+        run=run,
+        action_type="execute_responder_action",
+        entity_type="case",
+        entity_id=str(case_id),
+        payload={"responder": "block-ip", "tag": "should-not-be-used-as-a-tag"},
+    )
+    assert action.status == "proposed"
+
+    h = _user_h(analyst_a_token, org_a.id)
+    approved = await client.post(f"{_ACTIONS}/{action.id}/approve", headers=h)
+    assert approved.status_code == 200, approved.text
+    body = approved.json()
+    assert body["status"] == "failed"
+    assert "execute_responder_action" in body["decision_reason"]
+
+    # No tag was added to the case (proof it didn't fall through to add_tag).
+    tags = await client.get(f"/api/v1/cases/{case_id}/tags", headers=h)
+    assert tags.status_code == 200, tags.text
+    assert "should-not-be-used-as-a-tag" not in tags.json()
 
 
 # --- Reject / guards ---
