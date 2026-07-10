@@ -24,6 +24,7 @@ from app.api.v1.routes import (
     proposed_actions,
     report_templates,
     roles,
+    search,
     slas,
     tags,
     tasks,
@@ -63,4 +64,5 @@ api_router.include_router(plugins.router)
 api_router.include_router(plugins.runs_router)
 api_router.include_router(proposed_actions.router)
 api_router.include_router(report_templates.router)
+api_router.include_router(search.router)
 api_router.include_router(ws.router)

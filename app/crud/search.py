@@ -8,7 +8,13 @@ hide. Spec: docs/global-search-design.md (catlico workspace root).
 import ipaddress
 from dataclasses import dataclass
 
-from sqlalchemy import Text, cast, func
+from sqlalchemy import Text, cast, func, literal_column
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
+
+from app.models.case_ import Case
+from app.models.case_share import CaseShare
+from app.models.search import CaseHit
 
 
 @dataclass(frozen=True)
@@ -55,3 +61,61 @@ def like_pattern(q: str) -> str:
     """%q% with LIKE wildcards escaped; use with .ilike(pattern, escape="\\\\")."""
     escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+#: Generated columns (Task 1 migration) aren't mapped on the SQLModel classes —
+#: reference them by qualified name.
+_CASE_TSV = literal_column("case_.search_tsv")
+
+_HEADLINE_OPTS = "StartSel=<mark>, StopSel=</mark>, MaxWords=18, MinWords=6"
+
+
+def _headline(source, tsq):
+    return func.ts_headline("simple", source, tsq, _HEADLINE_OPTS)
+
+
+async def search_cases(
+    session: AsyncSession, organisation_id: str, q: str, *, skip: int = 0, limit: int = 10
+) -> tuple[list[CaseHit], int]:
+    tsq = prefix_tsquery(q)
+    base = (
+        select(Case)
+        .join(CaseShare, CaseShare.case_id == Case.id)
+        .where(
+            CaseShare.organisation_id == organisation_id,
+            Case.deleted_at.is_(None),
+            _CASE_TSV.op("@@")(tsq),
+        )
+    )
+    total = (
+        await session.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    rows = (
+        await session.execute(
+            base.add_columns(
+                _headline(
+                    Case.title + " — " + func.coalesce(Case.description, ""), tsq
+                )
+            )
+            .order_by(
+                func.ts_rank(_CASE_TSV, tsq).desc(),
+                func.coalesce(Case.updated_at, Case.created_at).desc(),
+                Case.id.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+    ).all()
+    hits = [
+        CaseHit(
+            id=case.id,
+            title=case.title,
+            snippet=snippet,
+            status=case.status,
+            severity=case.severity,
+            updated_at=case.updated_at,
+            created_at=case.created_at,
+        )
+        for case, snippet in rows
+    ]
+    return hits, total
