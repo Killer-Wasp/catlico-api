@@ -119,7 +119,14 @@ async def search_cases(
         await session.execute(
             base.add_columns(
                 _headline(
-                    Case.title + " — " + func.coalesce(Case.description, ""), tsq
+                    # Same fields the tsvector indexes, so a match found only
+                    # in summary still yields a highlighted snippet.
+                    Case.title
+                    + " — "
+                    + func.coalesce(Case.description, "")
+                    + " "
+                    + func.coalesce(Case.summary, ""),
+                    tsq,
                 )
             )
             .order_by(
@@ -162,7 +169,14 @@ async def search_alerts(
         await session.execute(
             base.add_columns(
                 _headline(
-                    Alert.title + " — " + func.coalesce(Alert.description, ""), tsq
+                    # Same fields the tsvector indexes, so a match found only
+                    # in source_ref still yields a highlighted snippet.
+                    Alert.title
+                    + " — "
+                    + func.coalesce(Alert.description, "")
+                    + " "
+                    + func.coalesce(Alert.source_ref, ""),
+                    tsq,
                 )
             )
             .order_by(

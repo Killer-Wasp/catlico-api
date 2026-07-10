@@ -23,10 +23,10 @@ def _headers(token, org):
     return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org.id}
 
 
-async def _seed_case(session, org, builtin_roles, created_by, *, title, description=""):
+async def _seed_case(session, org, builtin_roles, created_by, *, title, description="", summary=None):
     return await case_crud.create_case(
         session,
-        CaseCreate(title=title, description=description),
+        CaseCreate(title=title, description=description, summary=summary),
         owner_org_id=org.id,
         owner_role_id=builtin_roles["org-admin"].id,
         created_by=str(created_by),
@@ -132,6 +132,17 @@ class TestSearchCases:
         r = await client.get("/api/v1/search", params={"q": "ishing"}, headers=_headers(admin_token, org_a))
         assert r.json()["counts"]["case"] == 0
 
+    async def test_summary_only_match_is_highlighted(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        await _seed_case(
+            session, org_a, builtin_roles, admin_user.id,
+            title="Weekly review", description="", summary="root cause was a beaconing implant",
+        )
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "beaconing"}, headers=_headers(admin_token, org_a))
+        body = r.json()
+        assert body["counts"]["case"] == 1
+        assert "<mark>" in body["results"]["case"][0]["snippet"]
+
     async def test_tsquery_syntax_is_inert(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
         await _seed_case(session, org_a, builtin_roles, admin_user.id, title="anything")
         await session.commit()
@@ -212,7 +223,10 @@ class TestSearchAlertsAndTasks:
         assert r.json()["counts"]["alert"] == 1
 
         r = await client.get("/api/v1/search", params={"q": "SIEM-90210"}, headers=_headers(admin_token, org_a))
-        assert r.json()["counts"]["alert"] == 1
+        body = r.json()
+        assert body["counts"]["alert"] == 1
+        # A source_ref-only match must still be highlighted in the snippet.
+        assert "<mark>" in body["results"]["alert"][0]["snippet"]
 
     async def test_task_hit_carries_public_id(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
         case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="c")
