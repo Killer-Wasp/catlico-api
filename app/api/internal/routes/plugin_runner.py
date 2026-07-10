@@ -23,6 +23,7 @@ from app.models.plugin_runner import (
     PluginRunnerHeartbeat,
     PluginRunnerRegister,
     PluginDefinition,
+    PluginEventDelivery,
     PluginResult,
     PluginVersion,
     RunnerPluginInstallation,
@@ -315,21 +316,53 @@ async def create_run(
             detail="Runner does not host this plugin version",
         )
     manifest = pver.manifest or {}
-    if event_type not in set(manifest.get("triggers", [])):
+
+    # Manual-ness is authoritative ONLY when the API itself marked this event
+    # manual. We never trust the runner-supplied claim body for it: honouring a
+    # runner-asserted ``manual`` flag would let a compromised or buggy runner
+    # bypass the auto-run gate, the trigger guard, and the freshness cache for
+    # any plugin — a privilege escalation across the trust boundary. Instead we
+    # read it from the delivery envelope the API wrote for this event_id, and
+    # only when that envelope also targets *this* plugin.
+    stored_delivery = (
+        await session.execute(
+            select(PluginEventDelivery)
+            .where(PluginEventDelivery.event_id == body["event_id"])
+            .limit(1)
+        )
+    ).scalars().first()
+    stored_envelope = stored_delivery.envelope if stored_delivery else {}
+    is_manual = bool(stored_envelope.get("manual")) and (
+        stored_envelope.get("target_plugin_id") == plugin_id
+    )
+
+    # Trigger guard: a manual run targets one plugin explicitly, so analyst
+    # intent overrides the plugin's declared triggers.
+    if not is_manual and event_type not in set(manifest.get("triggers", [])):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Plugin does not declare this event trigger",
         )
 
     org_plugin = await session.get(OrgPlugin, (organisation_id, plugin_id))
-    if org_plugin is None or not org_plugin.enabled or not org_plugin.auto_run_enabled:
+    # Manual runs require the plugin to be enabled (mirroring the public run
+    # endpoint) but NOT auto-run enabled — analyst intent, not automation policy.
+    if org_plugin is None or not org_plugin.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Plugin is not enabled for auto-run in this organisation",
+        )
+    if not is_manual and not org_plugin.auto_run_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Plugin is not enabled for auto-run in this organisation",
         )
 
-    # Claim: the (event_id, plugin_id) unique constraint means the first runner
-    # wins; a second runner hosting the same plugin gets 409 and drops the work.
+    # Claim / retry arbitration. The (event_id, plugin_id) unique constraint is
+    # the multi-runner arbiter: a second runner claiming a *live* run must still
+    # lose (409). But a run this same runner already owns that has been re-queued
+    # — a Task-B retry, or a manual run awaiting first pickup — is meant to be
+    # reused: same row, re-minted token, no second insert and no double-run.
     existing_run = (
         await session.execute(
             select(PluginRun).where(
@@ -339,21 +372,45 @@ async def create_run(
         )
     ).scalar_one_or_none()
     if existing_run is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": "Plugin run already exists for this event and plugin",
-                "existing_run_id": str(existing_run.id),
-            },
+        # "Retryable" == queued AND owned by the claiming runner. Any active
+        # (accepted/running/cancelling) or terminal status, or a different
+        # runner, still 409s: that preserves the arbiter and blocks double-runs.
+        reusable = (
+            existing_run.status == "queued" and existing_run.runner_id == runner_id
         )
+        if not reusable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Plugin run already exists for this event and plugin",
+                    "existing_run_id": str(existing_run.id),
+                },
+            )
+        reuse_now = datetime.now(UTC)
+        runtime_token = secrets.token_urlsafe(32)
+        # attempt is owned by whoever re-queued the row (retry-failed, or the
+        # up-front manual enqueue); we do NOT bump it again here or a single
+        # retry would count twice.
+        existing_run.runtime_token_hash = _hash_runtime_token(runtime_token)
+        existing_run.runtime_token_expires_at = reuse_now + timedelta(
+            seconds=settings.PLUGIN_RUNTIME_TOKEN_TTL_SECONDS
+        )
+        existing_run.status = "queued"
+        await session.flush()
+        return {
+            "run_id": str(existing_run.id),
+            "status": existing_run.status,
+            "runtime_token": runtime_token,
+        }
 
     event_object_type, event_object_id = _event_object_from_body(body)
     now = datetime.now(UTC)
 
     # Freshness skip: a non-expired result for this entity means the plugin
     # already has current evidence; record the run as skipped, don't execute.
+    # Manual runs bypass this — the analyst explicitly asked for a fresh run.
     result_ttl = manifest.get("result_ttl_seconds")
-    if event_object_id and isinstance(result_ttl, int) and result_ttl > 0:
+    if not is_manual and event_object_id and isinstance(result_ttl, int) and result_ttl > 0:
         fresh = (
             await session.execute(
                 select(PluginResult).where(

@@ -189,6 +189,31 @@ def _plugin_run_public(run: PluginRun) -> dict:
     }
 
 
+def _manual_run_view(envelope: dict, pdef: PluginDefinition, runner_id: str) -> dict:
+    """Public view of a just-queued manual run. The run row itself is created by
+    the runner when it claims the synthesized event, so this is a synthetic view
+    keyed by the deterministic event_id (a stable id across duplicate submits)."""
+    return {
+        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, envelope["event_id"])),
+        "event_id": envelope["event_id"],
+        "event_type": envelope["event_type"],
+        "organisation_id": envelope["organisation_id"],
+        "plugin_id": pdef.id,
+        "plugin_version_id": pdef.active_version_id,
+        "runner_id": runner_id,
+        "event_object_type": envelope["object"]["type"],
+        "event_object_id": envelope["object"]["id"],
+        "status": "queued",
+        "skip_reason": None,
+        "started_at": None,
+        "ended_at": None,
+        "error": None,
+        "result_summary": None,
+        "operation_count": 0,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+
+
 async def create_manual_plugin_run(
     session: AsyncSession,
     ctx: ActiveOrgOrApiKeyContext,
@@ -196,7 +221,16 @@ async def create_manual_plugin_run(
     plugin_id: str,
     entity_type: str,
     entity_id: str,
-) -> PluginRun:
+) -> dict:
+    """Route an on-demand manual run onto the shared event/delivery path.
+
+    Rather than inserting a ``queued`` run nothing ever executes (the old
+    scaffold), we synthesize a manual envelope and enqueue a delivery per healthy
+    runner. The runner claims the run through the normal path; ``create_run``
+    reads the stored envelope's ``manual`` flag server-side and grants the
+    analyst-intent relaxations (no trigger match required, no auto-run required,
+    freshness cache bypassed) while keeping TLP/PAP and concurrency guards.
+    """
     _require("run:enrichment", ctx.permissions)
     pdef = await session.get(PluginDefinition, plugin_id)
     if pdef is None:
@@ -235,22 +269,21 @@ async def create_manual_plugin_run(
     if observable is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Observable not found")
 
-    run = PluginRun(
-        event_id=f"manual:{uuid.uuid4()}",
-        event_type=f"{entity_type}.manual",
-        organisation_id=ctx.organisation_id,
-        plugin_id=plugin_id,
-        plugin_version_id=pdef.active_version_id,
-        runner_id=installation.runner_id,
-        event_object_type=entity_type,
-        event_object_id=entity_id,
-        permissions=list((pdef.manifest or {}).get("permissions", [])),
-        status="queued",
-        created_by=str(ctx.user.id),
+    from app.services.plugin_dispatch import (
+        _enqueue_for_healthy_runners,
+        build_manual_envelope,
     )
-    session.add(run)
+
+    envelope = build_manual_envelope(
+        org_id=ctx.organisation_id,
+        plugin_id=plugin_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        actor=f"user:{ctx.user.id}",
+    )
+    await _enqueue_for_healthy_runners(session, envelope)
     await session.flush()
-    return run
+    return _manual_run_view(envelope, pdef, installation.runner_id)
 
 
 # --- Plugin catalog ---
@@ -378,14 +411,13 @@ async def run_plugin(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
-    run = await create_manual_plugin_run(
+    return await create_manual_plugin_run(
         session,
         ctx,
         plugin_id=plugin_id,
         entity_type=body.get("entity_type", ""),
         entity_id=str(body.get("entity_id", "")),
     )
-    return _plugin_run_public(run)
 
 
 # --- Enable / Disable ---
@@ -700,7 +732,8 @@ async def retry_failed(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
     _require("write:connector", ctx.permissions)
-    # Count failed runs; ponytail: actual retry dispatches later
+    from app.services.plugin_dispatch import redeliver_run
+
     result = await session.execute(
         select(PluginRun).where(
             PluginRun.organisation_id == ctx.organisation_id,
@@ -708,7 +741,26 @@ async def retry_failed(
         )
     )
     failed = result.scalars().all()
-    return {"retried": len(failed)}
+    now = datetime.now(UTC)
+    redispatched = 0
+    for run in failed:
+        # Reuse the row (do not insert a second): reset to queued, bump attempt,
+        # clear terminal fields, invalidate the stale runtime token.
+        run.status = "queued"
+        run.attempt += 1
+        run.error = None
+        run.error_kind = None
+        run.skip_reason = None
+        run.started_at = None
+        run.ended_at = None
+        run.runtime_token_hash = None
+        run.runtime_token_expires_at = None
+        # Reset/resend the delivery so the push loop actually re-sends it (a bare
+        # re-enqueue would be skipped as already-delivered).
+        await redeliver_run(session, run, now)
+        redispatched += 1
+    await session.flush()
+    return {"retried": redispatched, "redispatched": redispatched}
 
 
 @runs_router.post("/clear-finished")

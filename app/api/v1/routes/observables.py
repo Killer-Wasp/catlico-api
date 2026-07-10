@@ -284,16 +284,15 @@ async def run_plugin_for_observable(
 ) -> dict:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
     _require("run:enrichment", perms)
-    from app.api.v1.routes.plugins import create_manual_plugin_run, _plugin_run_public
+    from app.api.v1.routes.plugins import create_manual_plugin_run
 
-    run = await create_manual_plugin_run(
+    return await create_manual_plugin_run(
         session,
         ctx,
         plugin_id=body["plugin_id"],
         entity_type="observable",
         entity_id=str(obs.id),
     )
-    return _plugin_run_public(run)
 
 
 @router.get("/{observable_id}/enrichments", response_model=EnrichmentOverview)

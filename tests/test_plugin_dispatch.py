@@ -16,10 +16,16 @@ from app.models.plugin_runner import (
     PluginVersion,
 )
 from app.models.plugin_runner import OrgPlugin
+from app.models.plugin_runner import PluginRun
 from app.services.plugin_dispatch import (
+    _enqueue_for_healthy_runners,
+    _envelope_from_run,
+    build_manual_envelope,
     build_plugin_envelope,
+    manual_event_id,
     plugin_event_consumer,
     push_pending_deliveries,
+    redeliver_run,
     schedule_due_events,
 )
 
@@ -221,6 +227,102 @@ async def test_scheduler_honors_org_override(session, org_a):
     delivery = (await session.execute(select(PluginEventDelivery))).scalar_one()
     # 2026-01-01 slot from the override, not the 6-hourly default.
     assert "2026-01-01" in delivery.envelope["data"]["fire_time"]
+
+
+def test_manual_event_id_is_deterministic():
+    a = manual_event_id("org-a", "acme", "observable", "obs-1")
+    assert a == manual_event_id("org-a", "acme", "observable", "obs-1")
+    assert a != manual_event_id("org-a", "acme", "observable", "obs-2")
+    assert a != manual_event_id("org-a", "other", "observable", "obs-1")
+
+
+async def test_manual_envelope_enqueues_and_pushes_per_healthy_runner(session, org_a):
+    r1 = await _seed_runner(session, "r1")
+    r2 = await _seed_runner(session, "r2", base_url="http://runner2:8090")
+    envelope = build_manual_envelope(
+        org_id=org_a.id, plugin_id="acme", entity_type="observable",
+        entity_id="obs-1", actor="user:u1",
+    )
+    created = await _enqueue_for_healthy_runners(session, envelope)
+    await session.commit()
+
+    assert created == 2
+    deliveries = (await session.execute(select(PluginEventDelivery))).scalars().all()
+    assert {d.runner_id for d in deliveries} == {r1.id, r2.id}
+    assert all(d.status == "pending" for d in deliveries)
+    assert all(d.envelope["manual"] is True for d in deliveries)
+    assert all(d.envelope["target_plugin_id"] == "acme" for d in deliveries)
+    assert all(d.envelope["event_type"] == "observable.manual" for d in deliveries)
+
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(str(request.url))
+        return httpx.Response(200, json={"dispatched": 1})
+
+    result = await push_pending_deliveries(session, transport=httpx.MockTransport(handler))
+    assert result["delivered"] == 2
+    assert len(sent) == 2
+
+
+async def test_redeliver_run_resets_delivered_delivery_to_pending(session, org_a):
+    runner = await _seed_runner(session)
+    await _seed_subscribed_plugin(session)
+    run = PluginRun(
+        event_id="audit:x", event_type="observable.created", organisation_id=org_a.id,
+        plugin_id="acme", runner_id=runner.id, status="queued", attempt=2,
+        event_object_type="observable", event_object_id="obs-1",
+    )
+    session.add(run)
+    session.add(
+        PluginEventDelivery(
+            event_id="audit:x", runner_id=runner.id, envelope={"event_id": "audit:x"},
+            status="delivered", delivered_at=datetime.now(UTC),
+            next_attempt_at=datetime.now(UTC), attempts=3,
+        )
+    )
+    await session.flush()
+
+    await redeliver_run(session, run)
+
+    delivery = (await session.execute(select(PluginEventDelivery))).scalar_one()
+    assert delivery.status == "pending"
+    assert delivery.delivered_at is None
+    assert delivery.attempts == 0
+    assert delivery.next_attempt_at <= datetime.now(UTC)
+
+
+async def test_redeliver_run_synthesizes_when_no_delivery_survives(session, org_a):
+    runner = await _seed_runner(session)
+    await _seed_subscribed_plugin(session)
+    run = PluginRun(
+        event_id="manual:org-a:acme:observable:obs-1", event_type="observable.manual",
+        organisation_id=org_a.id, plugin_id="acme", runner_id=runner.id,
+        status="queued", attempt=2, event_object_type="observable",
+        event_object_id="obs-1", created_by="user-9",
+    )
+    session.add(run)
+    await session.flush()
+
+    await redeliver_run(session, run)
+
+    delivery = (await session.execute(select(PluginEventDelivery))).scalar_one()
+    assert delivery.status == "pending"
+    assert delivery.runner_id == runner.id
+    # Manual-ness recovered from the .manual event_type, not from runner input.
+    assert delivery.envelope["manual"] is True
+    assert delivery.envelope["target_plugin_id"] == "acme"
+
+
+def test_envelope_from_run_marks_non_manual_as_system():
+    run = PluginRun(
+        event_id="audit:y", event_type="observable.created", organisation_id="org-a",
+        plugin_id="acme", runner_id="r1", event_object_type="observable",
+        event_object_id="obs-1",
+    )
+    env = _envelope_from_run(run)
+    assert "manual" not in env
+    assert env["actor"] == "system"
 
 
 async def test_push_expires_past_max_age(session, org_a):

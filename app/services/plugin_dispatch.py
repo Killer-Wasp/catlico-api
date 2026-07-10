@@ -29,11 +29,13 @@ from app.models.plugin_runner import (
     OrgPlugin,
     PluginDefinition,
     PluginEventDelivery,
+    PluginRun,
     PluginRunner,
 )
 from app.services.outbox_events import build_event_envelope
 
 SCHEDULE_EVENT_TYPE = "schedule.fired"
+MANUAL_EVENT_TYPE_SUFFIX = ".manual"
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,101 @@ async def _enqueue_for_healthy_runners(session: AsyncSession, envelope: dict) ->
         )
         created += 1
     return created
+
+
+def manual_event_id(
+    org_id: str, plugin_id: str, entity_type: str, entity_id: str
+) -> str:
+    """Deterministic id per (org, plugin, entity). Being deterministic is the
+    whole point: a redelivered push or a double-clicked "run" button resolves to
+    the same event_id, so the ``(event_id, plugin_id)`` unique constraint stops
+    the plugin from running twice."""
+    return f"manual:{org_id}:{plugin_id}:{entity_type}:{entity_id}"
+
+
+def build_manual_envelope(
+    *, org_id: str, plugin_id: str, entity_type: str, entity_id: str, actor: str
+) -> dict:
+    """Synthesize an on-demand manual-run envelope (mirrors the cron precedent in
+    ``schedule_due_events``). ``target_plugin_id`` makes the runner execute
+    exactly one plugin; ``manual`` is the server-side flag ``create_run`` reads
+    back to grant the analyst-intent relaxations."""
+    return {
+        "event_id": manual_event_id(org_id, plugin_id, entity_type, entity_id),
+        "event_type": f"{entity_type}{MANUAL_EVENT_TYPE_SUFFIX}",
+        "organisation_id": org_id,
+        "actor": actor,
+        "object": {"type": entity_type, "id": entity_id},
+        "context": {"type": "unknown", "id": ""},
+        "data": {},
+        "manual": True,
+        "target_plugin_id": plugin_id,
+        "attempt": 1,
+    }
+
+
+def _envelope_from_run(run: PluginRun) -> dict:
+    """Reconstruct a delivery envelope from a run row, for retries where the
+    original delivery did not survive retention. Manual-ness is recovered from
+    the API-authored ``.manual`` event_type — never from runner input."""
+    manual = (run.event_type or "").endswith(MANUAL_EVENT_TYPE_SUFFIX)
+    envelope = {
+        "event_id": run.event_id,
+        "event_type": run.event_type,
+        "organisation_id": run.organisation_id,
+        "actor": f"user:{run.created_by}" if manual and run.created_by else "system",
+        "object": {
+            "type": run.event_object_type or "",
+            "id": run.event_object_id or "",
+        },
+        "context": {"type": "unknown", "id": ""},
+        "data": {},
+        "attempt": run.attempt,
+    }
+    if manual:
+        envelope["manual"] = True
+        envelope["target_plugin_id"] = run.plugin_id
+    return envelope
+
+
+async def redeliver_run(
+    session: AsyncSession, run: PluginRun, now: datetime | None = None
+) -> None:
+    """Make the push loop resend this run's event.
+
+    ``_enqueue_for_healthy_runners`` skips when a delivery already exists, so a
+    naive re-enqueue of an already-``delivered`` row is a silent no-op. Reset the
+    surviving ``(event_id, runner_id)`` delivery back to ``pending`` with a fresh
+    age window; if none survived retention, synthesize one from the run.
+    """
+    now = now or datetime.now(UTC)
+    delivery = (
+        await session.execute(
+            select(PluginEventDelivery).where(
+                PluginEventDelivery.event_id == run.event_id,
+                PluginEventDelivery.runner_id == run.runner_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if delivery is not None:
+        delivery.status = "pending"
+        delivery.attempts = 0
+        delivery.last_error = None
+        delivery.delivered_at = None
+        delivery.next_attempt_at = now
+        # Restart the max-age clock, else _reschedule may expire a resend of an
+        # old delivery on its first failure.
+        delivery.created_at = now
+    else:
+        session.add(
+            PluginEventDelivery(
+                event_id=run.event_id,
+                runner_id=run.runner_id,
+                envelope=_envelope_from_run(run),
+                status="pending",
+                next_attempt_at=now,
+            )
+        )
 
 
 def _schedule_event_id(plugin_id: str, org_id: str, fire_time: datetime) -> str:

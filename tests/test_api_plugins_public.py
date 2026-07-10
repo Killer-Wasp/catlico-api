@@ -432,7 +432,10 @@ async def test_manual_plugin_run_for_observable(
         headers=h,
     )
     assert again.status_code == 200, again.text
-    assert again.json()["id"] != data["id"]
+    # Deterministic manual event_id: a duplicate submission resolves to the same
+    # run identity, so the plugin cannot be double-run for the same entity.
+    assert again.json()["id"] == data["id"]
+    assert again.json()["event_id"] == data["event_id"]
 
 
 async def test_manual_plugin_run_rejects_disabled_plugin(
