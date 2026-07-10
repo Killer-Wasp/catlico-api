@@ -6,17 +6,20 @@ hide. Spec: docs/global-search-design.md (catlico workspace root).
 """
 
 import ipaddress
+import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import Text, cast, func, literal_column
+from sqlalchemy import String, Text, and_, cast, func, literal_column, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud import user as user_crud
 from app.crud.task import _visible_task_condition
 from app.models.alert import Alert
 from app.models.case_ import Case
 from app.models.case_share import CaseShare
-from app.models.search import AlertHit, CaseHit, TaskHit
+from app.models.comment import Comment, CommentEntityType, _display_name_from_email
+from app.models.search import AlertHit, CaseHit, CommentHit, TaskHit
 from app.models.task import Task
 from app.util.ids import format_task_id
 
@@ -201,5 +204,76 @@ async def search_tasks(
             status=t.status,
         )
         for t in rows
+    ]
+    return hits, total
+
+
+_COMMENT_TSV = literal_column("comment.search_tsv")
+
+
+async def search_comments(
+    session: AsyncSession, organisation_id: str, q: str, *, skip: int = 0, limit: int = 10
+) -> tuple[list[CommentHit], int]:
+    tsq = prefix_tsquery(q)
+    visible_case_ids = select(cast(CaseShare.case_id, String)).where(
+        CaseShare.organisation_id == organisation_id
+    )
+    owned_alert_ids = select(cast(Alert.id, String)).where(
+        Alert.organisation_id == organisation_id,
+        Alert.deleted_at.is_(None),
+    )
+    base = select(Comment).where(
+        Comment.deleted_at.is_(None),
+        _COMMENT_TSV.op("@@")(tsq),
+        or_(
+            and_(
+                Comment.entity_type == CommentEntityType.case,
+                Comment.entity_id.in_(visible_case_ids),
+            ),
+            and_(
+                Comment.entity_type == CommentEntityType.alert,
+                Comment.entity_id.in_(owned_alert_ids),
+            ),
+        ),
+    )
+    total = (
+        await session.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    rows = (
+        await session.execute(
+            base.add_columns(_headline(Comment.message, tsq))
+            .order_by(
+                func.ts_rank(_COMMENT_TSV, tsq).desc(),
+                Comment.created_at.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+    ).all()
+
+    author_ids = []
+    for comment, _ in rows:
+        try:
+            author_ids.append(uuid.UUID(comment.created_by))
+        except ValueError:
+            pass
+    emails = await user_crud.emails_for_ids(session, author_ids) if author_ids else {}
+
+    def _author(created_by: str) -> str:
+        try:
+            return _display_name_from_email(emails.get(uuid.UUID(created_by), ""))
+        except ValueError:
+            return ""
+
+    hits = [
+        CommentHit(
+            id=comment.id,
+            entity_type=comment.entity_type,
+            entity_id=comment.entity_id,
+            snippet=snippet,
+            author_name=_author(comment.created_by),
+            created_at=comment.created_at,
+        )
+        for comment, snippet in rows
     ]
     return hits, total

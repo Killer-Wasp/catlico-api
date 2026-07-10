@@ -59,4 +59,8 @@ async def global_search(
         results.task, counts.task = await search_crud.search_tasks(
             session, org, query, skip=offset, limit=limit
         )
+    if "comment" in wanted:
+        results.comment, counts.comment = await search_crud.search_comments(
+            session, org, query, skip=offset, limit=limit
+        )
     return SearchResponse(counts=counts, results=results)

@@ -173,6 +173,17 @@ class TestSearchCases:
         assert len(body["results"]["case"]) == 2
 
 
+async def _seed_comment(session, org, created_by, *, entity_type, entity_id, message):
+    return await comment_crud.create_comment(
+        session,
+        CommentCreate(message=message),
+        entity_type=entity_type,
+        entity_id=str(entity_id),
+        organisation_id=org.id,
+        created_by=str(created_by),
+    )
+
+
 class TestSearchAlertsAndTasks:
     async def test_alert_title_and_source_ref(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
         await _seed_alert(session, org_a, admin_user.id, title="Suspicious login burst")
@@ -195,3 +206,22 @@ class TestSearchAlertsAndTasks:
         assert body["counts"]["task"] == 1
         [hit] = body["results"]["task"]
         assert hit["public_id"] == f"T-{case.id}-{hit['id']}"
+
+
+class TestSearchComments:
+    async def test_comment_body_match_with_author(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="c")
+        await _seed_comment(
+            session, org_a, admin_user.id,
+            entity_type=CommentEntityType.case, entity_id=case.id,
+            message="looks like the same phish kit as last month",
+        )
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "phish kit"}, headers=_headers(admin_token, org_a))
+        body = r.json()
+        assert body["counts"]["comment"] == 1
+        [hit] = body["results"]["comment"]
+        assert hit["entity_type"] == "case" and hit["entity_id"] == str(case.id)
+        assert "<mark>" in hit["snippet"]
+        assert hit["author_name"] != ""
