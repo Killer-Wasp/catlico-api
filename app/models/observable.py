@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, Index, text
+from sqlalchemy import CheckConstraint, Column, Index, text
+from sqlalchemy.dialects.postgresql import INET
 from sqlmodel import Field, SQLModel
 
 from app.models.common import CreatedMixin, SoftDeleteMixin, TimestampMixin
@@ -71,6 +72,9 @@ class Observable(TimestampMixin, SoftDeleteMixin, table=True):
     )
     # Rolled-up verdict from enrichment report tags (B3).
     verdict: str | None = Field(default=None, index=True)
+    # Parsed address/network when observable_type == "ip" (app-maintained;
+    # NULL when data doesn't parse). Powers CIDR containment search.
+    ip: str | None = Field(default=None, sa_column=Column("ip", INET, nullable=True))
 
 
 class ObservableShare(CreatedMixin, table=True):

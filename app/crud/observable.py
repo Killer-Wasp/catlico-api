@@ -1,3 +1,4 @@
+import ipaddress
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +26,24 @@ from app.models.observable import (
     ObservableUpdate,
 )
 from app.models.organisation_link import AutoShareMode
+
+
+def ip_value(observable_type: str, data: str) -> str | None:
+    """Normalized inet value for an ip-typed observable: a host address or a
+    network (accepts prefix and dotted-netmask forms). None when not ip-typed
+    or unparseable — search simply won't range-match that row."""
+    if observable_type != "ip":
+        return None
+    raw = data.strip()
+    try:
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        pass
+    try:
+        return str(ipaddress.ip_network(raw, strict=False))
+    except ValueError:
+        return None
+
 
 # Raw observable_type (lower-cased) → UI category. Mirrors the web TYPE_MAP;
 # unknown raws fall into "other".
@@ -423,6 +442,7 @@ async def create_case_observable(
         ignore_similarity=obs_in.ignore_similarity,
         organisation_id=organisation_id,
         created_by=created_by,
+        ip=ip_value(obs_in.observable_type, obs_in.data),
     )
     session.add(observable)
     await session.flush()
@@ -469,6 +489,7 @@ async def create_alert_observable(
         ignore_similarity=obs_in.ignore_similarity,
         organisation_id=organisation_id,
         created_by=created_by,
+        ip=ip_value(obs_in.observable_type, obs_in.data),
     )
     session.add(observable)
     await session.flush()
