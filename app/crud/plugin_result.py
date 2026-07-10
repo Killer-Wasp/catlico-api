@@ -8,12 +8,45 @@ shared case sees results on it regardless of which org produced them (the produc
 org stays visible in provenance via ``organisation_id``). See the plan's
 "Plugin Result And Evidence Model" and "Entity-side surfaces".
 """
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.models.plugin_runner import PluginResult
+from app.models.plugin_runner import PluginResult, PluginRunFile
+
+_FILE_REF_PREFIX = "plugin-run-file:"
+
+
+async def resolve_entity_attachment(
+    session: AsyncSession, entity_type: str, entity_id: str, file_ref: str
+) -> PluginRunFile | None:
+    """Resolve a plugin attachment ``file_ref`` to its ``PluginRunFile`` **iff** a
+    ``PluginResult`` on this exact entity references it.
+
+    The ``file_ref`` arrives from the URL and is never treated as a storage path: it
+    is only honoured when some result on ``(entity_type, entity_id)`` — an entity the
+    caller has already proven it may read — lists it in ``attachments``. A ref that is
+    real but attached elsewhere (an entity the caller cannot read) resolves to ``None``
+    here, so an attachment cannot be fetched by guessing its ref. Returns ``None`` for
+    a malformed ref, a ref not referenced on this entity, or a missing file row.
+    """
+    if not isinstance(file_ref, str) or not file_ref.startswith(_FILE_REF_PREFIX):
+        return None
+    try:
+        file_id = uuid.UUID(file_ref.removeprefix(_FILE_REF_PREFIX))
+    except ValueError:
+        return None
+    results = await list_for_entity(session, entity_type, entity_id)
+    referenced = any(
+        isinstance(att, dict) and att.get("file_ref") == file_ref
+        for result in results
+        for att in (result.attachments or [])
+    )
+    if not referenced:
+        return None
+    return await session.get(PluginRunFile, file_id)
 
 
 async def list_for_entity(
@@ -71,7 +104,9 @@ def public(
         "result_metadata": result.result_metadata,
         # Attachment metadata is passed through as stored
         # ({file_ref, filename, content_type, size, sha256}). No download URL is
-        # synthesized: there is no public plugin-file download route (see report).
+        # synthesized here; the client builds the entity-scoped download path from the
+        # file_ref (GET /<entity>/plugin-results/files/{file_ref} — see
+        # app/api/v1/routes/plugin_results.py).
         "attachments": result.attachments,
         "fingerprint": result.fingerprint,
         "expires_at": result.expires_at,
