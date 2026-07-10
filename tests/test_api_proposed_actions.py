@@ -8,6 +8,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import TokenPayload, create_access_token
+from app.crud import observable as obs_crud
 from app.crud import plugin_proposed_action as ppa_crud
 from app.crud.organisation_member import add_member
 from app.crud.user import create_user
@@ -251,6 +252,134 @@ async def test_add_related_observable_already_on_case_is_idempotent(
     assert obs.status_code == 200, obs.text
     matches = [o for o in obs.json()["items"] if o["data"] == "1.2.3.4"]
     assert len(matches) == 1
+
+
+async def test_add_related_observable_dedup_race_resolves_as_applied_noop(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """The check-then-insert in the add_related_observable branch is a TOCTOU: two
+    approvals of the same observable both see find_case_observable -> None and both
+    call create_case_observable; the partial unique index rejects the loser with an
+    IntegrityError. Simulate it deterministically by making the pre-check report the
+    row absent while it in fact exists. The loser must resolve as an applied no-op
+    (exactly one row, same as the non-racing short-circuit) -- never a 500."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+
+    # The case already carries ip/1.2.3.4 (from _create_case_with_observable), so
+    # the insert below will collide on uq_observable_case_dedup for real.
+    action = await ppa_crud.create(
+        session,
+        run=run,
+        action_type="add_related_observable",
+        entity_type="case",
+        entity_id=str(case_id),
+        payload={"observable_type": "ip", "data": "1.2.3.4"},
+    )
+
+    # First find (the pre-check) sees nothing, as if the concurrent approver's
+    # insert hadn't landed yet; later finds (the post-IntegrityError re-check)
+    # see the truth.
+    real_find = obs_crud.find_case_observable
+    calls = {"n": 0}
+
+    async def racy_find(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real_find(*args, **kwargs)
+
+    monkeypatch.setattr(obs_crud, "find_case_observable", racy_find)
+
+    h = _user_h(analyst_a_token, org_a.id)
+    approved = await client.post(f"{_ACTIONS}/{action.id}/approve", headers=h)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "applied"
+
+    monkeypatch.undo()
+    obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    assert obs.status_code == 200, obs.text
+    matches = [o for o in obs.json()["items"] if o["data"] == "1.2.3.4"]
+    assert len(matches) == 1
+
+
+async def test_non_dedup_integrity_error_ends_failed_not_500(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """A genuine (non-dedup) IntegrityError out of apply() must land the action at
+    status='failed' with a reason -- never an unhandled 500, never a stuck
+    'proposed'.
+
+    This is also the savepoint regression guard: apply()'s failing statement aborts
+    the transaction, so without decide()'s begin_nested savepoint the later
+    status='failed' flush would itself fail on the poisoned transaction and 500.
+    Removing the savepoint makes this test fail with 500."""
+    from sqlalchemy import text
+
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+    action = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "x"},
+    )
+
+    async def boom_apply(session, action, *, approver_user_id):
+        # A real constraint violation (observable.organisation_id is NOT NULL and
+        # the ck_observable_parent check requires case_id/alert_id) -- this aborts
+        # the transaction exactly as a genuine non-dedup IntegrityError from a CRUD
+        # call would.
+        await session.execute(
+            text(
+                "INSERT INTO observable (id, observable_type, data) "
+                "VALUES (gen_random_uuid(), 'ip', 'boom')"
+            )
+        )
+
+    monkeypatch.setattr(ppa_crud, "apply", boom_apply)
+
+    h = _user_h(analyst_a_token, org_a.id)
+    approved = await client.post(f"{_ACTIONS}/{action.id}/approve", headers=h)
+    assert approved.status_code == 200, approved.text
+    body = approved.json()
+    assert body["status"] == "failed"
+    assert body["decision_reason"], "a genuine failure must carry an informative reason"
+
+
+async def test_add_related_observable_non_dedup_integrity_not_swallowed(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """The dedup-race handler must not blanket-treat every IntegrityError as a
+    benign no-op. If the observable still doesn't exist on re-check, the error was
+    some other constraint and must surface as failed, not applied."""
+    from sqlalchemy.exc import IntegrityError
+
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+    action = await ppa_crud.create(
+        session, run=run, action_type="add_related_observable", entity_type="case",
+        entity_id=str(case_id), payload={"observable_type": "ip", "data": "203.0.113.7"},
+    )
+
+    async def boom_create(*args, **kwargs):
+        raise IntegrityError("INSERT ...", {}, Exception("some other constraint"))
+
+    monkeypatch.setattr(obs_crud, "create_case_observable", boom_create)
+
+    h = _user_h(analyst_a_token, org_a.id)
+    approved = await client.post(f"{_ACTIONS}/{action.id}/approve", headers=h)
+    assert approved.status_code == 200, approved.text
+    body = approved.json()
+    assert body["status"] == "failed"
+    assert body["decision_reason"]
+
+    monkeypatch.undo()
+    # The re-check found nothing, so it was not a benign no-op: nothing created.
+    obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    assert obs.status_code == 200, obs.text
+    assert not [o for o in obs.json()["items"] if o["data"] == "203.0.113.7"]
 
 
 async def test_execute_responder_action_rejected_on_apply(

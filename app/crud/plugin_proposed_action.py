@@ -13,6 +13,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -301,13 +302,35 @@ async def apply(
             # — matches enrichment.py, which also skips it — to avoid
             # plugin→observable→enrichment loops (plan invariant: plugin-actor
             # events are never dispatched).
-            await obs_crud.create_case_observable(
-                session,
-                obs_in,
-                case_id=case_id,
-                organisation_id=action.organisation_id,
-                created_by=actor,
-            )
+            #
+            # The find/create above is a TOCTOU: a concurrent approval of the
+            # same observable can insert the row between our find and our create,
+            # and the partial unique index (uq_observable_case_dedup) then rejects
+            # the loser with an IntegrityError. Run the insert in a savepoint so a
+            # collision rolls back cleanly without poisoning the surrounding
+            # transaction, then re-check.
+            try:
+                async with session.begin_nested():
+                    await obs_crud.create_case_observable(
+                        session,
+                        obs_in,
+                        case_id=case_id,
+                        organisation_id=action.organisation_id,
+                        created_by=actor,
+                    )
+            except IntegrityError:
+                # Re-check after rolling back to the savepoint. If the row now
+                # exists, a concurrent approver won the race and the proposal is
+                # already satisfied — the same "already linked" no-op the
+                # short-circuit above declares. If it still doesn't exist, the
+                # IntegrityError came from some other constraint (not the dedup
+                # race), which is a genuine failure: re-raise for decide()'s
+                # backstop to mark the action failed.
+                existing = await obs_crud.find_case_observable(
+                    session, case_id, obs_in.observable_type, obs_in.data
+                )
+                if existing is None:
+                    raise
         return
 
     # add_tag — the only action type that reaches this fallthrough.
@@ -351,10 +374,25 @@ async def decide(
         await session.flush()
         return action
     try:
-        await apply(session, action, approver_user_id=approver_user_id)
+        # Run apply() inside a savepoint. A genuine IntegrityError (any constraint
+        # other than the observable dedup race, which the add_related_observable
+        # branch resolves itself) aborts the current transaction, so without a
+        # savepoint the status="failed" flush below would itself fail on the
+        # poisoned transaction and surface as an unhandled 500 with the action
+        # stuck in "proposed". Rolling back to the savepoint leaves the outer
+        # transaction usable to record the terminal status.
+        async with session.begin_nested():
+            await apply(session, action, approver_user_id=approver_user_id)
     except HTTPException as exc:
         action.status = "failed"
         action.decision_reason = str(exc.detail)
+        await session.flush()
+        return action
+    except IntegrityError as exc:
+        # Generic backstop: an unexpected constraint violation is a real failure,
+        # not a success. Terminal status, informative reason, no 500.
+        action.status = "failed"
+        action.decision_reason = f"Could not apply: database constraint violation ({exc.orig})"
         await session.flush()
         return action
     action.status = "applied"
