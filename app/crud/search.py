@@ -42,8 +42,20 @@ class ClassifiedQuery:
     is_bare_ip: bool
 
 
+#: Control characters Postgres text can't carry (NUL) or that only ever arrive
+#: by accident (the rest of C0, minus tab/newline which strip() handles).
+_CONTROL_CHARS = dict.fromkeys(range(32))
+
+
+def sanitize_query(q: str) -> str:
+    """Strip control characters, then whitespace. A NUL byte reaches asyncpg as
+    an invalid UTF-8 sequence and raises, so it must never survive to a bind
+    parameter — the query string is data, and no input may produce a 500."""
+    return q.translate(_CONTROL_CHARS).strip()
+
+
 def classify_query(q: str) -> ClassifiedQuery:
-    raw = q.strip()
+    raw = sanitize_query(q)
     try:
         return ClassifiedQuery(text=raw, net=str(ipaddress.ip_address(raw)), is_bare_ip=True)
     except ValueError:

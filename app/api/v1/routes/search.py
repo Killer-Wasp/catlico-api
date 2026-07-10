@@ -3,9 +3,6 @@
 Federated Postgres search across cases, alerts, observables, tasks, comments —
 one query per entity type, each reusing that type's existing visibility
 predicate. Spec: docs/global-search-design.md (catlico workspace root).
-
-Task 5 wires up the case bucket; Task 6 adds alert + task. Tasks 7-8 add
-comment and observable buckets to `global_search` below.
 """
 
 from typing import Annotated, Literal
@@ -40,7 +37,7 @@ async def global_search(
     DB."""
     counts = SearchCounts()
     results = SearchResults()
-    query = q.strip()
+    query = search_crud.sanitize_query(q)
     if len(query) < 2:
         return SearchResponse(counts=counts, results=results)
 

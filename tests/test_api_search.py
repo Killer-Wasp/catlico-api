@@ -139,6 +139,24 @@ class TestSearchCases:
             r = await client.get("/api/v1/search", params={"q": q}, headers=_headers(admin_token, org_a))
             assert r.status_code == 200, q
 
+    async def test_control_characters_never_reach_the_driver(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        """A NUL byte is not valid UTF-8 to asyncpg and raises at bind time; no
+        input may produce a 500."""
+        await _seed_case(session, org_a, builtin_roles, admin_user.id, title="phishing")
+        await session.commit()
+        for q in ["a\x00b", "phish\x00ing", "\x01\x02phishing", "phishing\x07"]:
+            r = await client.get("/api/v1/search", params={"q": q}, headers=_headers(admin_token, org_a))
+            assert r.status_code == 200, repr(q)
+        # Stripping is not silently destructive: the term still matches.
+        r = await client.get("/api/v1/search", params={"q": "phish\x00ing"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["case"] == 1
+
+    async def test_control_characters_only_query_is_empty_not_500(self, client: AsyncClient, org_a, admin_token, admin_user):
+        """Sanitizing down to <2 chars must hit the empty-shape short circuit."""
+        r = await client.get("/api/v1/search", params={"q": "\x00\x00\x00"}, headers=_headers(admin_token, org_a))
+        assert r.status_code == 200
+        assert r.json()["counts"]["case"] == 0
+
     async def test_short_query_returns_empty_shape(self, client: AsyncClient, org_a, admin_token, admin_user):
         r = await client.get("/api/v1/search", params={"q": "a"}, headers=_headers(admin_token, org_a))
         assert r.status_code == 200
