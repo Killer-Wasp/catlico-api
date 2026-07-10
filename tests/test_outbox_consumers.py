@@ -237,14 +237,14 @@ async def test_no_consumers_still_marks_delivered(session):
 
 
 async def test_build_event_envelope_from_outbox_row(session):
-    """Event envelope derives event_type from object_type.action."""
+    """Event envelope normalizes audit actions into plugin event types."""
     from app.services.outbox_events import build_event_envelope
 
     row = await _an_outbox_row(session)
 
     envelope = build_event_envelope(row)
     assert envelope["event_id"] == f"audit:{row.audit_id}"
-    assert envelope["event_type"] == "case.create"
+    assert envelope["event_type"] == "case.created"
     assert envelope["actor"] == "user-test"
     assert envelope["object"] == {"type": "case", "id": str(row.audit_id)}
     assert envelope["details"] == {"key": "value"}

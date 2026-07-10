@@ -123,7 +123,7 @@ async def test_outbox_consumer_creates_notification(org_a, session):
         )
         notifs = result.scalars().all()
         assert len(notifs) >= 1
-        assert notifs[0].event_type == "case.create"
+        assert notifs[0].event_type == "case.created"
     finally:
         _consumers.clear()
         _consumers.extend(saved)

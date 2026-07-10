@@ -15,6 +15,8 @@ from app.crud.audit import dispatch_pending_outbox, register_consumer
 from app.services.function_runner import run_function_poller
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
+from app.services.plugin_dispatch import plugin_event_consumer, push_pending_deliveries
+from app.services.plugin_maintenance import run_maintenance_sweep
 from app.services.websocket_hub import ws_broadcast_consumer
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,32 @@ async def _outbox_poller() -> None:
         await asyncio.sleep(OUTBOX_POLL_INTERVAL)
 
 
+async def _plugin_maintenance_poller() -> None:
+    """Reap stuck plugin runs, mark silent runners offline, roll up usage stats."""
+    while True:
+        try:
+            async with AsyncSessionLocal() as session:
+                await run_maintenance_sweep(session)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — poller must never die on a transient error
+            logger.exception("plugin maintenance sweep failed")
+        await asyncio.sleep(settings.PLUGIN_MAINTENANCE_INTERVAL_SECONDS)
+
+
+async def _plugin_push_poller() -> None:
+    """Push queued plugin events to runners with retry/backoff."""
+    while True:
+        try:
+            async with AsyncSessionLocal() as session:
+                await push_pending_deliveries(session)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — poller must never die on a transient error
+            logger.exception("plugin push poller failed")
+        await asyncio.sleep(settings.PLUGIN_PUSH_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_settings()
@@ -60,17 +88,26 @@ async def lifespan(app: FastAPI):
     register_consumer(notify_feed_consumer)
     register_consumer(notifier_delivery_consumer)
     register_consumer(ws_broadcast_consumer)
+    register_consumer(plugin_event_consumer)
     poller = asyncio.create_task(_outbox_poller())
     func_poller = asyncio.create_task(run_function_poller())
+    maintenance_poller = asyncio.create_task(_plugin_maintenance_poller())
+    push_poller = asyncio.create_task(_plugin_push_poller())
     try:
         yield
     finally:
         poller.cancel()
         func_poller.cancel()
+        maintenance_poller.cancel()
+        push_poller.cancel()
         with suppress(asyncio.CancelledError):
             await poller
         with suppress(asyncio.CancelledError):
             await func_poller
+        with suppress(asyncio.CancelledError):
+            await maintenance_poller
+        with suppress(asyncio.CancelledError):
+            await push_poller
 
 
 _docs_url = "/docs" if settings.ENVIRONMENT != "production" else None

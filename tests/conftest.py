@@ -207,6 +207,15 @@ def analyzer_secret(monkeypatch):
 
 
 @pytest.fixture
+def runner_secret(monkeypatch):
+    """Configure the platform-level plugin-runner shared secret for the test."""
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "PLUGIN_RUNNER_SHARED_SECRET", "test-runner-secret")
+    return "test-runner-secret"
+
+
+@pytest.fixture
 async def admin_user(session):
     return await create_user(
         session,

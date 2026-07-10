@@ -41,7 +41,7 @@ async def _setup(org, session):
     await session.flush()
 
     rule = NotificationRule(
-        organisation_id=org.id, name="test rule", event="case.create",
+        organisation_id=org.id, name="test rule", event="case.created",
         enabled=True, notifier_ids=[str(notifier.id)],
         created_by="system",
     )
@@ -207,7 +207,7 @@ async def test_email_kafka_are_not_delivered(org_a, session):
     await session.flush()
 
     rule = NotificationRule(
-        organisation_id=org_a.id, name="email rule", event="case.create",
+        organisation_id=org_a.id, name="email rule", event="case.created",
         enabled=True, notifier_ids=[str(email_notifier.id)],
         created_by="system",
     )

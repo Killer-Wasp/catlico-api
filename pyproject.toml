@@ -16,6 +16,7 @@ dependencies = [
     "s3fs>=2026.4.0",
     "anyio>=4.13.0",
     "cryptography>=49.0.0",
+    "croniter>=3.0",
 ]
 
 [dependency-groups]

@@ -275,6 +275,27 @@ async def enrich_observable(
     return jobs
 
 
+@router.post("/{observable_id}/plugin-runs")
+async def run_plugin_for_observable(
+    observable_id: uuid.UUID,
+    body: dict,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
+    _require("run:enrichment", perms)
+    from app.api.v1.routes.plugins import create_manual_plugin_run, _plugin_run_public
+
+    run = await create_manual_plugin_run(
+        session,
+        ctx,
+        plugin_id=body["plugin_id"],
+        entity_type="observable",
+        entity_id=str(obs.id),
+    )
+    return _plugin_run_public(run)
+
+
 @router.get("/{observable_id}/enrichments", response_model=EnrichmentOverview)
 async def list_observable_enrichments(
     observable_id: uuid.UUID,

@@ -90,6 +90,7 @@ async def test_list_tasks_returns_org_visible_queue_context(
         "start_date": None,
         "due_date": None,
         "end_date": None,
+        "log_count": 0,
         "created_at": task.created_at.isoformat().replace("+00:00", "Z"),
         "updated_at": None,
         "case_title": "OAuth consent grant",

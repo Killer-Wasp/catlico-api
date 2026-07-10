@@ -1,0 +1,265 @@
+import hashlib
+import secrets
+from datetime import UTC, datetime, timedelta
+from typing import Annotated
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
+
+from app.api.deps import SuperAdminUser
+from app.core.configs import settings
+from app.core.db import get_session
+from app.models.plugin_runner import (
+    PluginDefinition,
+    PluginRunner as PluginRunnerModel,
+    PluginVersion,
+    RunnerPluginInstallation,
+)
+
+
+router = APIRouter(prefix="/plugin-runners", tags=["plugin-runners"])
+
+
+def _hash_secret(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _new_enrollment_token() -> str:
+    return f"cpe_{secrets.token_urlsafe(32)}"
+
+
+async def _runner_get_json(base_url: str, path: str) -> dict | list:
+    if not base_url:
+        raise httpx.RequestError("runner base_url is empty")
+    url = f"{base_url.rstrip('/')}{path}"
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.json()
+
+
+async def _upsert_plugin_inventory(
+    session: AsyncSession,
+    runner: PluginRunnerModel,
+    plugins: list[dict],
+) -> None:
+    now = datetime.now(UTC)
+    for manifest in plugins:
+        plugin_id = manifest["id"]
+        version_str = manifest["version"]
+        version_id = f"{plugin_id}@{version_str}"
+        pdef = await session.get(PluginDefinition, plugin_id)
+        if pdef is None:
+            pdef = PluginDefinition(
+                id=plugin_id,
+                display_name=manifest.get("name", plugin_id),
+                description=manifest.get("description", ""),
+                manifest=manifest,
+            )
+            session.add(pdef)
+        else:
+            pdef.display_name = manifest.get("name", pdef.display_name)
+            pdef.description = manifest.get("description", pdef.description)
+            pdef.manifest = manifest
+        await session.flush()
+
+        pver = await session.get(PluginVersion, version_id)
+        if pver is None:
+            pver = PluginVersion(
+                id=version_id,
+                plugin_id=plugin_id,
+                version=version_str,
+                manifest=manifest,
+                commit_sha=manifest.get("commit_sha", ""),
+                image_digest=manifest.get("image_digest", ""),
+                installed_at=now,
+                status="active",
+            )
+            session.add(pver)
+        else:
+            pver.manifest = manifest
+            pver.status = "active"
+        await session.flush()
+        installation = await session.get(
+            RunnerPluginInstallation,
+            (runner.id, version_id),
+        )
+        if installation is None:
+            installation = RunnerPluginInstallation(
+                runner_id=runner.id,
+                plugin_version_id=version_id,
+                install_status="installed",
+                health_status=manifest.get("health_status"),
+                installed_at=now,
+                last_seen_at=now,
+            )
+            session.add(installation)
+        else:
+            installation.install_status = "installed"
+            installation.health_status = manifest.get(
+                "health_status",
+                installation.health_status,
+            )
+            installation.last_seen_at = now
+        pdef.active_version_id = version_id
+    await session.flush()
+
+
+@router.get("")
+async def list_runners(
+    _: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[dict]:
+    rows = (await session.execute(select(PluginRunnerModel))).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "base_url": r.base_url,
+            "status": r.status,
+            "version": r.version,
+            "isolation_mode": r.isolation_mode,
+            "last_health_at": r.last_health_at.isoformat() if r.last_health_at else None,
+            "last_heartbeat_at": r.last_heartbeat_at.isoformat() if r.last_heartbeat_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("")
+async def create_runner(
+    body: dict,
+    user: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    token = _new_enrollment_token()
+    expires_at = datetime.now(UTC) + timedelta(
+        seconds=settings.PLUGIN_RUNNER_ENROLLMENT_TOKEN_TTL_SECONDS
+    )
+    runner = await session.get(PluginRunnerModel, body["id"])
+    if runner is None:
+        runner = PluginRunnerModel(
+            id=body["id"],
+            name=body.get("name", ""),
+            base_url=body.get("base_url", ""),
+            status="unhealthy",
+            enrollment_state="pending",
+            enrollment_token_hash=_hash_secret(token),
+            enrollment_token_expires_at=expires_at,
+            created_by=str(user.id),
+        )
+        session.add(runner)
+    else:
+        runner.name = body.get("name", runner.name)
+        runner.base_url = body.get("base_url", runner.base_url)
+        runner.enrollment_state = "pending"
+        runner.enrollment_token_hash = _hash_secret(token)
+        runner.enrollment_token_expires_at = expires_at
+    await session.flush()
+    return {
+        "id": runner.id,
+        "name": runner.name,
+        "status": runner.status,
+        "enrollment_state": runner.enrollment_state,
+        "enrollment_token": token,
+        "enrollment_token_expires_at": expires_at.isoformat(),
+    }
+
+
+@router.get("/{runner_id}")
+async def get_runner(
+    runner_id: str,
+    _: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    runner = await session.get(PluginRunnerModel, runner_id)
+    if runner is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runner not found")
+    return {
+        "id": runner.id,
+        "name": runner.name,
+        "base_url": runner.base_url,
+        "status": runner.status,
+        "version": runner.version,
+        "isolation_mode": runner.isolation_mode,
+        "last_health_at": runner.last_health_at.isoformat() if runner.last_health_at else None,
+        "last_heartbeat_at": runner.last_heartbeat_at.isoformat() if runner.last_heartbeat_at else None,
+        "created_at": runner.created_at.isoformat() if runner.created_at else None,
+    }
+
+
+@router.get("/{runner_id}/stats")
+async def get_runner_stats(
+    runner_id: str,
+    _: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    window: str = "30d",
+) -> dict:
+    from app.crud import plugin_stats as stats_crud
+
+    runner = await session.get(PluginRunnerModel, runner_id)
+    if runner is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runner not found")
+    try:
+        return await stats_crud.runner_stats(session, runner_id, window)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+
+@router.post("/{runner_id}/health-check")
+async def health_check(
+    runner_id: str,
+    _: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    runner = await session.get(PluginRunnerModel, runner_id)
+    if runner is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runner not found")
+    try:
+        health = await _runner_get_json(runner.base_url, "/internal/health")
+    except Exception as exc:  # noqa: BLE001 - setup flow reports runner errors.
+        runner.status = "unhealthy"
+        runner.last_error = str(exc)
+        runner.last_health_at = datetime.now(UTC)
+        await session.flush()
+        return {"status": runner.status, "error": runner.last_error}
+
+    runner.status = "healthy"
+    runner.version = health.get("version", runner.version)
+    runner.capabilities = health.get("capabilities", runner.capabilities)
+    runner.isolation_mode = health.get("isolation_mode", runner.isolation_mode)
+    runner.last_error = None
+    runner.last_health_at = datetime.now(UTC)
+    await session.flush()
+    return {"status": runner.status, "health": health}
+
+
+@router.post("/{runner_id}/sync")
+async def sync_runner(
+    runner_id: str,
+    _: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    runner = await session.get(PluginRunnerModel, runner_id)
+    if runner is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runner not found")
+    try:
+        payload = await _runner_get_json(runner.base_url, "/internal/plugins")
+    except Exception as exc:  # noqa: BLE001 - expose setup failure as API error.
+        runner.status = "unhealthy"
+        runner.last_error = str(exc)
+        await session.flush()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Runner plugin sync failed",
+        ) from exc
+
+    plugins = payload.get("plugins", payload if isinstance(payload, list) else [])
+    await _upsert_plugin_inventory(session, runner, plugins)
+    runner.status = "healthy"
+    runner.last_error = None
+    await session.flush()
+    return {"status": "synced", "plugin_count": len(plugins)}

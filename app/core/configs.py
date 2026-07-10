@@ -85,6 +85,33 @@ class Settings(BaseSettings):
     # pull work. Unset ⇒ analyzer endpoints reject all callers. Per-org API keys
     # replace this later behind the same header.
     ANALYZER_SHARED_SECRET: str | None = None
+    # Plugin runner engine.
+    # Legacy shared secret kept only as a deprecated config knob while the
+    # enrollment flow rolls out. Internal plugin-runner endpoints authenticate
+    # with per-runner machine credentials.
+    PLUGIN_RUNNER_SHARED_SECRET: str | None = None
+    PLUGIN_RUNNER_ENROLLMENT_TOKEN_TTL_SECONDS: int = 900
+    # Plugin runtime engine.
+    # Short-lived tokens minted per PluginRun for plugin-runtime API access.
+    PLUGIN_RUNTIME_TOKEN_TTL_SECONDS: int = 900
+    PLUGIN_RUNTIME_FILE_MAX_BYTES: int = 25 * 1024 * 1024
+    PLUGIN_RUNTIME_FILE_MAX_COUNT: int = 20
+    PLUGIN_RUNTIME_FILE_MAX_TOTAL_BYTES: int = 100 * 1024 * 1024
+    # Plugin maintenance sweep (reaper, offline detection, retention, rollup).
+    PLUGIN_MAINTENANCE_INTERVAL_SECONDS: int = 30
+    PLUGIN_RUN_REAP_GRACE_SECONDS: int = 60
+    PLUGIN_RUN_DEFAULT_TIMEOUT_SECONDS: int = 60
+    PLUGIN_HEARTBEAT_INTERVAL_SECONDS: int = 30
+    PLUGIN_RUNNER_OFFLINE_MISSED_HEARTBEATS: int = 3
+    PLUGIN_RUN_RETENTION_DAYS: int = 30
+    PLUGIN_DELIVERY_RETENTION_DAYS: int = 7
+    PLUGIN_RESULT_RETENTION_DAYS: int = 90
+    # Event push to runners (delivery retry policy).
+    PLUGIN_PUSH_INTERVAL_SECONDS: int = 5
+    PLUGIN_PUSH_BACKOFF_BASE_SECONDS: int = 30
+    PLUGIN_PUSH_BACKOFF_CAP_SECONDS: int = 900
+    PLUGIN_PUSH_MAX_AGE_SECONDS: int = 86400
+    PLUGIN_PUSH_TIMEOUT_SECONDS: float = 10.0
     # Fernet key (urlsafe base64, 32 bytes) used to encrypt connector secrets at
     # rest. Required at startup.
     SECRET_ENCRYPTION_KEY: str | None = None

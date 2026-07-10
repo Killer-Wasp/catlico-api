@@ -32,9 +32,18 @@ from app.models.observable import (  # noqa: F401
     ObservableType,
 )
 from app.models.observable_provenance import ObservableProvenance  # noqa: F401
-from app.models.observable_provenance import ObservableProvenance  # noqa: F401
-from app.models.observable_provenance import ObservableProvenance  # noqa: F401
 from app.models.organisation import Organisation  # noqa: F401
+from app.models.plugin_runner import PluginRunner  # noqa: F401
+from app.models.plugin_runner import PluginDefinition  # noqa: F401
+from app.models.plugin_runner import PluginVersion  # noqa: F401
+from app.models.plugin_runner import RunnerPluginInstallation  # noqa: F401
+from app.models.plugin_runner import OrgPlugin  # noqa: F401
+from app.models.plugin_runner import PluginConfig  # noqa: F401
+from app.models.plugin_runner import PluginRun  # noqa: F401
+from app.models.plugin_runner import PluginRunFile  # noqa: F401
+from app.models.plugin_runner import PluginResult  # noqa: F401
+from app.models.plugin_runner import PluginProposedAction  # noqa: F401
+from app.models.plugin_runner import PluginRunDaily  # noqa: F401
 from app.models.pattern import Pattern, Procedure  # noqa: F401
 from app.models.organisation_link import OrganisationLink  # noqa: F401
 from app.models.organisation_member import OrganisationMember  # noqa: F401

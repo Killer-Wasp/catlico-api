@@ -89,7 +89,9 @@ async def test_refresh_rejects_tampered_token(client: AsyncClient, admin_user):
         json={"email": "admin@test.com", "password": "password123"},
     )
     refresh_token = login.json()["refresh_token"]
-    tampered = refresh_token[:-1] + ("a" if refresh_token[-1] != "a" else "b")
+    header, payload, signature = refresh_token.split(".")
+    replacement = "A" if signature[0] != "A" else "B"
+    tampered = ".".join((header, payload, replacement + signature[1:]))
     response = await client.post(
         "/api/v1/auth/refresh",
         json={"refresh_token": tampered},

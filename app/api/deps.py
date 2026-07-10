@@ -2,6 +2,7 @@ import hashlib
 import secrets
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Path, status
@@ -17,6 +18,7 @@ from app.crud.organisation_member import get_member_permissions
 from app.crud.user import get_user_by_id
 from app.models.case_ import Case, CaseStatus
 from app.models.case_share import CaseShare
+from app.models.plugin_runner import PluginRun, PluginRunner as PluginRunnerModel, PluginVersion
 from app.models.role import Permission, RolePermission
 from app.models.user import User
 
@@ -368,7 +370,133 @@ async def get_analyzer_principal(
     return AnalyzerPrincipal()
 
 
+@dataclass
+class PluginRunnerPrincipal:
+    """A registered catlico-plugin-runner authenticated by machine credential."""
+
+    runner_id: str
+
+
+@dataclass
+class PluginRuntimePrincipal:
+    """A single plugin execution, authenticated with a short-lived run token."""
+
+    run_id: uuid.UUID
+    organisation_id: str
+    plugin_id: str
+    plugin_version_id: str
+    event_id: str
+    event_type: str
+    event_object_type: str | None
+    event_object_id: str | None
+    permissions: set[str]
+
+    @property
+    def actor(self) -> str:
+        version = self.plugin_version_id.removeprefix(f"{self.plugin_id}@")
+        return f"plugin:{self.plugin_id}@{version}"
+
+
+async def get_plugin_runner_principal(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    authorization: Annotated[str | None, Header()] = None,
+) -> PluginRunnerPrincipal:
+    presented = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        presented = authorization[7:]
+    if not presented:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid plugin runner credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    credential_hash = hashlib.sha256(presented.encode()).hexdigest()
+    result = await session.execute(
+        select(PluginRunnerModel).where(
+            PluginRunnerModel.credential_hash == credential_hash,
+            PluginRunnerModel.enrollment_state == "enrolled",
+        )
+    )
+    runner = result.scalar_one_or_none()
+    if runner is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid plugin runner credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return PluginRunnerPrincipal(runner_id=runner.id)
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
 SuperAdminUser = Annotated[User, Depends(get_superadmin_user)]
 OrgContext = Annotated[AuthContext, Depends(get_org_context)]
 Analyzer = Annotated[AnalyzerPrincipal, Depends(get_analyzer_principal)]
+PluginRunner = Annotated[PluginRunnerPrincipal, Depends(get_plugin_runner_principal)]
+
+
+async def get_plugin_runtime_principal(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    authorization: Annotated[str | None, Header()] = None,
+) -> PluginRuntimePrincipal:
+    presented = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        presented = authorization[7:]
+    if not presented:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid plugin runtime credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_hash = hashlib.sha256(presented.encode()).hexdigest()
+    result = await session.execute(
+        select(PluginRun).where(PluginRun.runtime_token_hash == token_hash)
+    )
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid plugin runtime credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    expires_at = run.runtime_token_expires_at
+    if expires_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Plugin runtime token is not active",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at < datetime.now(UTC):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Plugin runtime token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if run.status not in {"accepted", "running"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Plugin runtime token is not active for this run",
+        )
+
+    permissions = set(run.permissions or [])
+    if not permissions:
+        version = await session.get(PluginVersion, run.plugin_version_id)
+        permissions = set((version.manifest or {}).get("permissions", [])) if version else set()
+
+    return PluginRuntimePrincipal(
+        run_id=run.id,
+        organisation_id=run.organisation_id,
+        plugin_id=run.plugin_id,
+        plugin_version_id=run.plugin_version_id,
+        event_id=run.event_id,
+        event_type=run.event_type,
+        event_object_type=run.event_object_type,
+        event_object_id=run.event_object_id,
+        permissions=permissions,
+    )
+
+
+PluginRuntime = Annotated[PluginRuntimePrincipal, Depends(get_plugin_runtime_principal)]

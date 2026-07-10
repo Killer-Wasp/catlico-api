@@ -17,17 +17,32 @@ from app.models.audit import AuditOutbox
 # ponytail: simple heuristics for notification titles — upgrade to config-driven
 # templates when the product needs polish
 _DEFAULT_TITLE = "Activity"
+_PLUGIN_EVENT_ACTIONS = {
+    "create": "created",
+    "update": "updated",
+    "delete": "deleted",
+    "merge": "merged",
+    "promote": "promoted",
+    "restore": "restored",
+}
+
+
+def normalize_plugin_event_type(object_type: str, action: str) -> str:
+    """Convert audit action vocabulary into plugin trigger vocabulary."""
+    normalized_action = _PLUGIN_EVENT_ACTIONS.get(action, action)
+    return f"{object_type}.{normalized_action}"
 
 
 def build_event_envelope(row: AuditOutbox) -> dict[str, Any]:
     """Produce a stable JSON-serialisable event from an outbox row.
 
-    Event type convention: ``<object_type>.<action>`` (e.g. ``case.create``).
+    Event type convention: ``<object_type>.<past-tense action>`` (e.g.
+    ``case.created``).
     """
     payload: dict[str, Any] = row.payload or {}
-    event_type = (
-        f"{payload.get('object_type', 'unknown')}"
-        f".{payload.get('action', 'unknown')}"
+    event_type = normalize_plugin_event_type(
+        payload.get("object_type", "unknown"),
+        payload.get("action", "unknown"),
     )
     return {
         "event_id": f"audit:{row.audit_id}",
@@ -50,7 +65,7 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
     """Outbox consumer: create a UserNotification row from every audit event.
 
     Registered via `register_consumer()` so it runs inside the drain transaction.
-    Notification title is derived from the event type (e.g. "case.create" →
+    Notification title is derived from the event type (e.g. "case.created" →
     "Case created").
     """
     envelope = build_event_envelope(row)
