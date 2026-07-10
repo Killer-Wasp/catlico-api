@@ -326,10 +326,12 @@ async def test_non_dedup_integrity_error_ends_failed_not_500(
     )
 
     async def boom_apply(session, action, *, approver_user_id):
-        # A real constraint violation (observable.organisation_id is NOT NULL and
-        # the ck_observable_parent check requires case_id/alert_id) -- this aborts
-        # the transaction exactly as a genuine non-dedup IntegrityError from a CRUD
-        # call would.
+        # A real NOT NULL violation: this INSERT omits several non-nullable
+        # observable columns, and observable.message (NOT NULL, no default at the
+        # DB level) is the first to fire -> NotNullViolationError. Any genuine
+        # NOT NULL violation aborts the transaction, which is the point here: it
+        # stands in for a real non-dedup IntegrityError bubbling out of a CRUD
+        # call.
         await session.execute(
             text(
                 "INSERT INTO observable (id, observable_type, data) "

@@ -9,6 +9,7 @@ a user action uses, so audit/activity/outbox behaviour matches a human edit.
 The applied actor combines both parties: ``plugin:<id>@<version> approved-by
 user:<uid>``.
 """
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -26,6 +27,8 @@ from app.crud import task as task_crud
 from app.crud.case_share import get_share
 from app.models.plugin_runner import OrgPlugin, PluginProposedAction, PluginRun
 from app.models.tag import TaggableType
+
+logger = logging.getLogger(__name__)
 
 # Canonical action types a plugin may propose (mirrors the plan's enum).
 ACTION_TYPES = {
@@ -390,9 +393,20 @@ async def decide(
         return action
     except IntegrityError as exc:
         # Generic backstop: an unexpected constraint violation is a real failure,
-        # not a success. Terminal status, informative reason, no 500.
+        # not a success. Terminal status, no 500. The reason is persisted and
+        # returned by the public API, so keep it informative-but-generic — the
+        # raw driver text (column/constraint names, SQL) is logged server-side
+        # for operators instead of leaked to API consumers.
+        logger.warning(
+            "Proposed action %s failed to apply: database integrity error: %s",
+            action.id,
+            exc.orig,
+        )
         action.status = "failed"
-        action.decision_reason = f"Could not apply: database constraint violation ({exc.orig})"
+        action.decision_reason = (
+            "Could not apply: the change conflicted with existing data "
+            "(database integrity constraint)."
+        )
         await session.flush()
         return action
     action.status = "applied"
