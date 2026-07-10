@@ -220,3 +220,8 @@ __marimo__/
 dev.db
 
 .DS_Store
+# Local-only reference material — not published.
+# docs/thehive4/: reverse-engineered TheHive/Cortex reference docs.
+# docs/superpowers/: internal agent planning scratch.
+docs/thehive4/
+docs/superpowers/
