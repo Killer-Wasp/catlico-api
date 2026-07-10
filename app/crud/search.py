@@ -12,9 +12,13 @@ from sqlalchemy import Text, cast, func, literal_column
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.crud.task import _visible_task_condition
+from app.models.alert import Alert
 from app.models.case_ import Case
 from app.models.case_share import CaseShare
-from app.models.search import CaseHit
+from app.models.search import AlertHit, CaseHit, TaskHit
+from app.models.task import Task
+from app.util.ids import format_task_id
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,8 @@ def like_pattern(q: str) -> str:
 #: Generated columns (Task 1 migration) aren't mapped on the SQLModel classes —
 #: reference them by qualified name.
 _CASE_TSV = literal_column("case_.search_tsv")
+_ALERT_TSV = literal_column("alert.search_tsv")
+_TASK_TSV = literal_column("task.search_tsv")
 
 _HEADLINE_OPTS = "StartSel=<mark>, StopSel=</mark>, MaxWords=18, MinWords=6"
 
@@ -117,5 +123,83 @@ async def search_cases(
             created_at=case.created_at,
         )
         for case, snippet in rows
+    ]
+    return hits, total
+
+
+async def search_alerts(
+    session: AsyncSession, organisation_id: str, q: str, *, skip: int = 0, limit: int = 10
+) -> tuple[list[AlertHit], int]:
+    tsq = prefix_tsquery(q)
+    base = select(Alert).where(
+        Alert.organisation_id == organisation_id,
+        Alert.deleted_at.is_(None),
+        _ALERT_TSV.op("@@")(tsq),
+    )
+    total = (
+        await session.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    rows = (
+        await session.execute(
+            base.add_columns(
+                _headline(
+                    Alert.title + " — " + func.coalesce(Alert.description, ""), tsq
+                )
+            )
+            .order_by(
+                func.ts_rank(_ALERT_TSV, tsq).desc(),
+                func.coalesce(Alert.updated_at, Alert.created_at).desc(),
+                Alert.id.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+    ).all()
+    hits = [
+        AlertHit(
+            id=alert.id,
+            title=alert.title,
+            snippet=snippet,
+            status=alert.status,
+            severity=alert.severity,
+        )
+        for alert, snippet in rows
+    ]
+    return hits, total
+
+
+async def search_tasks(
+    session: AsyncSession, organisation_id: str, q: str, *, skip: int = 0, limit: int = 10
+) -> tuple[list[TaskHit], int]:
+    tsq = prefix_tsquery(q)
+    base = select(Task).where(
+        _visible_task_condition(organisation_id),
+        Task.deleted_at.is_(None),
+        _TASK_TSV.op("@@")(tsq),
+    )
+    total = (
+        await session.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    rows = (
+        await session.execute(
+            base.order_by(
+                func.ts_rank(_TASK_TSV, tsq).desc(),
+                func.coalesce(Task.updated_at, Task.created_at).desc(),
+                Task.case_id.desc(),
+                Task.id.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+    ).scalars()
+    hits = [
+        TaskHit(
+            case_id=t.case_id,
+            id=t.id,
+            public_id=format_task_id(t.case_id, t.id),
+            title=t.title,
+            status=t.status,
+        )
+        for t in rows
     ]
     return hits, total

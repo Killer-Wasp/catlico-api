@@ -43,6 +43,34 @@ async def _seed_observable(session, case, org, created_by, *, type_="ip", data, 
     )
 
 
+async def _seed_alert(session, org, created_by, *, title, description="", source_ref=None):
+    # app/crud/alert.py has no create_alert — ingestion is upsert-on-dedup-key
+    # via ingest_alert, which returns (alert, created).
+    alert, _created = await alert_crud.ingest_alert(
+        session,
+        AlertCreate(
+            type="external",
+            source="test-siem",
+            source_ref=source_ref or f"ref-{uuid.uuid4().hex[:8]}",
+            title=title,
+            description=description,
+        ),
+        organisation_id=org.id,
+        created_by=str(created_by),
+    )
+    return alert
+
+
+async def _seed_task(session, case, org, created_by, *, title, description=""):
+    return await task_crud.create_task(
+        session,
+        TaskCreate(title=title, description=description),
+        case_id=case.id,
+        organisation_id=org.id,
+        created_by=str(created_by),
+    )
+
+
 class TestObservableIpColumn:
     async def test_ip_address_populates_ip(self, session, org_a, builtin_roles, admin_user, observable_types):
         case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="c")
@@ -143,3 +171,27 @@ class TestSearchCases:
         body = r.json()
         assert body["counts"]["case"] == 7
         assert len(body["results"]["case"]) == 2
+
+
+class TestSearchAlertsAndTasks:
+    async def test_alert_title_and_source_ref(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        await _seed_alert(session, org_a, admin_user.id, title="Suspicious login burst")
+        await _seed_alert(session, org_a, admin_user.id, title="other", source_ref="SIEM-90210")
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "suspicious login"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["alert"] == 1
+
+        r = await client.get("/api/v1/search", params={"q": "SIEM-90210"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["alert"] == 1
+
+    async def test_task_hit_carries_public_id(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="c")
+        await _seed_task(session, case, org_a, admin_user.id, title="Review mailbox rules")
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "mailbox"}, headers=_headers(admin_token, org_a))
+        body = r.json()
+        assert body["counts"]["task"] == 1
+        [hit] = body["results"]["task"]
+        assert hit["public_id"] == f"T-{case.id}-{hit['id']}"
