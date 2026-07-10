@@ -1,7 +1,12 @@
 """Public API: plugin catalog and config (org-scoped)."""
 from httpx import AsyncClient
 
-from tests.test_api_plugin_runners import SAMPLE_MANIFEST, _enable_plugin_for_org, _register_runner
+from tests.test_api_plugin_runners import (
+    RUNNER1,
+    SAMPLE_MANIFEST,
+    _enable_plugin_for_org,
+    _register_runner,
+)
 from tests.test_api_plugin_runtime import _runtime_token_for
 
 
@@ -327,6 +332,47 @@ async def test_superadmin_can_test_plugin_config(
         f"/api/v1/plugins/{plugin_id}/config/test",
         headers=h,
     )
+    assert r.status_code == 200, r.text
+
+
+# A required secret declared via `type = "secret"` alone — no `secret: true`
+# boolean. `_is_secret_param` accepts this convention; the config/test route must
+# agree, otherwise it reports the plugin "valid" while the enable gate blocks it.
+_SECRET_TYPE_MANIFEST = {
+    **SAMPLE_MANIFEST,
+    "id": "secret-type-plugin",
+    "configuration": [{"name": "api_key", "type": "secret", "required": True}],
+}
+
+
+async def test_config_test_recognises_type_secret_convention(
+    client: AsyncClient, runner_secret, admin_token, org_a,
+):
+    """config/test must treat a required secret declared as `type = "secret"`
+    (without `secret: true`) as missing when unset and satisfied once stored —
+    consistent with `_is_secret_param`, the single source of truth the config
+    status / enable gate uses."""
+    await _register_runner(
+        client,
+        admin_token,
+        {**RUNNER1, "id": "runner-secret-type"},
+        plugins=[_SECRET_TYPE_MANIFEST],
+    )
+    plugin_id = _SECRET_TYPE_MANIFEST["id"]
+    h = _h(admin_token, org_a.id)
+
+    # Unset: config/test must flag the required secret as missing (409), not pass.
+    r = await client.post(f"/api/v1/plugins/{plugin_id}/config/test", headers=h)
+    assert r.status_code == 409, r.text
+    assert "api_key" in r.json()["detail"]["missing"]
+
+    # Once stored, config/test passes.
+    await client.put(
+        f"/api/v1/plugins/{plugin_id}/config",
+        json={"settings": {}, "secrets": {"api_key": "s3cr3t"}},
+        headers=h,
+    )
+    r = await client.post(f"/api/v1/plugins/{plugin_id}/config/test", headers=h)
     assert r.status_code == 200, r.text
 
 

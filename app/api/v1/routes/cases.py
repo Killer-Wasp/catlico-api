@@ -11,6 +11,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -392,20 +393,38 @@ async def create_case_observable(
     err = await obs_crud.check_creatable_type(session, obs_in.observable_type)
     if err:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=err)
+    conflict = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Observable with this type and value already exists on the case",
+    )
     if await obs_crud.find_case_observable(
         session, case_ctx.case.id, obs_in.observable_type, obs_in.data
     ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Observable with this type and value already exists on the case",
-        )
-    observable = await obs_crud.create_case_observable(
-        session,
-        obs_in,
-        case_id=case_ctx.case.id,
-        organisation_id=case_ctx.organisation_id,
-        created_by=str(case_ctx.user.id),
-    )
+        raise conflict
+    # The find/create above is a TOCTOU: a concurrent create of the same
+    # (case, type, data) can insert the row between our pre-check and our insert,
+    # and the partial unique index uq_observable_case_dedup then rejects the loser
+    # with an IntegrityError. Run the insert in a savepoint so a collision rolls
+    # back cleanly without poisoning the surrounding transaction (which would make
+    # the re-check below fail with PendingRollbackError), then re-check.
+    try:
+        async with session.begin_nested():
+            observable = await obs_crud.create_case_observable(
+                session,
+                obs_in,
+                case_id=case_ctx.case.id,
+                organisation_id=case_ctx.organisation_id,
+                created_by=str(case_ctx.user.id),
+            )
+    except IntegrityError:
+        # If the row now exists, a concurrent create won the race: resolve it as
+        # the same 409 the non-racing duplicate path returns. If it still doesn't
+        # exist, the violation was some other constraint — re-raise, never swallow.
+        if await obs_crud.find_case_observable(
+            session, case_ctx.case.id, obs_in.observable_type, obs_in.data
+        ):
+            raise conflict
+        raise
     return observable
 
 

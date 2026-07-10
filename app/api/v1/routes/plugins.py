@@ -657,7 +657,9 @@ async def test_plugin_config(
     # Check manifest for required secrets
     manifest = pdef.manifest or {}
     required_secrets = [
-        c["name"] for c in manifest.get("configuration", []) if c.get("secret") and c.get("required")
+        c["name"]
+        for c in manifest.get("configuration", [])
+        if _is_secret_param(c) and c.get("required")
     ]
     if required_secrets:
         org_id = ctx.organisation_id

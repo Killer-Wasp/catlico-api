@@ -213,3 +213,84 @@ async def test_superadmin_can_create_and_delete_observable_type(
         headers=headers,
     )
     assert deleted.status_code == 204, deleted.text
+
+
+# --- Manual create: check-then-insert TOCTOU race ---
+
+
+async def test_create_case_observable_dedup_race_resolves_as_conflict(
+    client: AsyncClient, session, org_a, builtin_roles, observable_types,
+    analyst_a, analyst_a_token, monkeypatch,
+):
+    """The manual create route pre-checks with find_case_observable then inserts:
+    a concurrent create of the same (case, type, data) can land between the two,
+    and uq_observable_case_dedup rejects the loser with an IntegrityError. Simulate
+    it deterministically by making the pre-check report the row absent while it in
+    fact exists. The loser must get the route's established 409 "already exists"
+    outcome (not a 500), and exactly one row must remain.
+
+    Without the begin_nested savepoint this test fails: the IntegrityError aborts
+    the transaction, so the post-collision re-check SELECT itself errors with
+    PendingRollbackError instead of returning a clean 409 (confirmed by removing
+    the savepoint)."""
+    from app.crud import observable as obs_crud
+
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    h = _headers(analyst_a_token, org_a.id)
+    body = {"observable_type": "ip", "data": "5.5.5.5"}
+
+    # Pre-seed the row so the second POST's insert collides for real.
+    assert (
+        await client.post(f"/api/v1/cases/{case.id}/observables", json=body, headers=h)
+    ).status_code == 201
+
+    # First find (the route pre-check) lies "absent"; later finds (the
+    # post-IntegrityError re-check) see the truth.
+    real_find = obs_crud.find_case_observable
+    calls = {"n": 0}
+
+    async def racy_find(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real_find(*args, **kwargs)
+
+    monkeypatch.setattr(obs_crud, "find_case_observable", racy_find)
+
+    r = await client.post(f"/api/v1/cases/{case.id}/observables", json=body, headers=h)
+    assert r.status_code == 409, r.text  # the loser's benign "already exists"
+
+    monkeypatch.undo()
+    lst = await client.get(f"/api/v1/cases/{case.id}/observables", headers=h)
+    matches = [o for o in lst.json()["items"] if o["data"] == "5.5.5.5"]
+    assert len(matches) == 1
+
+
+async def test_create_case_observable_non_dedup_integrity_not_swallowed(
+    client: AsyncClient, session, org_a, builtin_roles, observable_types,
+    analyst_a, analyst_a_token, monkeypatch,
+):
+    """The race handler must not blanket-swallow every IntegrityError as "already
+    exists". If the observable still doesn't exist on re-check, the violation came
+    from a different constraint and must surface, not be masked as a 409."""
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.crud import observable as obs_crud
+
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    h = _headers(analyst_a_token, org_a.id)
+
+    async def boom_create(*args, **kwargs):
+        raise IntegrityError("INSERT ...", {}, Exception("some other constraint"))
+
+    monkeypatch.setattr(obs_crud, "create_case_observable", boom_create)
+
+    # Re-check finds nothing (nothing was inserted), so it is not a benign
+    # duplicate: the IntegrityError re-raises rather than being turned into a 409.
+    with pytest.raises(IntegrityError):
+        await client.post(
+            f"/api/v1/cases/{case.id}/observables",
+            json={"observable_type": "ip", "data": "7.7.7.7"},
+            headers=h,
+        )
