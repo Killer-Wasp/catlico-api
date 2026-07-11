@@ -3,8 +3,10 @@ from typing import Annotated
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Cookie,
     Depends,
     HTTPException,
+    Request,
     Response,
     status,
 )
@@ -48,13 +50,27 @@ def set_refresh_cookie(response: Response, refresh_jwt: str) -> None:
     )
 
 
+def enforce_csrf(request: Request) -> None:
+    """CSRF guard for the cookie-authenticated endpoints (refresh/logout only —
+    every other route authenticates via the Authorization header and needs none).
+
+    A cross-site HTML form cannot set custom headers, and a cross-origin fetch
+    that tries must first pass CORS preflight — so requiring X-Requested-With
+    blocks classic CSRF. The Origin allowlist is defence in depth on top.
+    """
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing CSRF header")
+    origin = request.headers.get("Origin")
+    if origin is not None and origin.rstrip("/") not in settings.all_cors_origins:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Origin not allowed")
+
+
+RefreshCookie = Annotated[str | None, Cookie(alias=REFRESH_COOKIE_NAME)]
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str
 
 
 class Token(BaseModel):
@@ -98,37 +114,32 @@ async def login(
     return Token(access_token=access_token, token_type="bearer")
 
 
-@router.post("/refresh", response_model=Token)
+@router.post("/refresh", response_model=Token, dependencies=[Depends(enforce_csrf)])
 async def refresh(
-    body: RefreshRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
+    refresh_jwt: RefreshCookie = None,
 ) -> Token:
-    """Exchange a valid refresh token for a fresh access token. Membership and the
+    """Exchange the refresh cookie for a fresh access token. Membership and the
     active/superadmin flags are re-read from the DB, so permission changes take
     effect on the next refresh (within ACCESS_TOKEN_EXPIRE_MINUTES) rather than
     waiting out the old token."""
-    decoded = decode_refresh_token(body.refresh_token)
+    credential_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not refresh_jwt:
+        raise credential_error
+    decoded = decode_refresh_token(refresh_jwt)
     if decoded is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise credential_error
     token_id, presented_user_id = decoded
     user_id = await get_valid_refresh_user_id(session, token_id, presented_user_id)
     if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise credential_error
     user = await get_user_by_id(session, user_id)
     if user is None or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise credential_error
     access_token = await _access_token_for(session, user)
     return Token(access_token=access_token, token_type="bearer")
 

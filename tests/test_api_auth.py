@@ -7,6 +7,16 @@ from app.crud.user import create_user, update_user
 from app.models.auth import RefreshToken
 from app.models.user import UserCreate, UserUpdate
 
+CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
+
+
+async def _login(client: AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "password123"},
+    )
+    assert response.status_code == 200
+
 
 async def test_login_success(client: AsyncClient, admin_user):
     response = await client.post(
@@ -62,26 +72,15 @@ async def test_login_persists_refresh_token(client: AsyncClient, session, admin_
 
 
 async def test_refresh_returns_new_access_token(client: AsyncClient, admin_user):
-    login = await client.post(
-        "/api/v1/auth/login",
-        json={"email": "admin@test.com", "password": "password123"},
-    )
-    refresh_token = login.json()["refresh_token"]
-
-    response = await client.post(
-        "/api/v1/auth/refresh",
-        json={"refresh_token": refresh_token},
-    )
+    await _login(client)
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
     assert response.status_code == 200
     assert response.json()["access_token"]
 
 
 async def test_refresh_rejects_revoked_token(client: AsyncClient, session, admin_user):
-    login = await client.post(
-        "/api/v1/auth/login",
-        json={"email": "admin@test.com", "password": "password123"},
-    )
-    decoded = decode_refresh_token(login.json()["refresh_token"])
+    await _login(client)
+    decoded = decode_refresh_token(client.cookies.get("catlico_refresh"))
     assert decoded is not None
     token, _ = decoded
     row = (
@@ -91,34 +90,24 @@ async def test_refresh_rejects_revoked_token(client: AsyncClient, session, admin
     await session.delete(row)
     await session.commit()
 
-    response = await client.post(
-        "/api/v1/auth/refresh",
-        json={"refresh_token": login.json()["refresh_token"]},
-    )
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
     assert response.status_code == 401
 
 
 async def test_refresh_rejects_tampered_token(client: AsyncClient, admin_user):
-    login = await client.post(
-        "/api/v1/auth/login",
-        json={"email": "admin@test.com", "password": "password123"},
-    )
-    refresh_token = login.json()["refresh_token"]
+    await _login(client)
+    refresh_token = client.cookies.get("catlico_refresh")
     header, payload, signature = refresh_token.split(".")
     replacement = "A" if signature[0] != "A" else "B"
     tampered = ".".join((header, payload, replacement + signature[1:]))
-    response = await client.post(
-        "/api/v1/auth/refresh",
-        json={"refresh_token": tampered},
-    )
+    client.cookies.set("catlico_refresh", tampered, domain="test.local", path="/api/v1/auth")
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
     assert response.status_code == 401
 
 
 async def test_refresh_rejects_invalid_token(client: AsyncClient):
-    response = await client.post(
-        "/api/v1/auth/refresh",
-        json={"refresh_token": "not-a-jwt"},
-    )
+    client.cookies.set("catlico_refresh", "not-a-jwt", domain="test.local", path="/api/v1/auth")
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
     assert response.status_code == 401
 
 
@@ -128,13 +117,53 @@ async def test_refresh_rejects_access_token(client: AsyncClient, admin_user):
         "/api/v1/auth/login",
         json={"email": "admin@test.com", "password": "password123"},
     )
-    access_token = login.json()["access_token"]
+    client.cookies.set(
+        "catlico_refresh", login.json()["access_token"], domain="test.local", path="/api/v1/auth"
+    )
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
+    assert response.status_code == 401
 
+
+async def test_refresh_requires_cookie(client: AsyncClient):
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
+    assert response.status_code == 401
+
+
+async def test_refresh_ignores_body_token(client: AsyncClient, admin_user):
+    """Clean break: the old body-based contract must not work."""
+    await _login(client)
+    token = client.cookies.get("catlico_refresh")
+    client.cookies.clear()
     response = await client.post(
-        "/api/v1/auth/refresh",
-        json={"refresh_token": access_token},
+        "/api/v1/auth/refresh", headers=CSRF_HEADERS, json={"refresh_token": token}
     )
     assert response.status_code == 401
+
+
+async def test_refresh_requires_csrf_header(client: AsyncClient, admin_user):
+    await _login(client)
+    response = await client.post("/api/v1/auth/refresh")
+    assert response.status_code == 403
+
+
+async def test_refresh_rejects_unknown_origin(client: AsyncClient, admin_user):
+    await _login(client)
+    response = await client.post(
+        "/api/v1/auth/refresh",
+        headers={**CSRF_HEADERS, "Origin": "https://evil.example"},
+    )
+    assert response.status_code == 403
+
+
+async def test_refresh_allows_allowlisted_origin(client: AsyncClient, admin_user):
+    from app.core.configs import settings
+
+    await _login(client)
+    response = await client.post(
+        "/api/v1/auth/refresh",
+        headers={**CSRF_HEADERS, "Origin": settings.FRONTEND_HOST},
+    )
+    assert response.status_code == 200
 
 
 async def test_login_wrong_password(client: AsyncClient, admin_user):
