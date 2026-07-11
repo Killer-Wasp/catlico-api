@@ -100,6 +100,9 @@ async def test_refresh_rejects_tampered_token(client: AsyncClient, admin_user):
     header, payload, signature = refresh_token.split(".")
     replacement = "A" if signature[0] != "A" else "B"
     tampered = ".".join((header, payload, replacement + signature[1:]))
+    # httpx's stdlib cookiejar stores the dotless test host "test" as domain
+    # "test.local"; matching it makes this cookie REPLACE the login one instead
+    # of coexisting (which would silently send the valid cookie and fake a pass).
     client.cookies.set("catlico_refresh", tampered, domain="test.local", path="/api/v1/auth")
     response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
     assert response.status_code == 401
