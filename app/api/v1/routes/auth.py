@@ -1,10 +1,18 @@
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Response,
+    status,
+)
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
+from app.core.configs import settings
 from app.core.db import get_session
 from app.core.security import (
     TokenPayload,
@@ -22,6 +30,23 @@ from app.services.password_reset import PasswordResetError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# The refresh token rides an httpOnly cookie scoped to the auth routes: JS can
+# never read it, and the browser only attaches it to /api/v1/auth/* requests.
+REFRESH_COOKIE_NAME = "catlico_refresh"
+REFRESH_COOKIE_PATH = "/api/v1/auth"
+
+
+def set_refresh_cookie(response: Response, refresh_jwt: str) -> None:
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=refresh_jwt,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES * 60,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+    )
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -35,8 +60,6 @@ class RefreshRequest(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
-    # Present on login; omitted on refresh (the caller keeps its existing one).
-    refresh_token: str | None = None
 
 
 async def _access_token_for(session: AsyncSession, user: User) -> str:
@@ -53,6 +76,7 @@ async def _access_token_for(session: AsyncSession, user: User) -> str:
 @router.post("/login", response_model=Token)
 async def login(
     body: LoginRequest,
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Token:
     user = await authenticate_user(session, body.email, body.password)
@@ -67,13 +91,11 @@ async def login(
 
     access_token = await _access_token_for(session, user)
     refresh_row = await issue_refresh_token(session, user.id)
-    return Token(
-        access_token=access_token,
-        token_type="bearer",
-        refresh_token=create_refresh_token(
-            refresh_row.token, refresh_row.user_id, refresh_row.expires_at
-        ),
+    set_refresh_cookie(
+        response,
+        create_refresh_token(refresh_row.token, refresh_row.user_id, refresh_row.expires_at),
     )
+    return Token(access_token=access_token, token_type="bearer")
 
 
 @router.post("/refresh", response_model=Token)

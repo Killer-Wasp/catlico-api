@@ -16,28 +16,43 @@ async def test_login_success(client: AsyncClient, admin_user):
     assert response.status_code == 200
     data = response.json()
     assert "access_token" in data
-    assert data["refresh_token"]
     assert data["token_type"] == "bearer"
+    # Clean break: the refresh token never appears in the body.
+    assert "refresh_token" not in data
 
 
-async def test_login_returns_signed_refresh_jwt(client: AsyncClient, admin_user):
+async def test_login_sets_refresh_cookie(client: AsyncClient, admin_user):
     response = await client.post(
         "/api/v1/auth/login",
         json={"email": "admin@test.com", "password": "password123"},
     )
     assert response.status_code == 200
-    token = response.json()["refresh_token"]
-    assert token.count(".") == 2
-    decoded = decode_refresh_token(token)
-    assert decoded is not None
+    set_cookie = response.headers["set-cookie"].lower()
+    assert set_cookie.startswith("catlico_refresh=")
+    assert "httponly" in set_cookie
+    assert "samesite=lax" in set_cookie
+    assert "path=/api/v1/auth" in set_cookie
+    assert "secure" in set_cookie
+    assert "max-age=" in set_cookie
 
 
-async def test_login_persists_refresh_token(client: AsyncClient, session, admin_user):
-    response = await client.post(
+async def test_login_cookie_is_signed_refresh_jwt(client: AsyncClient, admin_user):
+    await client.post(
         "/api/v1/auth/login",
         json={"email": "admin@test.com", "password": "password123"},
     )
-    decoded = decode_refresh_token(response.json()["refresh_token"])
+    token = client.cookies.get("catlico_refresh")
+    assert token is not None
+    assert token.count(".") == 2
+    assert decode_refresh_token(token) is not None
+
+
+async def test_login_persists_refresh_token(client: AsyncClient, session, admin_user):
+    await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "password123"},
+    )
+    decoded = decode_refresh_token(client.cookies.get("catlico_refresh"))
     assert decoded is not None
     token, _ = decoded
     row = (

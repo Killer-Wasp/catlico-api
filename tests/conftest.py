@@ -192,7 +192,7 @@ async def client(session, tmp_path) -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_storage] = lambda: test_storage
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as c:
         yield c
     app.dependency_overrides.clear()
 
