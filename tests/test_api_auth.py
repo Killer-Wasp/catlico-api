@@ -31,7 +31,13 @@ async def test_login_success(client: AsyncClient, admin_user):
     assert "refresh_token" not in data
 
 
-async def test_login_sets_refresh_cookie(client: AsyncClient, admin_user):
+async def test_login_sets_refresh_cookie(client: AsyncClient, admin_user, monkeypatch):
+    # The `secure` flag is gated on COOKIE_SECURE, which local .env sets to false
+    # for http dev. Pin it true so this test verifies the secure-by-default
+    # behaviour regardless of the developer's ambient override.
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "COOKIE_SECURE", True)
     response = await client.post(
         "/api/v1/auth/login",
         json={"email": "admin@test.com", "password": "password123"},
