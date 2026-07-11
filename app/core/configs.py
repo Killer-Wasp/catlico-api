@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     @property
     def all_cors_origins(self) -> list[str]:
         return [str(origin).rstrip("/") for origin in self.BACKEND_CORS_ORIGINS] + [
-            self.FRONTEND_HOST
+            self.FRONTEND_HOST.rstrip("/")
         ]
 
     # PostgreSQL connection — required. Either set DATABASE_URL directly, or set
@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     # membership from the DB. Refresh tokens are random UUIDs persisted in DB.
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8  # 8 days
+    # Mark auth cookies `Secure` (HTTPS-only). Set false for plain-http local dev.
+    COOKIE_SECURE: bool = True
 
     # Default admin seeding
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"

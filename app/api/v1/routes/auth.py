@@ -1,10 +1,20 @@
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Cookie,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
+from app.core.configs import settings
 from app.core.db import get_session
 from app.core.security import (
     TokenPayload,
@@ -15,12 +25,59 @@ from app.core.security import (
 from app.crud.auth import get_valid_refresh_user_id, issue_refresh_token
 from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
-from app.models.auth import ForgotPasswordRequest, ResetPasswordRequest
+from app.models.auth import ForgotPasswordRequest, RefreshToken, ResetPasswordRequest
 from app.models.user import User
 from app.services import password_reset as password_reset_service
 from app.services.password_reset import PasswordResetError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# The refresh token rides an httpOnly cookie scoped to the auth routes: JS can
+# never read it, and the browser only attaches it to /api/v1/auth/* requests.
+REFRESH_COOKIE_NAME = "catlico_refresh"
+REFRESH_COOKIE_PATH = "/api/v1/auth"
+
+
+def set_refresh_cookie(response: Response, refresh_jwt: str) -> None:
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=refresh_jwt,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES * 60,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    # Attributes must match set_refresh_cookie or browsers treat it as a
+    # different cookie and keep the original.
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+    )
+
+
+def enforce_csrf(request: Request) -> None:
+    """CSRF guard for the cookie-authenticated endpoints (refresh/logout only —
+    every other route authenticates via the Authorization header and needs none).
+
+    A cross-site HTML form cannot set custom headers, and a cross-origin fetch
+    that tries must first pass CORS preflight — so requiring X-Requested-With
+    blocks classic CSRF. The Origin allowlist is defence in depth on top.
+    """
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing CSRF header")
+    origin = request.headers.get("Origin")
+    if origin is not None and origin.rstrip("/") not in settings.all_cors_origins:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Origin not allowed")
+
+
+RefreshCookie = Annotated[str | None, Cookie(alias=REFRESH_COOKIE_NAME)]
 
 
 class LoginRequest(BaseModel):
@@ -28,15 +85,9 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class RefreshRequest(BaseModel):
-    refresh_token: str
-
-
 class Token(BaseModel):
     access_token: str
     token_type: str
-    # Present on login; omitted on refresh (the caller keeps its existing one).
-    refresh_token: str | None = None
 
 
 async def _access_token_for(session: AsyncSession, user: User) -> str:
@@ -53,6 +104,7 @@ async def _access_token_for(session: AsyncSession, user: User) -> str:
 @router.post("/login", response_model=Token)
 async def login(
     body: LoginRequest,
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Token:
     user = await authenticate_user(session, body.email, body.password)
@@ -67,48 +119,63 @@ async def login(
 
     access_token = await _access_token_for(session, user)
     refresh_row = await issue_refresh_token(session, user.id)
-    return Token(
-        access_token=access_token,
-        token_type="bearer",
-        refresh_token=create_refresh_token(
-            refresh_row.token, refresh_row.user_id, refresh_row.expires_at
-        ),
+    set_refresh_cookie(
+        response,
+        create_refresh_token(refresh_row.token, refresh_row.user_id, refresh_row.expires_at),
     )
+    return Token(access_token=access_token, token_type="bearer")
 
 
-@router.post("/refresh", response_model=Token)
+@router.post("/refresh", response_model=Token, dependencies=[Depends(enforce_csrf)])
 async def refresh(
-    body: RefreshRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
+    refresh_jwt: RefreshCookie = None,
 ) -> Token:
-    """Exchange a valid refresh token for a fresh access token. Membership and the
+    """Exchange the refresh cookie for a fresh access token. Membership and the
     active/superadmin flags are re-read from the DB, so permission changes take
     effect on the next refresh (within ACCESS_TOKEN_EXPIRE_MINUTES) rather than
     waiting out the old token."""
-    decoded = decode_refresh_token(body.refresh_token)
+    credential_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not refresh_jwt:
+        raise credential_error
+    decoded = decode_refresh_token(refresh_jwt)
     if decoded is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise credential_error
     token_id, presented_user_id = decoded
     user_id = await get_valid_refresh_user_id(session, token_id, presented_user_id)
     if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise credential_error
     user = await get_user_by_id(session, user_id)
     if user is None or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise credential_error
     access_token = await _access_token_for(session, user)
     return Token(access_token=access_token, token_type="bearer")
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(enforce_csrf)],
+)
+async def logout(
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    refresh_jwt: RefreshCookie = None,
+) -> None:
+    """Revoke the refresh session and clear its cookie. Needed server-side
+    because JS cannot delete an httpOnly cookie. Idempotent: a missing or
+    invalid cookie still returns 204 — the goal state is 'logged out'."""
+    if refresh_jwt and (decoded := decode_refresh_token(refresh_jwt)):
+        token_id, user_id = decoded
+        row = await session.get(RefreshToken, token_id)
+        if row is not None and row.user_id == user_id:
+            await session.delete(row)
+            await session.flush()
+    clear_refresh_cookie(response)
 
 
 # --- Sessions (G5) ---
