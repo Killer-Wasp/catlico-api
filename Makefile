@@ -1,8 +1,8 @@
 .PHONY: dev db install test migrate migration
 
-# Start a local Postgres (and SeaweedFS) in the background
+# Start a local Postgres, SeaweedFS, and the Mailpit mail catcher in the background
 db:
-	docker compose up -d db seaweedfs
+	docker compose up -d db seaweedfs mailpit
 
 # Start the dev server with auto-reload. Requires Postgres — run `make db` first.
 dev: db

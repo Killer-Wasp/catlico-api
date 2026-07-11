@@ -5,12 +5,10 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
-from app.core.configs import settings
 from app.core.db import get_session
 from app.core.security import (
     TokenPayload,
     create_access_token,
-    get_password_hash,
     create_refresh_token,
     decode_refresh_token,
 )
@@ -19,6 +17,8 @@ from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
 from app.models.auth import ForgotPasswordRequest, ResetPasswordRequest
 from app.models.user import User
+from app.services import password_reset as password_reset_service
+from app.services.password_reset import PasswordResetError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -155,51 +155,20 @@ async def revoke_session(
 
 # --- Password Reset (G6) ---
 
+GENERIC_FORGOT_RESPONSE = {
+    "message": "If the email is registered, a reset link has been sent"
+}
+
 
 @router.post("/password/forgot")
 async def forgot_password(
     body: ForgotPasswordRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
-    """Request a password reset link. Always returns the same response."""
-    import hashlib, secrets
-    from datetime import UTC, datetime, timedelta
-    from sqlmodel import select
-    from app.models.auth import PasswordResetToken
-    from app.models.user import User as UserModel
-    from app.services import password_reset_delivery
-
-    public = {"message": "If the email is registered, a reset link has been sent"}
-    result = await session.execute(select(UserModel).where(UserModel.email == body.email))
-    user = result.scalar_one_or_none()
-    if user is None:
-        return public
-
-    now = datetime.now(UTC)
-    recent_cutoff = now - timedelta(seconds=settings.PASSWORD_RESET_THROTTLE_SECONDS)
-    existing = await session.execute(
-        select(PasswordResetToken).where(
-            PasswordResetToken.user_id == user.id,
-            PasswordResetToken.used_at.is_(None),
-            PasswordResetToken.created_at >= recent_cutoff,
-        )
-    )
-    if existing.scalar_one_or_none() is not None:
-        return public
-
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-    token = PasswordResetToken(
-        user_id=user.id,
-        token_hash=token_hash,
-        expires_at=now + timedelta(hours=1),
-    )
-    session.add(token)
-    await session.flush()
-
-    # No raw-token logging. Delivery is a no-op unless SMTP is configured.
-    await password_reset_delivery.send_password_reset_email(user.email, raw_token)
-    return public
+    """Request a password reset link. Always returns the same response, so the
+    endpoint can't be used to discover which emails are registered."""
+    await password_reset_service.request_reset(session, body.email)
+    return GENERIC_FORGOT_RESPONSE
 
 
 @router.post("/password/reset")
@@ -207,30 +176,13 @@ async def reset_password(
     body: ResetPasswordRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
-    """Reset password using a valid reset token."""
-    import hashlib
-    from datetime import UTC, datetime
-    from sqlmodel import select
-    from app.models.auth import PasswordResetToken
-
-    token_hash = hashlib.sha256(body.token.encode()).hexdigest()
-    result = await session.execute(
-        select(PasswordResetToken).where(
-            PasswordResetToken.token_hash == token_hash,
-            PasswordResetToken.used_at.is_(None),
+    """Reset a password using a valid single-use reset token."""
+    try:
+        await password_reset_service.perform_reset(
+            session, body.token, body.new_password
         )
-    )
-    token = result.scalar_one_or_none()
-    if token is None or token.expires_at < datetime.now(UTC):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset token")
-
-    user = await get_user_by_id(session, token.user_id)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid reset token")
-
-    user.hashed_password = get_password_hash(body.new_password)
-    token.used_at = datetime.now(UTC)
-    session.add(user)
-    session.add(token)
-    await session.flush()
+    except PasswordResetError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     return {"message": "Password reset successfully"}
