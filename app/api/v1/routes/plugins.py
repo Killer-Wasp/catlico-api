@@ -11,7 +11,6 @@ from sqlmodel import delete, select
 
 from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
-from app.crud import observable as obs_crud
 from app.crud import plugin_stats as stats_crud
 from app.services import plugin_audit
 from app.models.plugin_runner import (
@@ -265,9 +264,15 @@ async def create_manual_plugin_run(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Manual plugin runs currently support observable entities",
         )
-    observable = await obs_crud.get_observable(session, uuid.UUID(entity_id))
-    if observable is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Observable not found")
+    # The same visibility resolution the observable read routes use — a bare
+    # get_observable would let any org trigger runs (and thus enrichment spend +
+    # result writes) against another org's observable by guessing its UUID.
+    from app.api.v1.routes.observables import _resolve_observable_visibility
+
+    _, _, effective_perms = await _resolve_observable_visibility(
+        session, ctx, uuid.UUID(entity_id)
+    )
+    _require("read:observable", effective_perms)
 
     from app.services.plugin_dispatch import (
         _enqueue_for_healthy_runners,

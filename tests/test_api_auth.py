@@ -84,6 +84,73 @@ async def test_refresh_returns_new_access_token(client: AsyncClient, admin_user)
     assert response.json()["access_token"]
 
 
+async def test_refresh_rotates_refresh_token(client: AsyncClient, session, admin_user):
+    """Every refresh consumes the presented token and issues a replacement: the
+    old cookie is single-use (a replay 401s) and the new one keeps working."""
+    await _login(client)
+    old_cookie = client.cookies.get("catlico_refresh")
+
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
+    assert response.status_code == 200
+    new_cookie = client.cookies.get("catlico_refresh")
+    assert new_cookie is not None
+    assert new_cookie != old_cookie
+
+    # The consumed token's row is gone from the DB.
+    old_token, _ = decode_refresh_token(old_cookie)
+    row = (
+        await session.execute(
+            select(RefreshToken).where(RefreshToken.token == old_token)
+        )
+    ).scalar_one_or_none()
+    assert row is None
+
+    # Replaying the old cookie fails; the rotated one succeeds.
+    client.cookies.set(
+        "catlico_refresh", old_cookie, domain="test.local", path="/api/v1/auth"
+    )
+    replay = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
+    assert replay.status_code == 401
+
+    client.cookies.set(
+        "catlico_refresh", new_cookie, domain="test.local", path="/api/v1/auth"
+    )
+    ok = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
+    assert ok.status_code == 200
+
+
+async def test_password_change_revokes_all_sessions(
+    client: AsyncClient, session, admin_user
+):
+    """Changing the password via PATCH /users/me logs out every session: all
+    refresh tokens are deleted and the pre-change cookie can no longer refresh."""
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "password123"},
+    )
+    assert login.status_code == 200
+    access_token = login.json()["access_token"]
+    # A second session that should also be revoked.
+    await _login(client)
+
+    r = await client.patch(
+        "/api/v1/users/me",
+        json={"current_password": "password123", "new_password": "a-new-password-123"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert r.status_code == 200, r.text
+
+    rows = (
+        await session.execute(
+            select(RefreshToken).where(RefreshToken.user_id == admin_user.id)
+        )
+    ).scalars().all()
+    assert rows == []
+
+    refresh = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
+    assert refresh.status_code == 401
+
+
 async def test_refresh_rejects_revoked_token(client: AsyncClient, session, admin_user):
     await _login(client)
     decoded = decode_refresh_token(client.cookies.get("catlico_refresh"))

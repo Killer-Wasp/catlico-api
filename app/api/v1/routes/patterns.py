@@ -41,7 +41,16 @@ async def import_patterns(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[PatternPublic]:
-    """Bulk import/upsert ATT&CK patterns by external_id."""
+    """Bulk import/upsert ATT&CK patterns by external_id.
+
+    Patterns are a global catalog shared across organisations, so writes are an
+    admin surface: ``write:organisation``, matching the planned
+    ``POST /patterns/import-attack`` guard (attack-matrix design doc)."""
+    if "write:organisation" not in ctx.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing permission: write:organisation",
+        )
     patterns = await pattern_crud.import_patterns(
         session, items, created_by=str(ctx.user.id)
     )

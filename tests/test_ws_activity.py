@@ -84,3 +84,5 @@ async def test_broadcast_dead_connections_cleaned():
 #   - test_ws_route_missing_token_fails: no token → 1008 close
 #   - test_ws_route_bad_token_fails: invalid token → 1008 close
 #   - test_ws_route_cross_org_fails: token for org-b cannot connect as org-a
+#   - test_ws_route_requires_read_case: a member whose role lacks read:case
+#     (expanded from the role's groups) → 1008 close; superadmin bypasses

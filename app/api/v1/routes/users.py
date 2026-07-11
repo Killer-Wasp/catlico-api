@@ -22,6 +22,7 @@ from app.core.storage import BlobStorage, get_storage
 from app.crud import attachment as attachment_crud
 from app.crud import user as user_crud
 from app.crud.audit import record_audit
+from app.crud.auth import delete_all_refresh_tokens
 from app.models.attachment import Attachment
 from app.models.user import UserCreate, UserMeUpdate, UserPublic, UserUpdate
 
@@ -35,6 +36,15 @@ def _ensure_password_policy(password: str | None) -> None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=PASSWORD_POLICY_MESSAGE
         )
+
+
+def _audit_details(update_data) -> dict:
+    """Audit ``details`` for a user update. The plaintext password is never
+    logged — only the fact that it changed."""
+    details = update_data.model_dump(exclude_unset=True)
+    if details.get("password") is not None:
+        details["password"] = "[redacted]"
+    return details
 
 
 @router.get("/me", response_model=UserPublic)
@@ -96,12 +106,18 @@ async def update_current_user(
         update_data.last_name = body.last_name
 
     user = await user_crud.update_user(session, current_user, update_data)
+    if body.new_password is not None:
+        # Same rule as password reset: a password change invalidates every
+        # existing session, so a party holding a stolen refresh token is logged
+        # out. The caller keeps their short-lived access token and re-logs-in
+        # when it expires.
+        await delete_all_refresh_tokens(session, user.id)
     await record_audit(
         session,
         action="update",
         obj=user,
         actor=str(current_user.id),
-        details=update_data.model_dump(exclude_unset=True),
+        details=_audit_details(update_data),
     )
     return user
 
@@ -240,12 +256,16 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     user = await user_crud.update_user(session, user, user_in)
+    if user_in.password is not None:
+        # An admin-set password revokes the user's sessions just like a
+        # self-service change or reset would.
+        await delete_all_refresh_tokens(session, user.id)
     await record_audit(
         session,
         action="update",
         obj=user,
         actor=str(admin.id),
-        details=user_in.model_dump(exclude_unset=True),
+        details=_audit_details(user_in),
     )
     return user
 

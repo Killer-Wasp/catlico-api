@@ -6,6 +6,7 @@ from pydantic import (
     BeforeValidator,
     PostgresDsn,
     computed_field,
+    model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -161,6 +162,33 @@ class Settings(BaseSettings):
                 opts["secret"] = self.S3_SECRET_KEY
             return opts
         return {}
+
+    @model_validator(mode="after")
+    def _require_explicit_secret_key_in_production(self) -> "Settings":
+        """Refuse to boot production on an unset or weak SECRET_KEY.
+
+        The default is a per-process random value — fine for local dev, but in
+        production it silently invalidates every JWT on restart and breaks
+        multi-instance deployments; and an operator pasting a placeholder would
+        quietly run with a guessable signing key. ``model_fields_set`` only
+        contains explicitly provided fields, so the generated default is
+        detectable.
+        """
+        if self.ENVIRONMENT != "production":
+            return self
+        if "SECRET_KEY" not in self.model_fields_set:
+            raise ValueError(
+                "SECRET_KEY must be explicitly set in production "
+                "(e.g. `python -c \"import secrets; print(secrets.token_urlsafe(32))\"`)."
+            )
+        if len(self.SECRET_KEY) < 32 or self.SECRET_KEY.lower() in {
+            "changeme", "changethis", "secret", "secret_key", "default",
+        }:
+            raise ValueError(
+                "SECRET_KEY is too weak for production: use a random value of "
+                "at least 32 characters."
+            )
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

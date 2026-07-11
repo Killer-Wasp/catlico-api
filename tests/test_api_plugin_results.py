@@ -272,6 +272,49 @@ async def test_case_results_scoped_and_guarded(
     ).status_code == 404
 
 
+async def test_task_results_do_not_collide_across_cases(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token,
+):
+    """Task ids are per-case sequences, so results are keyed by the composite
+    ``"{case_id}:{task_id}"``. A result on case 1's task must not appear on
+    another case's task that happens to share the same task number (previously
+    a cross-case — and cross-org — leak)."""
+    ha = _headers(analyst_a_token, org_a.id)
+    case1 = await _make_case(session, org_a, builtin_roles, analyst_a)
+    case2 = await _make_case(session, org_a, builtin_roles, analyst_a)
+
+    t1 = (
+        await client.post(
+            f"/api/v1/cases/{case1.id}/tasks", json={"title": "triage"}, headers=ha
+        )
+    ).json()["id"]
+    t2 = (
+        await client.post(
+            f"/api/v1/cases/{case2.id}/tasks", json={"title": "triage"}, headers=ha
+        )
+    ).json()["id"]
+    # The collision scenario is only real if the per-case sequences align.
+    assert t1 == t2
+
+    await _add_result(
+        session, org_id=org_a.id, entity_type="task",
+        entity_id=f"{case1.id}:{t1}", title="task-insight",
+    )
+
+    r = await client.get(
+        f"/api/v1/cases/{case1.id}/tasks/{t1}/plugin-results", headers=ha
+    )
+    assert r.status_code == 200, r.text
+    assert [i["title"] for i in r.json()] == ["task-insight"]
+
+    # Same task number on the other case: no leak.
+    r = await client.get(
+        f"/api/v1/cases/{case2.id}/tasks/{t2}/plugin-results", headers=ha
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == []
+
+
 async def test_alert_results_scoped_and_guarded(
     client: AsyncClient, session, org_a, org_b, builtin_roles,
     analyst_a, analyst_a_token, analyst_b_token,

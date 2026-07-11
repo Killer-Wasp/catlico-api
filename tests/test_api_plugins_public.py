@@ -508,6 +508,47 @@ async def test_manual_plugin_run_rejects_disabled_plugin(
     assert r.status_code == 409
 
 
+async def test_manual_plugin_run_cannot_target_another_orgs_observable(
+    client: AsyncClient, runner_secret, admin_token, org_a, analyst_a_token,
+    org_b, analyst_b_token,
+):
+    """Manual runs resolve observable visibility like the read routes: org B
+    cannot trigger a run (enrichment spend + result writes) against org A's
+    observable by guessing its UUID — it 404s exactly like the read would."""
+    plugin_id, _ = await _setup_runner_and_plugin(client, admin_token)
+    for org_id in (org_a.id, org_b.id):
+        await _enable_plugin_for_org(client, admin_token, org_id, plugin_id)
+
+    h_a = _h(analyst_a_token, org_a.id)
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "IDOR", "description": ""}, headers=h_a
+    )
+    observable = await client.post(
+        f"/api/v1/cases/{case.json()['id']}/observables",
+        json={"observable_type": "ip", "data": "9.9.9.9", "tlp": 2, "pap": 2},
+        headers=h_a,
+    )
+    obs_id = observable.json()["id"]
+
+    for path, payload in (
+        (f"/api/v1/observables/{obs_id}/plugin-runs", {"plugin_id": plugin_id}),
+        (
+            f"/api/v1/plugins/{plugin_id}/run",
+            {"entity_type": "observable", "entity_id": obs_id},
+        ),
+    ):
+        r = await client.post(path, json=payload, headers=_h(analyst_b_token, org_b.id))
+        assert r.status_code == 404, r.text
+
+    # The owner org can still run it.
+    r = await client.post(
+        f"/api/v1/observables/{obs_id}/plugin-runs",
+        json={"plugin_id": plugin_id},
+        headers=h_a,
+    )
+    assert r.status_code == 200, r.text
+
+
 # --- Auto-run ---
 
 

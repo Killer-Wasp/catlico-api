@@ -195,10 +195,13 @@ async def list_task_plugin_results(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[dict]:
     """Plugin results for a task. Mirrors GET /cases/{case_id}/tasks/{task_id}:
-    requires ``read:task`` under the case's effective (share-intersected) perms."""
+    requires ``read:task`` under the case's effective (share-intersected) perms.
+    Task ids are per-case, so the stored entity id is ``"{case_id}:{task_id}"`` —
+    querying by bare task id would leak results across cases (and orgs) whose
+    tasks share the same sequence number."""
     _, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("read:task", perms)
-    results = await pr_crud.list_for_entity(session, "task", str(task_id))
+    results = await pr_crud.list_for_entity(session, "task", f"{case_id}:{task_id}")
     return pr_crud.serialize_list(results)
 
 
@@ -212,7 +215,10 @@ async def download_task_plugin_result_file(
     storage: Annotated[BlobStorage, Depends(get_storage)],
 ) -> StreamingResponse:
     """Download a plugin attachment on a task. Same guard as the list route
-    (``read:task`` under the case's share-intersected perms)."""
+    (``read:task`` under the case's share-intersected perms); same composite
+    ``"{case_id}:{task_id}"`` entity id as the list route."""
     _, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
     _require("read:task", perms)
-    return await _download_attachment(session, storage, "task", str(task_id), file_ref)
+    return await _download_attachment(
+        session, storage, "task", f"{case_id}:{task_id}", file_ref
+    )

@@ -212,16 +212,23 @@ async def _validate_result_entity(
     principal: PluginRuntimePrincipal,
     entity_type: str,
     entity_id: str,
-) -> None:
+) -> str:
+    """Validate the target entity and return the canonical stored ``entity_id``.
+
+    Task ids are only unique per case (``Case.next_task_seq``), so a bare task id
+    stored as ``entity_id`` would collide across cases — and across organisations —
+    on the read side. Tasks are therefore stored as ``"{case_id}:{task_id}"``; the
+    other entity types have globally unique ids and are stored as-is.
+    """
     if entity_type == "observable":
         await _observable_for_runtime(session, principal, uuid.UUID(entity_id))
-        return
+        return entity_id
     if entity_type == "case":
         await _case_for_runtime(session, principal, int(entity_id))
-        return
+        return entity_id
     if entity_type == "alert":
         await _alert_for_runtime(session, principal, int(entity_id))
-        return
+        return entity_id
     if entity_type == "task":
         case_id = principal.event_object_id if principal.event_object_type == "case" else None
         if not case_id:
@@ -230,7 +237,7 @@ async def _validate_result_entity(
                 detail="Task results require a case event context",
             )
         await _task_for_runtime(session, principal, int(case_id), int(entity_id))
-        return
+        return f"{int(case_id)}:{int(entity_id)}"
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail="Unsupported plugin result entity_type",
@@ -295,7 +302,7 @@ async def add_result(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="fingerprint is required",
         )
-    await _validate_result_entity(session, principal, entity_type, entity_id)
+    entity_id = await _validate_result_entity(session, principal, entity_type, entity_id)
     attachments = body.get("attachments", [])
     await _validate_result_attachments(session, principal, attachments)
 

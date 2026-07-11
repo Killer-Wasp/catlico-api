@@ -22,7 +22,7 @@ from app.core.security import (
     create_refresh_token,
     decode_refresh_token,
 )
-from app.crud.auth import get_valid_refresh_user_id, issue_refresh_token
+from app.crud.auth import issue_refresh_token, rotate_refresh_token
 from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
 from app.models.auth import ForgotPasswordRequest, RefreshToken, ResetPasswordRequest
@@ -128,13 +128,19 @@ async def login(
 
 @router.post("/refresh", response_model=Token, dependencies=[Depends(enforce_csrf)])
 async def refresh(
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     refresh_jwt: RefreshCookie = None,
 ) -> Token:
     """Exchange the refresh cookie for a fresh access token. Membership and the
     active/superadmin flags are re-read from the DB, so permission changes take
     effect on the next refresh (within ACCESS_TOKEN_EXPIRE_MINUTES) rather than
-    waiting out the old token."""
+    waiting out the old token.
+
+    The refresh token itself is rotated on every use: the presented one is
+    consumed (single-use) and a replacement rides back on the cookie, so a
+    stolen cookie is good for at most one exchange and a replay of the old
+    value fails."""
     credential_error = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid refresh token",
@@ -146,13 +152,17 @@ async def refresh(
     if decoded is None:
         raise credential_error
     token_id, presented_user_id = decoded
-    user_id = await get_valid_refresh_user_id(session, token_id, presented_user_id)
-    if user_id is None:
+    new_row = await rotate_refresh_token(session, token_id, presented_user_id)
+    if new_row is None:
         raise credential_error
-    user = await get_user_by_id(session, user_id)
+    user = await get_user_by_id(session, new_row.user_id)
     if user is None or not user.is_active:
         raise credential_error
     access_token = await _access_token_for(session, user)
+    set_refresh_cookie(
+        response,
+        create_refresh_token(new_row.token, new_row.user_id, new_row.expires_at),
+    )
     return Token(access_token=access_token, token_type="bearer")
 
 

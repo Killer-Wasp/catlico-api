@@ -21,21 +21,24 @@ async def _make_case(session, org, builtin_roles, user):
 
 
 async def test_import_and_list_patterns(
-    client: AsyncClient, org_a, analyst_a, analyst_a_token
+    client: AsyncClient, org_a, admin_token, analyst_a, analyst_a_token
 ):
-    h = _headers(analyst_a_token, org_a.id)
+    # Import is an admin surface (write:organisation); listing is open to members.
+    admin_h = _headers(admin_token, org_a.id)
     r = await client.post(
         "/api/v1/patterns/import",
         json=[
             {"external_id": "T1566", "name": "Phishing", "tactic": "initial-access"},
             {"external_id": "T1059", "name": "Command Execution", "tactic": "execution"},
         ],
-        headers=h,
+        headers=admin_h,
     )
     assert r.status_code == 200, r.text
     assert {p["external_id"] for p in r.json()} == {"T1566", "T1059"}
 
-    listed = await client.get("/api/v1/patterns", headers=h)
+    listed = await client.get(
+        "/api/v1/patterns", headers=_headers(analyst_a_token, org_a.id)
+    )
     assert listed.status_code == 200
     body = listed.json()
     assert body["total"] == 2
@@ -43,9 +46,9 @@ async def test_import_and_list_patterns(
 
 
 async def test_import_upserts_by_external_id(
-    client: AsyncClient, org_a, analyst_a, analyst_a_token
+    client: AsyncClient, org_a, admin_token, analyst_a, analyst_a_token
 ):
-    h = _headers(analyst_a_token, org_a.id)
+    h = _headers(admin_token, org_a.id)
     await client.post(
         "/api/v1/patterns/import",
         json=[{"external_id": "T1566", "name": "Phishing"}],
@@ -57,9 +60,24 @@ async def test_import_upserts_by_external_id(
         json=[{"external_id": "T1566", "name": "Phishing (updated)"}],
         headers=h,
     )
-    body = (await client.get("/api/v1/patterns", headers=h)).json()
+    body = (
+        await client.get("/api/v1/patterns", headers=_headers(analyst_a_token, org_a.id))
+    ).json()
     assert body["total"] == 1
     assert body["items"][0]["name"] == "Phishing (updated)"
+
+
+async def test_import_requires_write_organisation(
+    client: AsyncClient, org_a, readonly_a, readonly_a_token
+):
+    """The global pattern catalog is admin-writable only: a member without
+    write:org gets 403 instead of silently upserting shared reference data."""
+    r = await client.post(
+        "/api/v1/patterns/import",
+        json=[{"external_id": "T1566", "name": "Phishing"}],
+        headers=_headers(readonly_a_token, org_a.id),
+    )
+    assert r.status_code == 403, r.text
 
 
 async def test_replace_and_list_procedures(

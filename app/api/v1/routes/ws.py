@@ -68,5 +68,24 @@ async def ws_activity(
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Not a member of organisation")
             return
 
+        # Membership alone isn't enough: the stream broadcasts the org's case/
+        # task/observable/alert activity, so gate it on the same read capability
+        # the REST activity surface checks (expanded from the member's role).
+        if not user.is_superadmin:
+            from app.models.role import RolePermission, expand_permissions
+
+            granted = await session.execute(
+                select(RolePermission.permission).where(
+                    RolePermission.role_id == member.role_id
+                )
+            )
+            perms = expand_permissions(granted.scalars().all())
+            if "read:case" not in perms:
+                await websocket.close(
+                    code=status.WS_1008_POLICY_VIOLATION,
+                    reason="Missing permission: read:case",
+                )
+                return
+
         hub = get_hub()
         await hub.handle(organisation_id, websocket)

@@ -45,3 +45,20 @@ async def get_valid_refresh_user_id(
         await session.flush()
         return None
     return row.user_id
+
+
+async def rotate_refresh_token(
+    session: AsyncSession, token_id: uuid.UUID, user_id: uuid.UUID
+) -> RefreshToken | None:
+    """Single-use consume: validate the presented refresh token, delete it, and
+    issue a replacement in one step. Rotation caps the value of a stolen refresh
+    cookie to one use — a replayed old token is simply gone. Returns ``None``
+    (issuing nothing) when the presented token is invalid or expired."""
+    valid_user_id = await get_valid_refresh_user_id(session, token_id, user_id)
+    if valid_user_id is None:
+        return None
+    row = await session.get(RefreshToken, token_id)
+    if row is not None:
+        await session.delete(row)
+        await session.flush()
+    return await issue_refresh_token(session, valid_user_id)

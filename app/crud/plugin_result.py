@@ -55,10 +55,12 @@ async def list_for_entity(
     """All results for one entity, newest first.
 
     Scoped by ``(entity_type, entity_id)`` only — the entity id is globally unique
-    per type (observable UUID / case id / alert id / task id), and the caller has
-    already proven it may read that specific entity. There is deliberately no
-    ``organisation_id`` predicate: results on a shared entity may be produced by the
-    owner org, and hiding those would contradict the entity-visibility rule.
+    per type (observable UUID / case id / alert id / task ``"{case_id}:{task_id}"``
+    composite; bare task ids are per-case sequences and would collide), and the
+    caller has already proven it may read that specific entity. There is
+    deliberately no ``organisation_id`` predicate: results on a shared entity may be
+    produced by the owner org, and hiding those would contradict the
+    entity-visibility rule.
     """
     result = await session.execute(
         select(PluginResult)
