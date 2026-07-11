@@ -25,7 +25,7 @@ from app.core.security import (
 from app.crud.auth import get_valid_refresh_user_id, issue_refresh_token
 from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
-from app.models.auth import ForgotPasswordRequest, ResetPasswordRequest
+from app.models.auth import ForgotPasswordRequest, RefreshToken, ResetPasswordRequest
 from app.models.user import User
 from app.services import password_reset as password_reset_service
 from app.services.password_reset import PasswordResetError
@@ -43,6 +43,18 @@ def set_refresh_cookie(response: Response, refresh_jwt: str) -> None:
         key=REFRESH_COOKIE_NAME,
         value=refresh_jwt,
         max_age=settings.REFRESH_TOKEN_EXPIRE_MINUTES * 60,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    # Attributes must match set_refresh_cookie or browsers treat it as a
+    # different cookie and keep the original.
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
         path=REFRESH_COOKIE_PATH,
         httponly=True,
         samesite="lax",
@@ -142,6 +154,28 @@ async def refresh(
         raise credential_error
     access_token = await _access_token_for(session, user)
     return Token(access_token=access_token, token_type="bearer")
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(enforce_csrf)],
+)
+async def logout(
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    refresh_jwt: RefreshCookie = None,
+) -> None:
+    """Revoke the refresh session and clear its cookie. Needed server-side
+    because JS cannot delete an httpOnly cookie. Idempotent: a missing or
+    invalid cookie still returns 204 — the goal state is 'logged out'."""
+    if refresh_jwt and (decoded := decode_refresh_token(refresh_jwt)):
+        token_id, user_id = decoded
+        row = await session.get(RefreshToken, token_id)
+        if row is not None and row.user_id == user_id:
+            await session.delete(row)
+            await session.flush()
+    clear_refresh_cookie(response)
 
 
 # --- Sessions (G5) ---

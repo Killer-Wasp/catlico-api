@@ -204,3 +204,38 @@ async def test_login_no_password_user(client: AsyncClient, session):
         json={"email": "oauth@test.com", "password": "anything"},
     )
     assert response.status_code == 401
+
+
+async def test_logout_revokes_session_and_clears_cookie(
+    client: AsyncClient, session, admin_user
+):
+    await _login(client)
+    decoded = decode_refresh_token(client.cookies.get("catlico_refresh"))
+    assert decoded is not None
+    token, _ = decoded
+
+    response = await client.post("/api/v1/auth/logout", headers=CSRF_HEADERS)
+    assert response.status_code == 204
+    set_cookie = response.headers["set-cookie"].lower()
+    assert "catlico_refresh=" in set_cookie
+    assert "max-age=0" in set_cookie or "expires=" in set_cookie
+
+    row = (
+        await session.execute(select(RefreshToken).where(RefreshToken.token == token))
+    ).scalar_one_or_none()
+    assert row is None
+
+    # The clearing Set-Cookie empties the client jar: refresh must now fail.
+    response = await client.post("/api/v1/auth/refresh", headers=CSRF_HEADERS)
+    assert response.status_code == 401
+
+
+async def test_logout_without_cookie_is_idempotent(client: AsyncClient):
+    response = await client.post("/api/v1/auth/logout", headers=CSRF_HEADERS)
+    assert response.status_code == 204
+
+
+async def test_logout_requires_csrf_header(client: AsyncClient, admin_user):
+    await _login(client)
+    response = await client.post("/api/v1/auth/logout")
+    assert response.status_code == 403
