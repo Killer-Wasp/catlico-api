@@ -44,11 +44,25 @@ services:
     volumes:
       - seaweed_data:/data
 
+  # Local mail catcher for the password-reset flow. Traps all outbound SMTP so
+  # reset emails can be inspected in the web UI instead of being delivered to a
+  # real inbox. Nothing leaves the machine.
+  #   SMTP:   localhost:1025  (point the API's SMTP_HOST / SMTP_PORT here)
+  #   Web UI: http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # web UI
+    environment:
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+
   api:
     build: .
     depends_on:
       - db
       - seaweedfs
+      - mailpit
     environment:
       POSTGRES_SERVER: db
       POSTGRES_USER: catlico
@@ -60,6 +74,10 @@ services:
       S3_ENDPOINT_URL: http://seaweedfs:8333
       S3_ACCESS_KEY: catlico
       S3_SECRET_KEY: catlico-secret
+      # Mail -> Mailpit catcher (plain SMTP, no TLS, no auth)
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_USE_TLS: "false"
     ports:
       - "8000:8000"
 

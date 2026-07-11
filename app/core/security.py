@@ -16,6 +16,14 @@ REFRESH_TOKEN_TYPE = "refresh"
 
 pwd_context = PasswordHash((BcryptHasher(),))
 
+# Minimum length for a user-chosen password. Length-only policy (NIST-style):
+# enforced on the backend as the source of truth and mirrored in the UI.
+MIN_PASSWORD_LENGTH = 12
+
+
+def password_meets_policy(password: str) -> bool:
+    return len(password) >= MIN_PASSWORD_LENGTH
+
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
