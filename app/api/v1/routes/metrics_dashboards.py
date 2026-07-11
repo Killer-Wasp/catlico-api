@@ -3,6 +3,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_ as sa_or
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -117,36 +118,124 @@ async def update_case_metrics(
 
 
 # --- Dashboards ---
+#
+# Dashboards are "views" — a saved widget layout. Ownership and sharing reuse
+# the existing columns rather than a migration:
+#   * `created_by`  → owner user id (private dashboards are visible only to them)
+#   * `is_public`   → shared with the whole organisation (read-only for others)
+# Any org member may create their own dashboards; only the owner (or a
+# superadmin) may edit, share or delete one.
 
 dash_router = APIRouter(prefix="/dashboards", tags=["dashboards"])
 
 
+def _owns(dashboard: Dashboard, ctx: ActiveOrgContext) -> bool:
+    return dashboard.created_by == str(ctx.user.id) or ctx.user.is_superadmin
+
+
+def _public(dashboard: Dashboard, ctx: ActiveOrgContext, owner_name: str | None) -> DashboardPublic:
+    return DashboardPublic(
+        id=dashboard.id,
+        name=dashboard.name,
+        description=dashboard.description,
+        layout=dashboard.layout,
+        is_public=dashboard.is_public,
+        organisation_id=dashboard.organisation_id,
+        created_by=dashboard.created_by,
+        is_owner=_owns(dashboard, ctx),
+        owner_name=owner_name,
+        created_at=dashboard.created_at,
+        updated_at=dashboard.updated_at,
+    )
+
+
+async def _load_owned(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db) -> Dashboard:
+    """Fetch a dashboard the caller may mutate (owner or superadmin), or 404/403."""
+    d = await db.get(Dashboard, dashboard_id)
+    if not d or d.organisation_id != ctx.organisation_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if not _owns(d, ctx):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the owner can modify this dashboard")
+    return d
+
+
+async def _owner_names(db, dashboards: list[Dashboard]) -> dict[str, str]:
+    from app.models.user import User
+
+    ids = {d.created_by for d in dashboards if d.created_by}
+    parsed = {i: uuid.UUID(i) for i in ids if _is_uuid(i)}
+    if not parsed:
+        return {}
+    rows = (
+        await db.execute(
+            sa_select(User.id, User.first_name, User.last_name).where(
+                User.id.in_(list(parsed.values()))
+            )
+        )
+    ).all()
+    by_uuid = {uid: f"{fn} {ln}" for uid, fn, ln in rows}
+    return {raw: by_uuid[uid] for raw, uid in parsed.items() if uid in by_uuid}
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
 @dash_router.get("", response_model=list[DashboardPublic])
 async def list_dashboards(ctx: ActiveOrgContext, db=Depends(get_session)):
-    result = await db.execute(select(Dashboard).where(Dashboard.organisation_id == ctx.organisation_id).order_by(Dashboard.name))
-    return [DashboardPublic(**d.__dict__) for d in result.scalars().all()]
+    """The caller's own dashboards plus any shared with their organisation.
+    Own dashboards first, then shared, alphabetical within each."""
+    result = await db.execute(
+        select(Dashboard).where(
+            Dashboard.organisation_id == ctx.organisation_id,
+            sa_or(
+                Dashboard.created_by == str(ctx.user.id),
+                Dashboard.is_public.is_(True),
+            ),
+        )
+    )
+    dashboards = list(result.scalars().all())
+    names = await _owner_names(db, dashboards)
+    dashboards.sort(key=lambda d: (d.created_by != str(ctx.user.id), d.name.lower()))
+    return [_public(d, ctx, names.get(d.created_by)) for d in dashboards]
 
 
 @dash_router.post("", response_model=DashboardPublic, status_code=201)
 async def create_dashboard(body: DashboardCreate, ctx: ActiveOrgContext, db=Depends(get_session)):
-    await _ensure_admin(ctx)
-    d = Dashboard(organisation_id=ctx.organisation_id, name=body.name, description=body.description,
-                  layout=body.layout, is_public=body.is_public, created_by=str(ctx.user.id))
-    db.add(d); await db.flush(); return DashboardPublic(**d.__dict__)
+    """Any org member may create a dashboard; it is owned by (and, by default,
+    private to) the creator."""
+    d = Dashboard(
+        organisation_id=ctx.organisation_id,
+        name=body.name,
+        description=body.description,
+        layout=body.layout,
+        is_public=body.is_public,
+        created_by=str(ctx.user.id),
+    )
+    db.add(d)
+    await db.flush()
+    names = await _owner_names(db, [d])
+    return _public(d, ctx, names.get(d.created_by))
 
 
 @dash_router.patch("/{dashboard_id}", response_model=DashboardPublic)
 async def update_dashboard(dashboard_id: uuid.UUID, body: DashboardUpdate, ctx: ActiveOrgContext, db=Depends(get_session)):
-    await _ensure_admin(ctx)
-    d = await db.get(Dashboard, dashboard_id)
-    if not d or d.organisation_id != ctx.organisation_id: raise HTTPException(404, "Not found")
-    for k, v in body.model_dump(exclude_unset=True).items(): setattr(d, k, v)
-    d.updated_by = str(ctx.user.id); db.add(d); await db.flush(); return DashboardPublic(**d.__dict__)
+    d = await _load_owned(dashboard_id, ctx, db)
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(d, k, v)
+    d.updated_by = str(ctx.user.id)
+    db.add(d)
+    await db.flush()
+    names = await _owner_names(db, [d])
+    return _public(d, ctx, names.get(d.created_by))
 
 
 @dash_router.delete("/{dashboard_id}", status_code=204)
 async def delete_dashboard(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db=Depends(get_session)):
-    await _ensure_admin(ctx)
-    d = await db.get(Dashboard, dashboard_id)
-    if not d or d.organisation_id != ctx.organisation_id: raise HTTPException(404, "Not found")
-    await db.delete(d); await db.flush()
+    d = await _load_owned(dashboard_id, ctx, db)
+    await db.delete(d)
+    await db.flush()

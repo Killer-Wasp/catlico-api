@@ -153,12 +153,17 @@ async def test_dashboard_crud(client: AsyncClient, org_a, analyst_a, analyst_a_t
     assert (await client.delete(f"/api/v1/dashboards/{did}", headers=h)).status_code == 204
 
 
-async def test_dashboard_readonly_forbidden(
+async def test_dashboard_any_member_owns_a_private_view(
     client: AsyncClient, org_a, readonly_a, readonly_a_token
 ):
+    # Dashboards are user-bound views: any org member (even read-only) may create
+    # their own, and it is private to them by default. See test_api_dashboards.py
+    # for the full ownership/sharing rules.
     h = _headers(readonly_a_token, org_a.id)
     r = await client.post("/api/v1/dashboards", json={"name": "x"}, headers=h)
-    assert r.status_code == 403, r.text
+    assert r.status_code == 201, r.text
+    assert r.json()["is_owner"] is True
+    assert r.json()["is_public"] is False
 
 
 async def test_dashboard_cross_org_isolated(

@@ -10,9 +10,16 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
         OAUTH_CASE_ALERT_REF,
         RANSOMWARE_CASE_ALERT_REF,
         data_exfiltration_demo_tasks,
+        demo_admin_dashboard,
         demo_alert_tags,
         demo_alert_specs,
+        demo_dashboards,
+        demo_extra_analysts,
         demo_knowledge_base_pages,
+        demo_new_open_cases,
+        demo_recent_alerts,
+        demo_resolved_cases,
+        demo_sla_policies,
         oauth_demo_tasks,
         ransomware_demo_tasks,
     )
@@ -25,11 +32,14 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
     from app.crud import organisation as org_crud
     from app.crud import organisation_member as member_crud
     from app.crud import role as role_crud
+    from app.crud import sla as sla_crud
     from app.crud import tag as tag_crud
     from app.crud import task as task_crud
     from app.crud.user import create_user, get_user_by_email
-    from app.models.case_ import Case, CaseCreate
+    from app.models.case_ import Case, CaseCreate, CaseStatus
     from app.models.comment import CommentCreate, CommentEntityType
+    from app.models.dashboard import Dashboard
+    from app.models.user import User
     from app.models.custom_field import (
         CustomFieldCreate,
         CustomFieldEntityType,
@@ -616,5 +626,228 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
 
     for task_in, status in data_exfiltration_demo_tasks(now, analyst.id):
         await ensure_demo_task(dx_title, task_in, status)
+
+    # --- Dashboard seed data ------------------------------------------------
+    # Everything below exists to make the SOC Overview dashboard look alive on a
+    # fresh DB. All of it is idempotent (upserts / title + dedup guards), so it
+    # also back-fills onto an already-seeded database on the next startup.
+
+    # SLA policies — lets the dashboard compute breaches for overdue open cases.
+    for policy_in in demo_sla_policies():
+        await sla_crud.upsert_policy(
+            session, policy_in, organisation_id=org.id, created_by=actor
+        )
+
+    # A small analyst team so the workload panel isn't a single name.
+    extra_analysts = []
+    for email, first, last in demo_extra_analysts():
+        member_user = await get_user_by_email(session, email)
+        if member_user is None:
+            member_user = await create_user(
+                session,
+                UserCreate(
+                    email=email,
+                    password="changeme",
+                    first_name=first,
+                    last_name=last,
+                ),
+            )
+        if await member_crud.get_member(session, member_user.id, org.id) is None:
+            await member_crud.add_member(
+                session,
+                org.id,
+                OrganisationMemberCreate(
+                    user_id=member_user.id, role_id=admin_role.id
+                ),
+                created_by=actor,
+            )
+        extra_analysts.append(member_user)
+
+    # A full 24h of freshly-dated alerts across every feed (ingestion chart,
+    # new-alerts KPI, severity donut, source breakdown). Added to alerts_by_ref
+    # so `link_alert_to_case` can promote them below.
+    recent_specs, recent_tags = demo_recent_alerts(now)
+    for alert_in in recent_specs:
+        recent_alert, _created = await alert_crud.ingest_alert(
+            session, alert_in, organisation_id=org.id, created_by=actor
+        )
+        alerts_by_ref[alert_in.source_ref] = recent_alert
+        await tag_crud.set_tags(
+            session,
+            TaggableType.alert,
+            str(recent_alert.id),
+            recent_tags.get(alert_in.source_ref, []),
+        )
+
+    # Historical resolved cases — case-trend line, MTTR, resolution donut.
+    for spec in demo_resolved_cases():
+        if (
+            await session.execute(
+                select(Case.id).where(Case.title == spec.title).limit(1)
+            )
+        ).scalar_one_or_none() is not None:
+            continue
+        created_at = now - timedelta(days=spec.created_days_ago)
+        resolved_at = now - timedelta(days=spec.resolved_days_ago)
+        resolved_case = await case_crud.create_case(
+            session,
+            CaseCreate(
+                title=spec.title,
+                description=spec.description,
+                severity=spec.severity,
+                tlp=2,
+                pap=2,
+                assignee_id=analyst.id,
+                start_date=created_at,
+                summary="Closed — see resolution disposition.",
+            ),
+            owner_org_id=org.id,
+            owner_role_id=admin_role.id,
+            created_by=str(analyst.id),
+        )
+        # Backdate creation and stamp the resolve so the trend/MTTR windows see
+        # it. `updated_at` is the resolve-time proxy the dashboard reads.
+        resolved_case.created_at = created_at.replace(tzinfo=None)
+        resolved_case.status = CaseStatus.resolved
+        resolved_case.resolution_status = spec.resolution
+        resolved_case.end_date = resolved_at
+        resolved_case.updated_at = resolved_at.replace(tzinfo=None)
+        resolved_case.updated_by = str(analyst.id)
+        session.add(resolved_case)
+        await session.flush()
+        await tag_crud.set_tags(
+            session, TaggableType.case, str(resolved_case.id), spec.tags
+        )
+        for obs_type, obs_data, obs_ioc in spec.observables:
+            await obs_crud.create_case_observable(
+                session,
+                ObservableCreate(
+                    observable_type=obs_type,
+                    data=obs_data,
+                    message="Recorded during investigation",
+                    tlp=2,
+                    ioc=obs_ioc,
+                    sighted=True,
+                ),
+                case_id=resolved_case.id,
+                organisation_id=org.id,
+                created_by=str(analyst.id),
+            )
+
+    # Unassigned open cases — the dashboard's "New" pipeline bucket; the old
+    # high-severity one also trips an SLA breach. Their open tasks give the
+    # extra analysts a workload.
+    for index, spec in enumerate(demo_new_open_cases()):
+        if (
+            await session.execute(
+                select(Case.id).where(Case.title == spec.title).limit(1)
+            )
+        ).scalar_one_or_none() is not None:
+            continue
+        created_at = now - timedelta(days=spec.created_days_ago)
+        open_case = await case_crud.create_case(
+            session,
+            CaseCreate(
+                title=spec.title,
+                description=spec.description,
+                severity=spec.severity,
+                tlp=2,
+                pap=2,
+                assignee_id=None,
+                start_date=created_at,
+            ),
+            owner_org_id=org.id,
+            owner_role_id=admin_role.id,
+            created_by=str(analyst.id),
+        )
+        open_case.created_at = created_at.replace(tzinfo=None)
+        session.add(open_case)
+        await session.flush()
+        await tag_crud.set_tags(
+            session, TaggableType.case, str(open_case.id), spec.tags
+        )
+        if spec.linked_recent_ref:
+            await link_alert_to_case(spec.linked_recent_ref, open_case.id)
+
+        owner = (
+            extra_analysts[index % len(extra_analysts)]
+            if extra_analysts
+            else analyst
+        )
+        open_tasks = [
+            (
+                TaskCreate(
+                    title="Assess blast radius and pick up ownership",
+                    group="Identify",
+                    description=spec.title,
+                    assignee_id=owner.id,
+                    order=1,
+                ),
+                TaskStatus.in_progress,
+            ),
+            (
+                TaskCreate(
+                    title="Contain and document initial findings",
+                    group="Contain",
+                    description=spec.title,
+                    assignee_id=owner.id,
+                    order=2,
+                ),
+                TaskStatus.waiting,
+            ),
+        ]
+        for task_in, status in open_tasks:
+            task = await task_crud.create_task(
+                session,
+                task_in,
+                case_id=open_case.id,
+                organisation_id=org.id,
+                created_by=str(analyst.id),
+            )
+            if status != TaskStatus.waiting:
+                await task_crud.update_task(
+                    session,
+                    task,
+                    TaskUpdate(status=status),
+                    updated_by=str(analyst.id),
+                )
+
+    # Ready-made dashboard "views" (see components/Dashboards). Idempotent by
+    # (org, name). Owned by the analyst; the two shared ones surface for every
+    # member, the private ones only for their owner.
+    async def ensure_dashboard(spec, owner_id) -> None:
+        existing = (
+            await session.execute(
+                select(Dashboard.id).where(
+                    Dashboard.organisation_id == org.id,
+                    Dashboard.name == spec.name,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
+        session.add(
+            Dashboard(
+                organisation_id=org.id,
+                name=spec.name,
+                description=spec.description,
+                layout={"widgets": spec.widgets},
+                is_public=spec.shared,
+                created_by=str(owner_id),
+            )
+        )
+
+    for spec in demo_dashboards():
+        await ensure_dashboard(spec, analyst.id)
+
+    # A private board for the local superadmin (the default admin login), so it
+    # too has a personal view — distinct from the analyst's private one.
+    superadmin = (
+        await session.execute(
+            select(User).where(User.is_superadmin.is_(True)).limit(1)
+        )
+    ).scalar_one_or_none()
+    if superadmin is not None and superadmin.id != analyst.id:
+        await ensure_dashboard(demo_admin_dashboard(), superadmin.id)
 
     await session.commit()

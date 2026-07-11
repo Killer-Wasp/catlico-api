@@ -39,7 +39,15 @@ class DashboardPublic(SQLModel):
     name: str
     description: str
     layout: dict
+    #: True when the dashboard is shared with the whole organisation; otherwise
+    #: it is private to its owner (`created_by`).
     is_public: bool
     organisation_id: str
+    #: Owner user id (the creator). Private dashboards are visible only to them.
+    created_by: str
+    #: Whether the requesting user owns this dashboard (may edit/share/delete).
+    is_owner: bool = False
+    #: Owner's display name, for the "shared by" hint on org dashboards.
+    owner_name: str | None = None
     created_at: datetime
     updated_at: datetime | None
