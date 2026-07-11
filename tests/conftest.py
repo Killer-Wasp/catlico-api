@@ -81,12 +81,11 @@ from app.core.db import get_session, run_migrations  # noqa: E402
 from app.core.security import TokenPayload, create_access_token  # noqa: E402
 from app.crud.organisation import create_organisation  # noqa: E402
 from app.crud.organisation_member import add_member  # noqa: E402
-from app.crud.role import upsert_builtin_role  # noqa: E402
+from app.crud.role import seed_org_builtin_roles  # noqa: E402
 from app.crud.user import create_user  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.organisation import OrganisationCreate  # noqa: E402
 from app.models.organisation_member import OrganisationMemberCreate  # noqa: E402
-from app.models.role import BUILTIN_ROLES  # noqa: E402
 from app.models.user import UserCreate  # noqa: E402
 
 # Build the schema once via the real migrations, then capture the table list used
@@ -240,12 +239,16 @@ def viewer_token(viewer_user):
 
 
 @pytest.fixture
-async def builtin_roles(session):
-    """Seed built-in roles (org-admin, analyst, read-only)."""
-    roles = {}
-    for name, perms in BUILTIN_ROLES.items():
-        roles[name] = await upsert_builtin_role(session, name, perms, created_by="system")
-    return roles
+async def builtin_roles(session, org_a):
+    """org-a's built-in roles (org-admin, analyst, read-only). Roles are org-scoped
+    and already seeded by create_organisation; this returns them by name."""
+    return await seed_org_builtin_roles(session, org_a.id)
+
+
+@pytest.fixture
+async def builtin_roles_b(session, org_b):
+    """org-b's built-in roles, for cross-org tests."""
+    return await seed_org_builtin_roles(session, org_b.id)
 
 
 @pytest.fixture
@@ -301,7 +304,7 @@ def analyst_a_token(analyst_a, org_a):
 
 
 @pytest.fixture
-async def analyst_b(session, org_b, builtin_roles, admin_user):
+async def analyst_b(session, org_b, builtin_roles_b, admin_user):
     user = await create_user(
         session,
         UserCreate(first_name="Test", last_name="User", email="analyst-b@test.com", password="password123"),
@@ -309,7 +312,7 @@ async def analyst_b(session, org_b, builtin_roles, admin_user):
     await add_member(
         session,
         org_b.id,
-        OrganisationMemberCreate(user_id=user.id, role_id=builtin_roles["org-admin"].id),
+        OrganisationMemberCreate(user_id=user.id, role_id=builtin_roles_b["org-admin"].id),
         created_by=str(admin_user.id),
     )
     return user

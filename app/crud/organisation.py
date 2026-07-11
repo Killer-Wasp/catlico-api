@@ -20,6 +20,8 @@ async def get_organisations(
 async def create_organisation(
     session: AsyncSession, org_in: OrganisationCreate, created_by: str
 ) -> Organisation:
+    from app.crud.role import seed_org_builtin_roles
+
     org = Organisation(
         id=org_in.id,
         name=org_in.name,
@@ -29,6 +31,8 @@ async def create_organisation(
     session.add(org)
     await session.commit()
     await session.refresh(org)
+    # Every org owns its own copy of the built-in roles (org-admin/analyst/read-only).
+    await seed_org_builtin_roles(session, org.id, created_by)
     return org
 
 

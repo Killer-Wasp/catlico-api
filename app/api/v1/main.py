@@ -20,6 +20,7 @@ from app.api.v1.routes import (
     organisations,
     overview,
     patterns,
+    permissions,
     plugin_results,
     plugin_runners,
     plugins,
@@ -41,6 +42,7 @@ api_router.include_router(users.router)
 api_router.include_router(organisations.router)
 api_router.include_router(overview.router)
 api_router.include_router(roles.router)
+api_router.include_router(permissions.router)
 api_router.include_router(tags.router)
 api_router.include_router(cases.router)
 api_router.include_router(tasks.router)

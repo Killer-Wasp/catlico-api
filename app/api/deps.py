@@ -17,7 +17,12 @@ from app.crud.user import get_user_by_id
 from app.models.case_ import Case, CaseStatus
 from app.models.case_share import CaseShare
 from app.models.plugin_runner import PluginRun, PluginRunner as PluginRunnerModel, PluginVersion
-from app.models.role import Permission, RolePermission
+from app.models.role import (
+    ALL_CAPABILITIES,
+    ALL_GROUPS,
+    RolePermission,
+    expand_permissions,
+)
 from app.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -93,13 +98,13 @@ async def _resolve_org_permissions(
     """The permissions a user holds in an org. Superadmins get everything; everyone
     else must be a member (checked against the token's org claim)."""
     if user.is_superadmin:
-        return {p.value for p in Permission}
+        return set(ALL_CAPABILITIES)
     if organisation_id not in payload.organisations:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not a member of this organisation",
         )
-    return await get_member_permissions(session, user.id, organisation_id)
+    return expand_permissions(await get_member_permissions(session, user.id, organisation_id))
 
 
 async def get_org_context(
@@ -112,8 +117,50 @@ async def get_org_context(
     return AuthContext(user=user, organisation_id=organisation_id, permissions=permissions)
 
 
+def assert_permissions_grantable(requested: set[str], granter_groups: set[str]) -> None:
+    """A grant (role permissions, API-key scopes) may only contain known group
+    permissions the granter itself holds. Blocks minting a credential or role more
+    powerful than the caller."""
+    requested = set(requested)
+    unknown = requested - set(ALL_GROUPS)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown permissions: {sorted(unknown)}",
+        )
+    excess = requested - granter_groups
+    if excess:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot grant permissions you do not hold: {sorted(excess)}",
+        )
+
+
+async def get_granter_groups(session: AsyncSession, ctx: "AuthContext") -> set[str]:
+    """The raw (un-expanded) group permissions the caller holds, for bounding grants.
+    Superadmins hold every group."""
+    if ctx.user.is_superadmin:
+        return set(ALL_GROUPS)
+    return set(await get_member_permissions(session, ctx.user.id, ctx.organisation_id))
+
+
 def require_permission(permission: str):
     async def _dep(ctx: Annotated[AuthContext, Depends(get_org_context)]) -> AuthContext:
+        if permission not in ctx.permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing permission: {permission}",
+            )
+        return ctx
+
+    return Depends(_dep)
+
+
+def require_active_permission(permission: str):
+    """Like ``require_permission`` but resolves the org from the X-Organisation-Id
+    header (for routes whose resource isn't under /organisations/{id})."""
+
+    async def _dep(ctx: Annotated["AuthContext", Depends(get_active_org_context)]) -> "AuthContext":
         if permission not in ctx.permissions:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -183,7 +230,7 @@ async def _try_api_key_auth(
     return AuthContext(
         user=api_user,
         organisation_id=key.organisation_id,
-        permissions=set(key.scopes),
+        permissions=expand_permissions(key.scopes),
     )
 
 
@@ -219,14 +266,14 @@ async def _get_auth_context(
         return AuthContext(
             user=user,
             organisation_id=x_organisation_id,
-            permissions={p.value for p in Permission},
+            permissions=set(ALL_CAPABILITIES),
         )
     if x_organisation_id not in payload.organisations:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not a member of this organisation",
         )
-    perms = await get_member_permissions(session, user.id, x_organisation_id)
+    perms = expand_permissions(await get_member_permissions(session, user.id, x_organisation_id))
     return AuthContext(user=user, organisation_id=x_organisation_id, permissions=perms)
 
 
@@ -275,7 +322,7 @@ async def _resolve_case_context(
     pinned = await session.execute(
         select(RolePermission.permission).where(RolePermission.role_id == share.role_id)
     )
-    pinned_perms = set(pinned.scalars().all())
+    pinned_perms = expand_permissions(pinned.scalars().all())
     effective = ctx.permissions & pinned_perms
 
     return CaseAuthContext(

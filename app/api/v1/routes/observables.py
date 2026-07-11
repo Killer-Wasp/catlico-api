@@ -21,7 +21,7 @@ from app.models.observable import (
     ObservableShare,
     ObservableUpdate,
 )
-from app.models.role import RolePermission
+from app.models.role import RolePermission, expand_permissions
 from app.models.tag import TaggableType, TagSetRequest
 
 router = APIRouter(prefix="/observables", tags=["observables"])
@@ -66,7 +66,7 @@ async def _resolve_observable_visibility(
     pinned = await session.execute(
         select(RolePermission.permission).where(RolePermission.role_id == share.role_id)
     )
-    effective = ctx.permissions & set(pinned.scalars().all())
+    effective = ctx.permissions & expand_permissions(pinned.scalars().all())
     return obs, share.is_owner, effective
 
 

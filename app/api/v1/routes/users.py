@@ -5,7 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext, CurrentUser, SuperAdminUser
+from app.api.deps import (
+    ActiveOrgContext,
+    CurrentUser,
+    SuperAdminUser,
+    get_granter_groups,
+)
 from app.api.v1.routes._files import ingest_upload
 from app.core.db import get_session
 from app.core.security import (
@@ -35,6 +40,24 @@ def _ensure_password_policy(password: str | None) -> None:
 @router.get("/me", response_model=UserPublic)
 async def read_current_user(current_user: CurrentUser) -> UserPublic:
     return current_user
+
+
+@router.get("/me/permissions")
+async def read_current_permissions(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """The caller's permissions in the active org, for client-side gating.
+    ``permissions`` is the effective fine-grained set (for hiding actions);
+    ``groups`` is the raw grantable groups the caller holds (bounds the API-key
+    scope picker and role editor). Enforcement is still server-side on every
+    route — this only hides UI."""
+    return {
+        "is_superadmin": ctx.user.is_superadmin,
+        "organisation_id": ctx.organisation_id,
+        "permissions": sorted(ctx.permissions),
+        "groups": sorted(await get_granter_groups(session, ctx)),
+    }
 
 
 @router.patch("/me", response_model=UserPublic)

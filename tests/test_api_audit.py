@@ -7,18 +7,18 @@ def _auth(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _make_role(client, token, name):
+async def _make_role(client, token, name, org_id):
     r = await client.post(
         "/api/v1/roles/",
-        json={"name": name, "permissions": ["read:case"]},
-        headers=_auth(token),
+        json={"name": name, "permissions": ["read:investigation"]},
+        headers={**_auth(token), "X-Organisation-Id": org_id},
     )
     assert r.status_code == 201, r.text
 
 
-async def test_list_audit_after_action(client: AsyncClient, admin_token):
+async def test_list_audit_after_action(client: AsyncClient, admin_token, org_a):
     # Creating a role writes an audit row (action="create", object_type="role").
-    await _make_role(client, admin_token, "audited")
+    await _make_role(client, admin_token, "audited", org_a.id)
 
     r = await client.get("/api/v1/audit/", headers=_auth(admin_token))
     assert r.status_code == 200, r.text
@@ -30,8 +30,8 @@ async def test_list_audit_after_action(client: AsyncClient, admin_token):
     )
 
 
-async def test_filter_by_object_type(client: AsyncClient, admin_token):
-    await _make_role(client, admin_token, "filtered")
+async def test_filter_by_object_type(client: AsyncClient, admin_token, org_a):
+    await _make_role(client, admin_token, "filtered", org_a.id)
 
     r = await client.get(
         "/api/v1/audit/",

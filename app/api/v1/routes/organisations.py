@@ -4,7 +4,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import OrgContext, SuperAdminUser, require_permission
+from app.api.deps import (
+    OrgContext,
+    SuperAdminUser,
+    assert_permissions_grantable,
+    get_granter_groups,
+    require_permission,
+)
 from app.core.db import get_session
 from app.crud import organisation as org_crud
 from app.crud import organisation_link as link_crud
@@ -190,8 +196,12 @@ async def add_member(
             detail="User is already a member of this organisation",
         )
     role = await role_crud.get_role(session, member_in.role_id)
-    if not role:
+    if not role or role.organisation_id != ctx.organisation_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    assert_permissions_grantable(
+        set(await role_crud.get_role_permissions(session, role.id)),
+        await get_granter_groups(session, ctx),
+    )
     member = await member_crud.add_member(
         session,
         ctx.organisation_id,
@@ -224,8 +234,12 @@ async def update_member(
     if not member:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
     role = await role_crud.get_role(session, member_in.role_id)
-    if not role:
+    if not role or role.organisation_id != ctx.organisation_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+    assert_permissions_grantable(
+        set(await role_crud.get_role_permissions(session, role.id)),
+        await get_granter_groups(session, ctx),
+    )
     member = await member_crud.update_member(
         session, member, member_in, updated_by=str(ctx.user.id)
     )

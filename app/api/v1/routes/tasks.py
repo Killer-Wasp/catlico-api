@@ -15,7 +15,7 @@ from app.models.case_ import Case
 from app.models.common import Page
 from app.models.flag import FlagEntityType
 from app.models.log import LogCreate, LogPublic
-from app.models.role import RolePermission
+from app.models.role import RolePermission, expand_permissions
 from app.models.task import (
     TASK_STATUS_TRANSITIONS,
     Task,
@@ -89,7 +89,7 @@ async def _resolve_task_visibility(
             RolePermission.role_id == share.role_id
         )
     )
-    effective = ctx.permissions & set(pinned.scalars().all())
+    effective = ctx.permissions & expand_permissions(pinned.scalars().all())
     return task, share.is_owner, effective
 
 

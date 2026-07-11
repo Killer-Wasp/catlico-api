@@ -1,90 +1,105 @@
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 from enum import Enum
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from app.models.common import TimestampMixin
 
 
 class Permission(str, Enum):
-    read_case = "read:case"
-    write_case = "write:case"
-    read_task = "read:task"
-    write_task = "write:task"
-    read_observable = "read:observable"
-    write_observable = "write:observable"
-    read_alert = "read:alert"
-    write_alert = "write:alert"
-    read_user = "read:user"
-    write_user = "write:user"
-    read_organisation = "read:organisation"
-    write_organisation = "write:organisation"
-    read_role = "read:role"
-    write_role = "write:role"
-    # Plugin management + manual plugin-run authorization reuses these strings
-    # (legacy connector-era names kept as the plugin system's permission surface).
-    read_connector = "read:connector"
-    write_connector = "write:connector"
+    """The *grant* vocabulary — the coarse, domain-grouped permissions that roles and
+    API keys are granted and that admins pick in the UI. Route guards still check the
+    fine-grained capability strings in ``PERMISSION_GROUPS`` below; a granted group is
+    expanded to those capabilities when an ``AuthContext`` is built (see
+    ``expand_permissions``). Keeping enforcement fine-grained while grants stay coarse
+    means adding a new route doesn't require a new grantable permission."""
+
+    read_investigation = "read:investigation"
+    write_investigation = "write:investigation"
+    read_intel = "read:intel"
+    write_intel = "write:intel"
     run_enrichment = "run:enrichment"
-    read_custom_field = "read:custom_field"
-    write_custom_field = "write:custom_field"
-    read_knowledge_base = "read:knowledge_base"
-    write_knowledge_base = "write:knowledge_base"
-    read_function = "read:function"
-    write_function = "write:function"
     run_function = "run:function"
+    read_org = "read:org"
+    write_org = "write:org"
+    read_access = "read:access"
+    write_access = "write:access"
 
 
-ORG_PERMISSIONS = {
-    Permission.read_case, Permission.write_case,
-    Permission.read_task, Permission.write_task,
-    Permission.read_observable, Permission.write_observable,
-    Permission.read_alert, Permission.write_alert,
-    Permission.read_user, Permission.write_user,
-    Permission.read_organisation, Permission.write_organisation,
-    Permission.read_role, Permission.write_role,
-    Permission.read_connector, Permission.write_connector,
-    Permission.run_enrichment,
-    Permission.read_custom_field, Permission.write_custom_field,
-    Permission.read_knowledge_base, Permission.write_knowledge_base,
-    Permission.read_function, Permission.write_function, Permission.run_function,
+# Each grantable group expands to the fine-grained capability strings that route
+# guards (`require_permission`, `require_case_permission`, ...) actually check. Any
+# string not a key here passes through ``expand_permissions`` unchanged, so a raw
+# capability or a plugin-only permission (e.g. "write:plugin_result") still works.
+PERMISSION_GROUPS: dict[str, set[str]] = {
+    Permission.read_investigation.value: {
+        "read:case", "read:task", "read:observable", "read:alert",
+    },
+    Permission.write_investigation.value: {
+        "write:case", "write:task", "write:observable", "write:alert",
+    },
+    Permission.read_intel.value: {
+        "read:custom_field", "read:knowledge_base", "read:function",
+    },
+    Permission.write_intel.value: {
+        "write:custom_field", "write:knowledge_base", "write:function",
+    },
+    Permission.run_enrichment.value: {"run:enrichment"},
+    Permission.run_function.value: {"run:function"},
+    Permission.read_org.value: {"read:organisation", "read:connector"},
+    Permission.write_org.value: {"write:organisation", "write:connector"},
+    Permission.read_access.value: {"read:user", "read:role"},
+    Permission.write_access.value: {"write:user", "write:role"},
 }
 
+#: Every group value — the full grant surface (what a superadmin holds).
+ALL_GROUPS: frozenset[str] = frozenset(p.value for p in Permission)
+
+#: Every fine-grained capability any route guard may check (union of the groups).
+ALL_CAPABILITIES: frozenset[str] = frozenset().union(*PERMISSION_GROUPS.values())
+
+
+def expand_permissions(granted: Iterable[str]) -> set[str]:
+    """Expand granted group permissions into the fine-grained capabilities route
+    guards check. Unknown strings pass through unchanged."""
+    out: set[str] = set()
+    for perm in granted:
+        out |= PERMISSION_GROUPS.get(perm, {perm})
+    return out
+
+
+ORG_PERMISSIONS: set[Permission] = set(Permission)
+
 BUILTIN_ROLES: dict[str, set[Permission]] = {
-    "org-admin": ORG_PERMISSIONS,
+    "org-admin": set(Permission),
     "analyst": {
-        Permission.read_case, Permission.write_case,
-        Permission.read_task, Permission.write_task,
-        Permission.read_observable, Permission.write_observable,
-        Permission.read_alert, Permission.write_alert,
-        Permission.read_user,
-        Permission.read_organisation,
-        Permission.read_connector, Permission.run_enrichment,
-        Permission.read_custom_field,
-        Permission.read_knowledge_base, Permission.write_knowledge_base,
-        Permission.read_function, Permission.run_function,
+        Permission.read_investigation, Permission.write_investigation,
+        Permission.read_intel,
+        Permission.run_enrichment, Permission.run_function,
+        Permission.read_org,
+        Permission.read_access,
     },
     "read-only": {
-        Permission.read_case,
-        Permission.read_task,
-        Permission.read_observable,
-        Permission.read_alert,
-        Permission.read_user,
-        Permission.read_organisation,
-        Permission.read_connector,
-        Permission.read_custom_field,
-        Permission.read_knowledge_base,
-        Permission.read_function,
+        Permission.read_investigation,
+        Permission.read_intel,
+        Permission.read_org,
+        Permission.read_access,
     },
 }
 
 
 class Role(TimestampMixin, table=True):
     __tablename__ = "role"
+    __table_args__ = (UniqueConstraint("organisation_id", "name", name="uq_role_org_name"),)
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    name: str = Field(unique=True, index=True)
+    #: Roles are org-scoped: each organisation owns its own copy of the built-in
+    #: roles (and any custom ones), so an admin editing a role never affects
+    #: another org. Name is unique per organisation, not globally.
+    organisation_id: str = Field(foreign_key="organisation.id", index=True, ondelete="CASCADE")
+    name: str = Field(index=True)
 
 
 class RolePermission(SQLModel, table=True):
@@ -101,6 +116,7 @@ class RoleCreate(SQLModel):
 
 class RolePublic(SQLModel):
     id: uuid.UUID
+    organisation_id: str
     name: str
     permissions: list[str]
     created_at: datetime

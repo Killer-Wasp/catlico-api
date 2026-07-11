@@ -162,7 +162,7 @@ async def create_case(
     require_perm(ctx, "write:case")
     if case_in.assignee_id:
         await assert_assignee_in_org(session, case_in.assignee_id, ctx.organisation_id)
-    owner_role = await role_crud.get_role_by_name(session, OWNER_ROLE_NAME)
+    owner_role = await role_crud.get_role_by_name(session, OWNER_ROLE_NAME, ctx.organisation_id)
     if not owner_role:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -230,7 +230,7 @@ async def merge_cases(
     require_perm(ctx, "write:case")
     if req.case.assignee_id:
         await assert_assignee_in_org(session, req.case.assignee_id, ctx.organisation_id)
-    owner_role = await role_crud.get_role_by_name(session, OWNER_ROLE_NAME)
+    owner_role = await role_crud.get_role_by_name(session, OWNER_ROLE_NAME, ctx.organisation_id)
     if not owner_role:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

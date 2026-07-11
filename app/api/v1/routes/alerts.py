@@ -285,7 +285,9 @@ async def promote_alert(
             detail="Assignee must be a member of the owner organisation",
         )
 
-    owner_role = await role_crud.get_role_by_name(session, _OWNER_ROLE_NAME)
+    owner_role = await role_crud.get_role_by_name(
+        session, _OWNER_ROLE_NAME, alert.organisation_id
+    )
     if not owner_role:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -460,7 +462,9 @@ async def merge_alerts(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Assignee must be a member of the owner organisation",
             )
-        owner_role = await role_crud.get_role_by_name(session, _OWNER_ROLE_NAME)
+        owner_role = await role_crud.get_role_by_name(
+            session, _OWNER_ROLE_NAME, ctx.organisation_id
+        )
         if not owner_role:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

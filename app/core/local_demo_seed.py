@@ -78,7 +78,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
             ),
         )
 
-    admin_role = await role_crud.get_role_by_name(session, "org-admin")
+    admin_role = await role_crud.get_role_by_name(session, "org-admin", org.id)
     if admin_role is None:
         raise RuntimeError("Built-in org-admin role must exist before demo seeding")
 

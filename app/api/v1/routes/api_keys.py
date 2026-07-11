@@ -4,7 +4,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgContext
+from app.api.deps import (
+    ActiveOrgContext,
+    assert_permissions_grantable,
+    get_granter_groups,
+)
 from app.core.db import get_session
 from app.crud import api_key as api_key_crud
 from app.models.api_key import ApiKeyCreate, ApiKeyCreated, ApiKeyPublic, ApiKeyUpdate
@@ -51,6 +55,9 @@ async def create_api_key(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ApiKeyCreated:
     _ensure_org_admin(ctx)
+    assert_permissions_grantable(
+        set(key_in.scopes), await get_granter_groups(session, ctx)
+    )
     key, plaintext = await api_key_crud.create_key(
         session,
         key_in,
@@ -83,6 +90,10 @@ async def update_api_key(
     if not key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="API key not found"
+        )
+    if key_in.scopes is not None:
+        assert_permissions_grantable(
+            set(key_in.scopes), await get_granter_groups(session, ctx)
         )
     key = await api_key_crud.update_key(
         session, key, key_in, updated_by=str(ctx.user.id)

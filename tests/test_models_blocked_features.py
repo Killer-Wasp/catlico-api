@@ -530,44 +530,49 @@ async def test_function_run_cascade_delete(session, org):
 
 # ── permission backfill (from migrations 4 & 5) ──────────────────────────────
 
-async def test_knowledge_base_permissions_present(session, org):
-    """init_db seeds roles + backfilled knowledge_base permissions."""
-    for perm in ("read:knowledge_base", "write:knowledge_base"):
+async def test_intel_permissions_present(session, org):
+    """init_db seeds roles carrying the intel group (custom fields, knowledge base
+    and function definitions all fold into read/write:intel)."""
+    for perm in ("read:intel", "write:intel"):
         result = await session.execute(
             text(f"SELECT 1 FROM role_permission WHERE permission = '{perm}'")
         )
         assert result.all(), f"Missing {perm}"
 
 
-async def test_function_permissions_present(session, org):
-    """init_db seeds roles + backfilled function permissions."""
-    for perm in ("read:function", "run:function", "write:function"):
-        result = await session.execute(
-            text(f"SELECT 1 FROM role_permission WHERE permission = '{perm}'")
-        )
-        assert result.all(), f"Missing {perm}"
+async def test_function_run_permission_present(session, org):
+    """Function execution keeps its own run:function group."""
+    result = await session.execute(
+        text("SELECT 1 FROM role_permission WHERE permission = 'run:function'")
+    )
+    assert result.all(), "Missing run:function"
 
 
 # ── role permission backfill ─────────────────────────────────────────────────
 
-async def test_upsert_builtin_role_backfills_new_permissions(session):
+async def test_upsert_builtin_role_backfills_new_permissions(session, org):
     """When a built-in role exists but is missing a newly added permission,
     upsert_builtin_role adds the missing permission without touching existing ones."""
     from app.models.role import Role, RolePermission, Permission
     from app.crud.role import upsert_builtin_role
 
     # Create a minimal role manually (simulating an old role)
-    role = Role(name="test-custom", created_by="system")
+    role = Role(name="test-custom", organisation_id=org, created_by="system")
     session.add(role)
     await session.flush()
-    session.add(RolePermission(role_id=role.id, permission="read:case"))
+    session.add(RolePermission(role_id=role.id, permission="read:investigation"))
     await session.commit()
 
     # Now "upsert" with a larger permission set
     await upsert_builtin_role(
         session,
         "test-custom",
-        {Permission.read_case, Permission.write_case, Permission.read_alert},
+        {
+            Permission.read_investigation,
+            Permission.write_investigation,
+            Permission.read_intel,
+        },
+        org,
         created_by="system",
     )
 
@@ -575,6 +580,6 @@ async def test_upsert_builtin_role_backfills_new_permissions(session):
         text(f"SELECT permission FROM role_permission WHERE role_id = '{role.id}'")
     )
     perm_set = {row[0] for row in perms}
-    assert "read:case" in perm_set  # original preserved
-    assert "write:case" in perm_set  # newly backfilled
-    assert "read:alert" in perm_set  # newly backfilled
+    assert "read:investigation" in perm_set  # original preserved
+    assert "write:investigation" in perm_set  # newly backfilled
+    assert "read:intel" in perm_set  # newly backfilled
