@@ -6,13 +6,19 @@ See `app/crud/audit.py`, `app/models/audit.py`, `app/core/context.py`, migration
 tests `tests/test_crud_audit.py` + `tests/test_api_activity.py`. Remaining wiring (cascade child
 rows, real consumers, global audit search) is listed under *Deferred seams*.
 
+> **Current state (2026-07):** the "empty consumer registry" below describes v1 as designed.
+> Four consumers are now registered at startup (notification feed, notifier delivery, WebSocket
+> broadcast, plugin event dispatch) — see `app/main.py` and `docs/architecture.md`. The rest of
+> this plan's mechanics (same-transaction write, post-commit drain, `attempts`, delivered
+> marking) are still accurate.
+
 Implementation note discovered during the build: `Case.__tablename__` is `case_` (escaping the SQL
 keyword), but the polymorphic type string is normalised to `case` (trailing underscore stripped) so
 it matches the `Comment`/`Flag`/`Tag` entity-type convention and the `context` values children pass.
 
-Makes the convention in [CLAUDE.md](../CLAUDE.md) ("audit + outbox rows are written in the same
+Makes the convention in [`AGENTS.md`](../AGENTS.md) ("audit + outbox rows are written in the same
 transaction as the mutation") real. Source of truth for the data
-model is `docs/thehive4/thehive4-parity-spec.md` (§ Audit), but this plan diverges from the spec's
+model is the TheHive4 parity spec (§ Audit, reference material kept outside this repo), but this plan diverges from the spec's
 Postgres-flavored DDL where the catlico codebase has its own conventions — those divergences are
 called out inline.
 

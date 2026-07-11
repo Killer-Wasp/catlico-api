@@ -8,13 +8,13 @@
 - Flag uncertainty explicitly. If unsure, ask before proceeding. When useful, conduct a small, localized, low-risk experiment, then bring the hypothesis and results back for discussion. Confidence without certainty causes more damage than admitting a gap.
 - Suggest better approaches when they would improve the work, especially when they have a longer-lasting impact than a tactical change.
 
-A security incident case management tool. `docs/thehive4/` contains reference material from TheHive4/Cortex and TheHive 5. Use it to understand the problem domain and upstream design trade-offs, not as a spec to clone or reverse-engineer.
+A security incident case management tool. The domain design was informed by reference material on TheHive4/Cortex and TheHive 5; those docs were **moved out of this repository** before open-sourcing (commit `d6e4468`) and are kept privately. Never (re)introduce links to `docs/thehive4/` or `docs/superpowers/` in a published doc — both paths are also gitignored as a guard.
 
 ## What this is
 
 Catlico tracks security incidents as **Cases**. Inside cases there are **Tasks**, **Logs**, **Comments**, **Attachments**, and **Observables** (IOCs like IPs, domains, URLs, file hashes). **Alerts** are inbound events that can be promoted or merged into Cases. A separate **analyzer engine** uses a plugin model to enrich observables against external/local sources (for example MaxMind GeoIP, AbuseIPDB, VirusTotal). Multi-tenancy is enforced via **Organisations**; permissions via **Roles** and per-case **CaseShare** role pins.
 
-The TheHive docs inform design decisions (data model concepts, permission model, observable types, analyzer/responder I/O contract) but Catlico is its own product. Pick what makes sense and discard the rest. The roadmap in `docs/thehive4/thehive4-roadmap.md` is reference material only.
+The TheHive lineage informs design decisions (data model concepts, permission model, observable types, analyzer/responder I/O contract) but Catlico is its own product. Pick what makes sense and discard the rest.
 
 ## Stack
 
@@ -40,7 +40,7 @@ app/
       main.py         # v1 APIRouter aggregation
       routes/         # One file per resource group
     internal/          # Worker-facing analyzer endpoints
-docs/thehive4/        # Reference docs — data model, parity spec, roadmap, Cortex
+docs/                 # Published docs: getting-started, architecture, configuration, plugin-system
 alembic/              # Migrations (versions/ has the actual migration files)
 tests/                # pytest; conftest.py sets up async test DB
 ```
@@ -66,7 +66,7 @@ The relational schema maps TheHive's graph model to PostgreSQL. Key entities and
 - **Pattern / Procedure** — MITRE ATT&CK techniques linked to cases
 - **AnalyzerJob / AnalyzerReport** — plugin engine: an observable is submitted to an analyzer worker; the report attaches verdict tags (info|safe|suspicious|malicious) and may extract new observables or trigger case mutations (add tag, create task, etc.)
 
-Full DDL sketch and parity checklist: `docs/thehive4/thehive4-parity-spec.md`
+(The original DDL sketch lived in the TheHive parity spec, which was moved out of the repo; the models and migrations are now the authoritative schema.)
 
 ## Current state
 
@@ -78,17 +78,15 @@ Built:
 - Alert promotion and alert-to-case merge paths.
 - Connectors plus manual observable enrichment: public enqueue/read endpoints and internal analyzer worker register/claim/result endpoints.
 - Partial responder plumbing: `ConnectorType.responder`, internal responder routes, and `connector_operations` operation application service exist, but responder jobs/connectors are not yet fully productized.
-- Web-facing admin/settings backends: API keys, SLA policies, knowledge base pages, functions CRUD/run records, notifiers, and notification rules.
+- Web-facing admin/settings backends: API keys (which also authenticate requests — `thp_` bearer tokens tried before JWT, own scopes, no superadmin), SLA policies, knowledge base pages, functions CRUD/run records, notifiers, and notification rules.
 - Audit and outbox write path, case activity feed, and global superadmin audit search.
 
-**Audit / AuditOutbox** (`app/crud/audit.py`, `app/models/audit.py`, `app/core/context.py`; plan: `docs/audit-outbox-plan.md`): `record_audit()` writes one audit row + one outbox row in the mutation's transaction. Case-scoped children carry `context=case`; alert promotion and admin entities carry `context=case`/`organisation` respectively. A `request_id` contextvar (set by `RequestIdMiddleware`) correlates a request's rows. A lifespan poller drains the outbox post-commit with an **empty consumer registry**. Read case activity via `GET /cases/{id}/activity` (gated by `read:case`) and global audit via `GET /audit/` (superadmin only). Polymorphic targets are string `(object_type, object_id)`; `object_type` strips the `case_` keyword-escape underscore to `case`, matching the Comment/Flag/Tag convention.
+**Audit / AuditOutbox** (`app/crud/audit.py`, `app/models/audit.py`, `app/core/context.py`; plan: `docs/audit-outbox-plan.md`): `record_audit()` writes one audit row + one outbox row in the mutation's transaction. Case-scoped children carry `context=case`; alert promotion and admin entities carry `context=case`/`organisation` respectively. A `request_id` contextvar (set by `RequestIdMiddleware`) correlates a request's rows. A lifespan poller drains the outbox post-commit to **four registered consumers** (notification feed, notifier delivery, WebSocket broadcast, plugin event dispatch); a row is marked delivered only when all succeed, so consumers must be idempotent. Read case activity via `GET /cases/{id}/activity` (gated by `read:case`) and global audit via `GET /audit/` (superadmin only). Polymorphic targets are string `(object_type, object_id)`; `object_type` strips the `case_` keyword-escape underscore to `case`, matching the Comment/Flag/Tag convention.
 
 Still deferred or partial:
 
-- Real outbox consumers for stream/notification/connector fan-out are not registered yet.
-- Notification rules and notifiers have CRUD and delivery data models, but no complete production delivery/test-send path.
-- Functions have CRUD, run records, manual run/list-runs/toggle APIs, and permission checks, but no sandboxed execution worker or scoped function-token runtime yet.
-- API keys have CRUD and hashing, but request authentication still uses JWT only.
+- Notification rules and notifiers have CRUD, delivery models, and Webhook/Slack consumers, but no complete production test-send path.
+- Functions have CRUD, run records, manual run/list-runs/toggle APIs, permission checks, and a scoped-token service, but **no execution sandbox** (`FUNCTION_RUNNER_MODE` defaults to `disabled`; the run path is a test stub).
 - Analyzer/responder operations plumbing is partial: operation schemas and an application service exist, but responder job queueing, real responder connectors, confirmation UX, and full integration tests are not complete.
 
 ## Development
@@ -121,7 +119,8 @@ PostgreSQL is required: set `POSTGRES_SERVER`, `POSTGRES_USER`, `POSTGRES_PASSWO
 
 ## Project docs
 
-- `docs/thehive4/` is source/reference material for TheHive/Cortex and product design context.
+- `README.md`, `docs/getting-started.md`, `docs/architecture.md`, `docs/configuration.md`, and `docs/plugin-system.md` are the **published** docs. Keep them accurate; they are what the world sees.
+- `docs/thehive4/` and `docs/superpowers/` were moved out of the repository before open-sourcing and must not be reintroduced or linked.
 - `docs/audit-outbox-plan.md` explains the audit/outbox implementation and deferred fan-out seams.
 - `docs/case-merge-design.md` explains case and alert merge semantics.
 - `docs/backend-gap-roadmap.md` and `docs/blocked-features-schema-plan.md` are planning/status docs. Check the live code before treating them as current, because implementation may have moved ahead.

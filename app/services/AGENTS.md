@@ -1,0 +1,77 @@
+# Service layer conventions
+
+Scope: everything under `app/services/`. Complements the root `AGENTS.md`.
+
+Business logic that is too big for a route handler and too cross-cutting for one CRUD
+module. Services orchestrate CRUD; **CRUD never imports a service.** Keep that direction.
+
+## Two kinds of module
+
+### 1. Outbox consumers — post-commit fan-out
+
+`app/main.py` registers exactly four at startup:
+
+| Consumer | Module | Does |
+|---|---|---|
+| `notify_feed_consumer` | `outbox_events.py` | Creates a `UserNotification` per audit event |
+| `notifier_delivery_consumer` | `notifier_delivery.py` | Rule matching → Webhook / Slack |
+| `ws_broadcast_consumer` | `websocket_hub.py` | Live broadcast to connected clients |
+| `plugin_event_consumer` | `plugin_dispatch.py` | Enqueues events for healthy plugin runners |
+
+`outbox_events.build_event_envelope()` is the **stable event shape** every consumer
+reads. `normalize_plugin_event_type()` maps `(object_type, action)` onto the past-tense
+names plugins declare as triggers (`observable.created`). Both are shared vocabulary —
+changing them changes what plugins receive.
+
+Consumers run inside the drain transaction. `dispatch_pending_outbox` catches each
+consumer's exceptions and marks the row delivered only if **all** succeeded; otherwise
+the row is retried and **every consumer runs again**. Consumers must therefore be
+**idempotent**. Keep them cheap: they hold the drain open.
+
+### 2. Background pollers
+
+Four `asyncio` tasks, all started and cancelled by the `lifespan` in `app/main.py`:
+
+- **`_outbox_poller`** — drains the audit outbox every `OUTBOX_POLL_INTERVAL` (5s).
+- **`run_function_poller`** (`function_runner.py`) — processes queued function runs.
+- **`_plugin_maintenance_poller`** (`plugin_maintenance.run_maintenance_sweep`) — reaps
+  stuck runs, marks silent runners offline, rolls finished runs into `PluginRunDaily`.
+- **`_plugin_push_poller`** (`plugin_dispatch.push_pending_deliveries`) — pushes queued
+  plugin events to runners with retry/backoff.
+
+Every poller wraps its body in `try/except Exception` and logs — **a poller must never
+die on a transient error.** Re-raise only `asyncio.CancelledError`. Each sweep is a plain
+async function taking a session, so tests can drive one iteration deterministically
+without the loop.
+
+## `plugin_dispatch.py` — the API→runner seam
+
+Signs the **raw body** with the runner's `push_signing_secret`:
+`x-catlico-signature: sha256=<hmac-sha256(secret, body)>`. The runner recomputes and
+compares in constant time. Events fan out to **every healthy, enrolled runner**.
+
+Plugin-actor events are suppressed so a plugin's own writes don't re-trigger it — an
+easy infinite loop to reintroduce. Cron events use a deterministic `_schedule_event_id`
+per (plugin, org, fire slot), which is what makes scheduling idempotent across restarts.
+
+## Known state — check before you trust
+
+- **`function_runner.py` has no real sandbox.** `FUNCTION_RUNNER_MODE=disabled` is the
+  default and returns `"Function sandbox not available"`. The poller and run records are
+  real; the execution path is a test stub (`sandbox_policy: "test-stub"` /
+  `"stub-disallowed"`). A subprocess/jail sandbox is a later milestone. **Do not treat
+  this as capable of running untrusted user code.**
+- **`connector_operations.py`** validates and applies responder operations transactionally
+  with audit rows, but responder job queueing and real responder connectors are incomplete.
+- `plugin_audit.py` records admin actions (config changes, approvals) into `Audit`.
+  **Secret values are never recorded** — only the key name and whether it was set. Preserve that.
+- `function_tokens.py` mints short-lived, narrowly-scoped callback tokens.
+- `websocket_hub.py` is an **in-memory** hub — it does not survive multiple processes.
+  It needs a shared backend before horizontal scaling.
+
+## Style
+
+- Services take an `AsyncSession` and do **not** commit inside a request — `get_session`
+  owns that boundary. Poller-owned sessions (which run outside any request) do commit.
+- Emit audit rows via `record_audit` for anything a user or admin would need to explain later.
+- Keep secrets out of audit rows, envelopes, logs, and notifier payloads.

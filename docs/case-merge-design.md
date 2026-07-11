@@ -2,10 +2,10 @@
 
 Status: **designed** (this doc), implementation in progress. Closes the explicit
 "Case MERGE semantics" gap flagged in
-[`docs/thehive4/thehive5-implementation-plan.md`](thehive4/thehive5-implementation-plan.md)
+the TheHive5 implementation plan (reference material kept outside this repo)
 (*"which case wins, how tasks/observables/alerts/shares consolidate, number handling —
 Under-specified everywhere"*). Source of truth for the data model is
-[`docs/thehive4/thehive4-parity-spec.md`](thehive4/thehive4-parity-spec.md) (`case_merge`
+the TheHive4 parity spec (reference material kept outside this repo; `case_merge`
 table); this plan diverges from TheHive behaviour where the catlico codebase has its own
 conventions, called out inline.
 
@@ -29,7 +29,7 @@ children. Sources are **frozen**, not deleted:
 - read-only (see *Freeze enforcement*)
 
 They stay navigable so the activity feed, lineage, and timeline-union
-([`thehive5-features-design.md`](thehive4/thehive5-features-design.md) §2) keep working —
+(TheHive5 features design §2, reference material kept outside this repo) keep working —
 you can't union events from deleted cases.
 
 ### Lineage: `case_merge` is the single source of truth
