@@ -49,7 +49,7 @@ async def test_update_me_email(client: AsyncClient, admin_user, admin_token):
 async def test_update_me_password(client: AsyncClient, admin_user, admin_token):
     response = await client.patch(
         "/api/v1/users/me",
-        json={"new_password": "newpass456", "current_password": "password123"},
+        json={"new_password": "newpass456-long", "current_password": "password123"},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 200
@@ -95,7 +95,7 @@ async def test_create_user(client: AsyncClient, admin_user, admin_token):
         "/api/v1/users/",
         json={
             "email": "new@test.com",
-            "password": "pass123",
+            "password": "pass123-longer",
             "first_name": "New",
             "last_name": "User",
         },
@@ -113,7 +113,7 @@ async def test_create_user(client: AsyncClient, admin_user, admin_token):
 async def test_create_user_requires_names(client: AsyncClient, admin_user, admin_token):
     response = await client.post(
         "/api/v1/users/",
-        json={"email": "noname@test.com", "password": "pass123"},
+        json={"email": "noname@test.com", "password": "pass123-longer"},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 422
@@ -122,7 +122,7 @@ async def test_create_user_requires_names(client: AsyncClient, admin_user, admin
 async def test_create_user_duplicate_email(client: AsyncClient, admin_user, admin_token):
     payload = {
         "email": "dup@test.com",
-        "password": "pass123",
+        "password": "pass123-longer",
         "first_name": "Dup",
         "last_name": "User",
     }
@@ -144,7 +144,7 @@ async def test_create_user_non_superadmin_forbidden(client: AsyncClient, viewer_
         "/api/v1/users/",
         json={
             "email": "x@test.com",
-            "password": "pass",
+            "password": "pass-that-is-long",
             "first_name": "X",
             "last_name": "User",
         },
@@ -212,7 +212,7 @@ async def test_create_user_with_names(client: AsyncClient, admin_user, admin_tok
         "/api/v1/users/",
         json={
             "email": "jane@test.com",
-            "password": "pass123",
+            "password": "pass123-longer",
             "first_name": "Jane",
             "last_name": "Doe",
         },

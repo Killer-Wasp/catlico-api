@@ -18,7 +18,10 @@ pwd_context = PasswordHash((BcryptHasher(),))
 
 # Minimum length for a user-chosen password. Length-only policy (NIST-style):
 # enforced on the backend as the source of truth and mirrored in the UI.
+# Applies to every API path that sets a password (reset, user create/update);
+# internal callers (seeding, crud) are exempt by design.
 MIN_PASSWORD_LENGTH = 12
+PASSWORD_POLICY_MESSAGE = f"Password must be at least {MIN_PASSWORD_LENGTH} characters"
 
 
 def password_meets_policy(password: str) -> bool:
