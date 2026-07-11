@@ -1,9 +1,9 @@
 """Password reset token store.
 
 Pure DB operations for the reset flow: mint a single-use token (only its sha256
-hash is persisted), look one up by the raw value, consume it, and the throttle /
-invalidation queries. Orchestration (delivery, audit, session revocation) lives
-in `app.services.password_reset`.
+hash is persisted), atomically claim it, and the throttle / invalidation
+queries. Orchestration (delivery, audit, session revocation) lives in
+`app.services.password_reset`.
 """
 
 import hashlib
@@ -11,6 +11,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import delete, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -32,38 +33,51 @@ def _as_aware(dt: datetime) -> datetime:
 async def create_token(
     session: AsyncSession, user_id: uuid.UUID
 ) -> tuple[str, PasswordResetToken]:
-    """Mint a token: return the raw value (to email) and persist only its hash."""
+    """Mint a token: return the raw value (to email) and persist only its hash.
+    Opportunistically drops the user's dead rows (used or expired) so the table
+    doesn't accumulate them — there is no separate purge job."""
+    now = datetime.now(UTC)
+    await session.execute(
+        delete(PasswordResetToken).where(
+            PasswordResetToken.user_id == user_id,
+            or_(
+                PasswordResetToken.used_at.is_not(None),
+                PasswordResetToken.expires_at < now,
+            ),
+        )
+    )
     raw_token = secrets.token_urlsafe(32)
     row = PasswordResetToken(
         user_id=user_id,
         token_hash=_hash(raw_token),
-        expires_at=datetime.now(UTC) + RESET_TOKEN_TTL,
+        expires_at=now + RESET_TOKEN_TTL,
     )
     session.add(row)
     await session.flush()
     return raw_token, row
 
 
-async def get_active_token_by_raw(
+async def consume_active_token(
     session: AsyncSession, raw_token: str
 ) -> PasswordResetToken | None:
-    """Return the unused, unexpired token matching `raw_token`, else None."""
+    """Atomically claim the token behind `raw_token`: a single
+    `UPDATE … WHERE used_at IS NULL … RETURNING`, so two concurrent resets with
+    the same token can never both succeed. Returns None when the token is
+    unknown, already used, or expired (an expired token is still marked used by
+    the claim, which is harmless — it was unusable anyway)."""
     result = await session.execute(
-        select(PasswordResetToken).where(
+        update(PasswordResetToken)
+        .where(
             PasswordResetToken.token_hash == _hash(raw_token),
             PasswordResetToken.used_at.is_(None),
         )
+        .values(used_at=datetime.now(UTC))
+        .returning(PasswordResetToken)
     )
     token = result.scalar_one_or_none()
     if token is None or _as_aware(token.expires_at) < datetime.now(UTC):
         return None
     return token
-
-
-async def consume_token(session: AsyncSession, token: PasswordResetToken) -> None:
-    token.used_at = datetime.now(UTC)
-    session.add(token)
-    await session.flush()
 
 
 async def has_recent_unused_token(
@@ -78,20 +92,18 @@ async def has_recent_unused_token(
             PasswordResetToken.created_at >= cutoff,
         )
     )
-    return result.scalar_one_or_none() is not None
+    return result.scalars().first() is not None
 
 
 async def invalidate_user_tokens(session: AsyncSession, user_id: uuid.UUID) -> None:
     """Mark every outstanding (unused) token for the user as used, so a completed
     reset can't be replayed with a second, still-outstanding link."""
-    result = await session.execute(
-        select(PasswordResetToken).where(
+    await session.execute(
+        update(PasswordResetToken)
+        .where(
             PasswordResetToken.user_id == user_id,
             PasswordResetToken.used_at.is_(None),
         )
+        .values(used_at=datetime.now(UTC))
     )
-    now = datetime.now(UTC)
-    for token in result.scalars().all():
-        token.used_at = now
-        session.add(token)
     await session.flush()

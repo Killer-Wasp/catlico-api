@@ -2,21 +2,24 @@
 
 Two flows sit on top of the token store (`app.crud.password_reset`):
 
-- `request_reset` — best-effort. Silent for unknown emails and while a recent
-  token is still outstanding (throttle). The endpoint always returns the same
-  generic response, so nothing here signals whether an email exists.
-- `perform_reset` — validate the token and the new password, set the password,
-  consume/invalidate tokens, revoke all sessions, and audit. Raises
-  `PasswordResetError` on a bad token or a password that fails the policy.
+- `request_reset` — best-effort. Silent for unknown emails, inactive accounts,
+  and while a recent token is still outstanding (throttle). The endpoint always
+  returns the same generic response, so nothing here signals whether an email
+  exists. Delivery is scheduled as a background task so the response returns
+  before the SMTP round-trip — an inline send would make known-email requests
+  measurably slower than unknown ones, letting response timing reveal which
+  emails are registered despite the identical body.
+- `perform_reset` — validate the new password, atomically claim the token, set
+  the password, invalidate outstanding tokens, revoke all sessions, and audit.
+  Raises `PasswordResetError` on a bad token or a password that fails the policy.
 """
 
-import logging
-
+from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.configs import settings
 from app.core.security import (
-    MIN_PASSWORD_LENGTH,
+    PASSWORD_POLICY_MESSAGE,
     get_password_hash,
     password_meets_policy,
 )
@@ -26,18 +29,19 @@ from app.crud.auth import delete_all_refresh_tokens
 from app.crud.user import get_user_by_email, get_user_by_id
 from app.services import password_reset_delivery
 
-logger = logging.getLogger(__name__)
-
 
 class PasswordResetError(Exception):
     """A reset could not be completed (invalid/expired token or weak password)."""
 
 
-async def request_reset(session: AsyncSession, email: str) -> None:
-    """Create and deliver a reset token for `email`, if eligible. Never raises for
-    the caller: unknown email and an active throttle both no-op silently."""
+async def request_reset(
+    session: AsyncSession, email: str, background_tasks: BackgroundTasks
+) -> None:
+    """Create a reset token for `email` and schedule delivery, if eligible.
+    Never raises for the caller: unknown email, an inactive account, and an
+    active throttle all no-op silently."""
     user = await get_user_by_email(session, email)
-    if user is None:
+    if user is None or not user.is_active:
         return
     if await reset_crud.has_recent_unused_token(
         session, user.id, settings.PASSWORD_RESET_THROTTLE_SECONDS
@@ -52,30 +56,29 @@ async def request_reset(session: AsyncSession, email: str) -> None:
         actor="system",
         details={"event": "password_reset_requested"},
     )
-    # Delivery is a no-op unless SMTP is configured, and swallows its own errors,
-    # so a broken mailer never changes the endpoint's response.
-    await password_reset_delivery.send_password_reset_email(user.email, raw_token)
+    # Sent after the response (timing side-channel — see module docstring).
+    # Delivery is a no-op unless SMTP is configured and swallows its own errors.
+    background_tasks.add_task(
+        password_reset_delivery.send_password_reset_email, user.email, raw_token
+    )
 
 
 async def perform_reset(
     session: AsyncSession, raw_token: str, new_password: str
 ) -> None:
-    """Reset the password behind `raw_token`. Validates the token and the new
-    password before mutating anything, so a weak password leaves the link usable."""
-    token = await reset_crud.get_active_token_by_raw(session, raw_token)
+    """Reset the password behind `raw_token`. The policy is checked before the
+    token is claimed, so a weak password leaves the single-use link usable."""
+    if not password_meets_policy(new_password):
+        raise PasswordResetError(PASSWORD_POLICY_MESSAGE)
+    token = await reset_crud.consume_active_token(session, raw_token)
     if token is None:
         raise PasswordResetError("Invalid or expired reset token")
-    if not password_meets_policy(new_password):
-        raise PasswordResetError(
-            f"Password must be at least {MIN_PASSWORD_LENGTH} characters"
-        )
     user = await get_user_by_id(session, token.user_id)
-    if user is None:
+    if user is None or not user.is_active:
         raise PasswordResetError("Invalid or expired reset token")
 
     user.hashed_password = get_password_hash(new_password)
     session.add(user)
-    await reset_crud.consume_token(session, token)
     await reset_crud.invalidate_user_tokens(session, user.id)
     await delete_all_refresh_tokens(session, user.id)
     await record_audit(

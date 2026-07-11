@@ -251,3 +251,119 @@ async def test_reset_password_records_audit(client, session, viewer_user, monkey
     ).scalars().all()
     events = [a.details.get("event") for a in audits if a.details]
     assert "password_reset_completed" in events
+
+
+async def test_forgot_password_inactive_user_gets_nothing(
+    client, session, viewer_user, monkeypatch
+):
+    """Deactivated accounts must be inert: no email, no token, same response."""
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.services.password_reset_delivery.send_password_reset_email",
+        _fake_sender(sent),
+    )
+    viewer_user.is_active = False
+    session.add(viewer_user)
+    await session.flush()
+
+    resp = await client.post(
+        "/api/v1/auth/password/forgot", json={"email": viewer_user.email}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == GENERIC
+    assert sent == []
+    rows = (
+        await session.execute(
+            select(PasswordResetToken).where(PasswordResetToken.user_id == viewer_user.id)
+        )
+    ).scalars().all()
+    assert rows == []
+
+
+async def test_reset_password_rejected_for_deactivated_user(
+    client, session, viewer_user, monkeypatch
+):
+    """A token issued while active must stop working once the account is disabled."""
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.services.password_reset_delivery.send_password_reset_email",
+        _fake_sender(sent),
+    )
+    await client.post("/api/v1/auth/password/forgot", json={"email": viewer_user.email})
+    token = sent[0][1]
+
+    viewer_user.is_active = False
+    session.add(viewer_user)
+    await session.flush()
+
+    resp = await client.post(
+        "/api/v1/auth/password/reset",
+        json={"token": token, "new_password": VALID_PASSWORD},
+    )
+    assert resp.status_code == 400
+
+
+async def test_forgot_password_purges_dead_tokens(client, session, viewer_user, monkeypatch):
+    """Minting a token drops the user's used/expired rows (opportunistic cleanup)."""
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.services.password_reset_delivery.send_password_reset_email",
+        _fake_sender(sent),
+    )
+    # Seed one used and one expired row.
+    session.add(
+        PasswordResetToken(
+            user_id=viewer_user.id,
+            token_hash="dead-used",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            used_at=datetime.now(UTC),
+        )
+    )
+    session.add(
+        PasswordResetToken(
+            user_id=viewer_user.id,
+            token_hash="dead-expired",
+            expires_at=datetime.now(UTC) - timedelta(hours=1),
+            # Old enough to clear the per-user throttle window (which only
+            # considers unused tokens minted recently).
+            created_at=datetime.now(UTC) - timedelta(hours=2),
+        )
+    )
+    await session.flush()
+
+    resp = await client.post(
+        "/api/v1/auth/password/forgot", json={"email": viewer_user.email}
+    )
+    assert resp.status_code == 200
+    rows = (
+        await session.execute(
+            select(PasswordResetToken).where(PasswordResetToken.user_id == viewer_user.id)
+        )
+    ).scalars().all()
+    # Only the freshly minted token remains.
+    assert len(rows) == 1 and rows[0].used_at is None
+
+
+async def test_user_create_enforces_password_policy(client, admin_token):
+    resp = await client.post(
+        "/api/v1/users/",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "email": "short-pw@test.com",
+            "password": "short",
+            "first_name": "Short",
+            "last_name": "Password",
+        },
+    )
+    assert resp.status_code == 400
+    assert "at least 12 characters" in resp.json()["detail"]
+
+
+async def test_me_update_enforces_password_policy(client, viewer_token):
+    resp = await client.patch(
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+        json={"current_password": "password123", "new_password": "short"},
+    )
+    assert resp.status_code == 400
+    assert "at least 12 characters" in resp.json()["detail"]

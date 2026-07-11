@@ -8,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ActiveOrgContext, CurrentUser, SuperAdminUser
 from app.api.v1.routes._files import ingest_upload
 from app.core.db import get_session
-from app.core.security import verify_password
+from app.core.security import (
+    PASSWORD_POLICY_MESSAGE,
+    password_meets_policy,
+    verify_password,
+)
 from app.core.storage import BlobStorage, get_storage
 from app.crud import attachment as attachment_crud
 from app.crud import user as user_crud
@@ -17,6 +21,15 @@ from app.models.attachment import Attachment
 from app.models.user import UserCreate, UserMeUpdate, UserPublic, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+def _ensure_password_policy(password: str | None) -> None:
+    """Every API path that sets a password enforces the same minimum. Internal
+    callers (seeding, crud) bypass this by design — the API is the boundary."""
+    if password is not None and not password_meets_policy(password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=PASSWORD_POLICY_MESSAGE
+        )
 
 
 @router.get("/me", response_model=UserPublic)
@@ -44,6 +57,8 @@ async def update_current_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect current password",
             )
+
+    _ensure_password_policy(body.new_password)
 
     update_data = UserUpdate()
     if body.email is not None:
@@ -163,6 +178,7 @@ async def create_user(
     user_in: UserCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> UserPublic:
+    _ensure_password_policy(user_in.password)
     existing = await user_crud.get_user_by_email(session, str(user_in.email))
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -196,6 +212,7 @@ async def update_user(
     admin: SuperAdminUser,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> UserPublic:
+    _ensure_password_policy(user_in.password)
     user = await user_crud.get_user_by_id(session, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")

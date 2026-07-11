@@ -146,7 +146,7 @@ async def test_admin_user_mutations_are_audited(
         "/api/v1/users/",
         json={
             "email": "new@test.com",
-            "password": "password123",
+            "password": "password123-long",
             "first_name": "New",
             "last_name": "User",
         },

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -164,10 +164,12 @@ GENERIC_FORGOT_RESPONSE = {
 async def forgot_password(
     body: ForgotPasswordRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """Request a password reset link. Always returns the same response, so the
-    endpoint can't be used to discover which emails are registered."""
-    await password_reset_service.request_reset(session, body.email)
+    endpoint can't be used to discover which emails are registered. Email
+    delivery runs after the response (see the service module docstring)."""
+    await password_reset_service.request_reset(session, body.email, background_tasks)
     return GENERIC_FORGOT_RESPONSE
 
 
