@@ -119,6 +119,13 @@ class CasePublic(SQLModel):
     custom_fields: dict[str, Any] = {}
     created_at: datetime
     updated_at: datetime | None
+    #: Resolve-SLA target time (created_at + the severity policy's resolve_seconds),
+    #: or None when the org has no enabled policy for this severity. Populated at
+    #: read time.
+    sla_due_at: datetime | None = None
+    #: SLA state for an OPEN case: "ok" | "at-risk" | "breached". None when the case
+    #: is not open or no policy applies. Populated at read time.
+    sla_state: str | None = None
 
 
 class SimilarCasePublic(SQLModel):

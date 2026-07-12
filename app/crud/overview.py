@@ -54,7 +54,7 @@ _RESOLUTION_LABEL = {
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    return datetime.now(UTC)
 
 
 def _org_cases(stmt, org_id: str):
@@ -128,8 +128,8 @@ async def _kpi_stats(
             target = resolve_by_sev.get(sev)
             if target is None or created_at is None:
                 continue
-            # created_at comes back tz-aware from the DB; `now` is naive UTC.
-            age = (now - created_at.replace(tzinfo=None)).total_seconds()
+            # created_at and now are both tz-aware UTC.
+            age = (now - created_at).total_seconds()
             if age > target:
                 breach_total += 1
                 if sev == 4:
@@ -332,7 +332,7 @@ async def _ingestion_24h(
     ingested: dict[datetime, int] = defaultdict(int)
     promoted: dict[datetime, int] = defaultdict(int)
     for date, case_id in rows:
-        bucket = date.replace(minute=0, second=0, microsecond=0, tzinfo=None)
+        bucket = date.replace(minute=0, second=0, microsecond=0)
         if bucket < start_hour:
             continue
         ingested[bucket] += 1
@@ -404,9 +404,9 @@ async def _case_trend(
     ).all()
 
     def _day(dt: datetime) -> datetime:
-        # Timestamps come back tz-aware from the DB; drop tz so day buckets
-        # match the naive `start_day` keys built below.
-        return dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+        # Truncate to midnight; stays tz-aware UTC so day buckets match the
+        # aware `start_day`/`day` keys.
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
     opened: dict[datetime, int] = defaultdict(int)
     resolved: dict[datetime, int] = defaultdict(int)
@@ -523,7 +523,7 @@ async def _sla_compliance(
         target = targets.get(sev)
         if target is None or created_at is None:
             continue
-        if (now - created_at.replace(tzinfo=None)).total_seconds() > target:
+        if (now - created_at).total_seconds() > target:
             breached += 1
 
     # Cases resolved in the last 7 days: met if within target, else breached.

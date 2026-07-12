@@ -58,3 +58,18 @@ async def upsert_sla_policies(
         )
         policies.append(SlaPolicyPublic.model_validate(p, from_attributes=True))
     return policies
+
+
+@router.delete("/{policy_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_sla_policy(
+    policy_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    _ensure_org_admin(ctx)
+    policy = await sla_crud.get_policy(session, policy_id, ctx.organisation_id)
+    if policy is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="SLA policy not found"
+        )
+    await sla_crud.delete_policy(session, policy)

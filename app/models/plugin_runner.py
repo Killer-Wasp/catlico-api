@@ -136,7 +136,13 @@ class OrgPlugin(TimestampMixin, table=True):
     auto_run_enabled: bool = Field(default=False)
     trigger_overrides: dict = Field(default_factory=dict, sa_column=Column(JSON))
     schedule_override: str | None = Field(default=None)
+    #: Set (non-null) when the config circuit breaker auto-suspends this plugin
+    #: after repeated configuration failures; the scheduler skips suspended plugins.
+    #: Cleared by a passing config test.
     suspended_reason: str | None = Field(default=None)
+    #: Consecutive `config`-kind run failures. Resets to 0 on any successful run or
+    #: a passing config test; at `PLUGIN_CONFIG_FAILURE_THRESHOLD` the breaker trips.
+    config_failure_streak: int = Field(default=0)
     # Action types this org opts into auto-applying (subset of low-risk types).
     auto_apply_actions: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     created_by: str = Field(default="")

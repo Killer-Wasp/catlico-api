@@ -361,7 +361,7 @@ async def merge_cases(
         }
     )
 
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now = datetime.now(UTC)
     for case in sources:
         case.status = CaseStatus.duplicated
         case.resolution_status = CaseResolutionStatus.duplicated

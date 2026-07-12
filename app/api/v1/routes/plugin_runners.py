@@ -169,6 +169,41 @@ async def create_runner(
     }
 
 
+@router.post("/{runner_id}/re-enroll")
+async def re_enroll_runner(
+    runner_id: str,
+    _: SuperAdminUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Mint a fresh one-time enrollment token for an existing runner.
+
+    Resets the runner to ``pending`` so the runner can exchange the new token
+    for machine credentials again (used after a lost credential or an admin
+    reset). The old enrollment token, if any, is superseded. Machine
+    credentials are only issued on the runner-side ``/register`` exchange, so
+    this route never returns them.
+    """
+    runner = await session.get(PluginRunnerModel, runner_id)
+    if runner is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runner not found")
+    token = _new_enrollment_token()
+    expires_at = datetime.now(UTC) + timedelta(
+        seconds=settings.PLUGIN_RUNNER_ENROLLMENT_TOKEN_TTL_SECONDS
+    )
+    runner.enrollment_state = "pending"
+    runner.enrollment_token_hash = _hash_secret(token)
+    runner.enrollment_token_expires_at = expires_at
+    await session.flush()
+    return {
+        "id": runner.id,
+        "name": runner.name,
+        "status": runner.status,
+        "enrollment_state": runner.enrollment_state,
+        "enrollment_token": token,
+        "enrollment_token_expires_at": expires_at.isoformat(),
+    }
+
+
 @router.get("/{runner_id}")
 async def get_runner(
     runner_id: str,

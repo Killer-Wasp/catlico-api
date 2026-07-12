@@ -243,7 +243,7 @@ async def delete_task(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     task, is_owner, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
-    _require("write:task", perms)
+    _require("delete:task", perms)
     # Creator's org OR owner org can delete.
     if not (is_owner or task.organisation_id == ctx.organisation_id):
         raise HTTPException(

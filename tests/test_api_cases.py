@@ -40,6 +40,79 @@ async def test_create_and_get_case(
     assert got.json()["title"] == "phishing report"
 
 
+def test_compute_case_sla_states():
+    from datetime import datetime, timedelta
+
+    from app.crud.sla import compute_case_sla
+
+    created = datetime(2026, 7, 12, 10, 0, 0)
+    now = created + timedelta(hours=2)
+
+    # No policy for the severity → both None.
+    assert compute_case_sla(
+        severity=1, created_at=created, is_open=True, resolve_targets={2: 3600}, now=now
+    ) == (None, None)
+
+    # Past the 1h target after 2h → breached; due_at is created+target.
+    due, state = compute_case_sla(
+        severity=2, created_at=created, is_open=True, resolve_targets={2: 3600}, now=now
+    )
+    assert state == "breached" and due == created + timedelta(hours=1)
+
+    # 4h target, 2h elapsed (< 80% = 3.2h) → ok.
+    _, state = compute_case_sla(
+        severity=2, created_at=created, is_open=True, resolve_targets={2: 14400}, now=now
+    )
+    assert state == "ok"
+
+    # 2.5h target → 80% = 2h elapsed exactly → at-risk.
+    _, state = compute_case_sla(
+        severity=2, created_at=created, is_open=True, resolve_targets={2: 9000}, now=now
+    )
+    assert state == "at-risk"
+
+    # A non-open case has no live countdown → state None but due_at still set.
+    due, state = compute_case_sla(
+        severity=2, created_at=created, is_open=False, resolve_targets={2: 3600}, now=now
+    )
+    assert state is None and due == created + timedelta(hours=1)
+
+
+async def test_case_exposes_sla_due_and_state(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = {"Authorization": f"Bearer {analyst_a_token}", "X-Organisation-Id": org_a.id}
+    created = await client.post(
+        "/api/v1/cases/", json={"title": "sla case", "severity": 3}, headers=h
+    )
+    assert created.status_code == 201, created.text
+    case_id = created.json()["id"]
+
+    # No policy yet → SLA fields are null.
+    got = await client.get(f"/api/v1/cases/{case_id}", headers=h)
+    assert got.json()["sla_due_at"] is None
+    assert got.json()["sla_state"] is None
+
+    # Add a generous resolve target for severity 3; a just-created open case is "ok".
+    put = await client.put(
+        "/api/v1/sla-policies/",
+        json=[{"severity": 3, "ack_seconds": 3600, "resolve_seconds": 86400}],
+        headers=h,
+    )
+    assert put.status_code == 200, put.text
+
+    got = await client.get(f"/api/v1/cases/{case_id}", headers=h)
+    body = got.json()
+    assert body["sla_due_at"] is not None
+    assert body["sla_state"] == "ok"
+
+    # The list projection carries the same fields.
+    listed = await client.get("/api/v1/cases/", headers=h)
+    row = next(c for c in listed.json()["items"] if c["id"] == case_id)
+    assert row["sla_state"] == "ok"
+    assert row["sla_due_at"] is not None
+
+
 async def test_list_cases_only_returns_shared(
     client: AsyncClient,
     session,
@@ -176,6 +249,82 @@ async def test_delete_case_owner_only(
         },
     )
     assert response.status_code == 204
+
+
+def test_delete_grants_are_split_from_write_groups():
+    """Grant separation (finale): write:<domain> no longer expands to any delete:*
+    capability — those live in the standalone delete:<domain> group."""
+    from app.models.role import expand_permissions
+
+    # write groups grant edit but NOT delete.
+    inv_write = expand_permissions({"write:investigation"})
+    assert {"write:case", "write:task", "write:observable", "write:alert"} <= inv_write
+    assert not any(c.startswith("delete:") for c in inv_write)
+
+    for grp in ("write:intel", "write:org", "write:access"):
+        assert not any(c.startswith("delete:") for c in expand_permissions({grp}))
+
+    # The delete groups grant exactly the delete capabilities for their domain.
+    assert expand_permissions({"delete:investigation"}) == {
+        "delete:case", "delete:task", "delete:observable", "delete:alert",
+    }
+    assert expand_permissions({"delete:intel"}) == {
+        "delete:custom_field", "delete:knowledge_base", "delete:function",
+    }
+    assert expand_permissions({"delete:access"}) == {"delete:user", "delete:role"}
+    assert expand_permissions({"delete:org"}) == {"delete:organisation"}
+
+    # A raw write:case capability alone still does NOT imply delete:case.
+    assert "delete:case" not in expand_permissions({"write:case"})
+
+
+def test_builtin_roles_delete_grants():
+    """org-admin holds every delete group; analyst keeps delete on investigation
+    (it had it via write:investigation before the split); read-only has none."""
+    from app.models.role import BUILTIN_ROLES, Permission, expand_permissions
+
+    admin = {p.value for p in BUILTIN_ROLES["org-admin"]}
+    assert {
+        "delete:investigation", "delete:intel", "delete:org", "delete:access",
+    } <= admin
+
+    analyst = {p.value for p in BUILTIN_ROLES["analyst"]}
+    assert "delete:investigation" in analyst
+    assert "delete:intel" not in analyst  # analyst only reads intel
+    assert "delete:case" in expand_permissions(analyst)
+
+    readonly = expand_permissions(p.value for p in BUILTIN_ROLES["read-only"])
+    assert not any(c.startswith("delete:") for c in readonly)
+    assert Permission.delete_investigation not in BUILTIN_ROLES["read-only"]
+
+
+async def test_delete_case_forbidden_for_readonly_owner_member(
+    client: AsyncClient,
+    session,
+    org_a,
+    builtin_roles,
+    analyst_a,
+    readonly_a,
+    readonly_a_token,
+):
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="ro-del"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await session.commit()
+    # A read-only member of the owner org lacks delete:case → 403 (delete is no
+    # longer implied by mere read/visibility).
+    response = await client.delete(
+        f"/api/v1/cases/{case.id}",
+        headers={
+            "Authorization": f"Bearer {readonly_a_token}",
+            "X-Organisation-Id": org_a.id,
+        },
+    )
+    assert response.status_code == 403
 
 
 async def test_delete_case_soft_deletes_and_cascades(

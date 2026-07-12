@@ -65,7 +65,7 @@ class KnowledgeBasePageVersion(TimestampMixin, table=True):
     edited_by: str
     edited_by_email: str
     edited_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC).replace(tzinfo=None)
+        default_factory=lambda: datetime.now(UTC)
     )
     reverted_from_version_id: int | None = Field(
         default=None, foreign_key="knowledge_base_page_version.id"

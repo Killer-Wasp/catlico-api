@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import (
@@ -47,6 +48,7 @@ from app.crud import flag as flag_crud
 from app.crud import log as log_crud
 from app.crud import case_template as ct_crud
 from app.crud import observable as obs_crud
+from app.crud import sla as sla_crud
 from app.crud import role as role_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
@@ -118,9 +120,18 @@ async def list_cases(
         session, list({c.assignee_id for c in cases if c.assignee_id})
     )
     tasks_map = await task_crud.summaries_for_cases(session, [c.id for c in cases])
+    sla_targets = await sla_crud.resolve_targets(session, ctx.organisation_id)
+    now = datetime.now(UTC)
 
     def _public(c: Case) -> CasePublic:
-        pub = case_public(c, str(c.id) in flagged, cfs.get(str(c.id), {}), lineage.get(c.id))
+        pub = case_public(
+            c,
+            str(c.id) in flagged,
+            cfs.get(str(c.id), {}),
+            lineage.get(c.id),
+            sla_targets=sla_targets,
+            now=now,
+        )
         pub.tags = tags_map.get(str(c.id), [])
         pub.assignee_email = emails.get(c.assignee_id) if c.assignee_id else None
         pub.tasks = [
@@ -215,7 +226,9 @@ async def create_case(
         if tpl_tags:
             await tag_crud.set_tags(session, TaggableType.case, str(case.id), tpl_tags)
 
-    return await case_public_resolved(case, session, flagged=False)
+    return await case_public_resolved(
+        case, session, flagged=False, organisation_id=ctx.organisation_id
+    )
 
 
 @router.post("/merge", response_model=CasePublic, status_code=status.HTTP_201_CREATED)
@@ -249,7 +262,11 @@ async def merge_cases(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     lineage = await case_crud.lineage_for_many(session, [case.id])
     return await case_public_resolved(
-        case, session, flagged=False, lineage=lineage.get(case.id)
+        case,
+        session,
+        flagged=False,
+        lineage=lineage.get(case.id),
+        organisation_id=ctx.organisation_id,
     )
 
 

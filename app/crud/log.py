@@ -10,12 +10,14 @@ from app.crud.pagination import paginate
 from app.models.log import Log, LogCreate, LogUpdate
 
 
-def _naive_utc(dt):
+def _to_utc(dt):
+    """Normalize a (possibly client-supplied) datetime to tz-aware UTC. A naive
+    input is assumed to already be UTC."""
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return dt
-    return dt.astimezone(UTC).replace(tzinfo=None)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 async def get_log(
@@ -83,12 +85,12 @@ async def create_log(
         id=log_id,
         organisation_id=organisation_id,
         message=log_in.message,
-        occurred_at=_naive_utc(log_in.occurred_at),
+        occurred_at=_to_utc(log_in.occurred_at),
         created_by=created_by,
     )
     # Default occurred_at to created_at when the analyst didn't backdate the entry.
     if log.occurred_at is None:
-        log.occurred_at = _naive_utc(log.created_at)
+        log.occurred_at = _to_utc(log.created_at)
     session.add(log)
     await session.flush()
     await record_audit(
@@ -107,8 +109,8 @@ async def update_log(
 ) -> Log:
     update_data = log_in.model_dump(exclude_unset=True)
     if "occurred_at" in update_data:
-        update_data["occurred_at"] = _naive_utc(update_data["occurred_at"])
-    update_data["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
+        update_data["occurred_at"] = _to_utc(update_data["occurred_at"])
+    update_data["updated_at"] = datetime.now(UTC)
     update_data["updated_by"] = updated_by
     log.sqlmodel_update(update_data)
     session.add(log)
@@ -126,7 +128,7 @@ async def update_log(
 
 async def delete_log(session: AsyncSession, log: Log, deleted_by: str) -> None:
     """Soft delete."""
-    log.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+    log.deleted_at = datetime.now(UTC)
     log.deleted_by = deleted_by
     session.add(log)
     await session.flush()

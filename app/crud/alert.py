@@ -264,8 +264,8 @@ async def ingest_alert(
     existing.pap = alert_in.pap
     if alert_in.external_link is not None:
         existing.external_link = alert_in.external_link
-    existing.last_sync_date = datetime.now(UTC).replace(tzinfo=None)
-    existing.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    existing.last_sync_date = datetime.now(UTC)
+    existing.updated_at = datetime.now(UTC)
     existing.updated_by = created_by
     session.add(existing)
     await session.flush()
@@ -288,7 +288,7 @@ async def update_alert(
         for field, new in update_data.items()
         if getattr(alert, field, None) != new
     }
-    update_data["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
+    update_data["updated_at"] = datetime.now(UTC)
     update_data["updated_by"] = updated_by
     alert.sqlmodel_update(update_data)
     session.add(alert)
@@ -305,7 +305,7 @@ async def mark_promoted(
 ) -> Alert:
     alert.case_id = case_id
     alert.status = AlertStatus.imported
-    alert.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    alert.updated_at = datetime.now(UTC)
     alert.updated_by = updated_by
     session.add(alert)
     await session.flush()
@@ -322,9 +322,34 @@ async def mark_promoted(
     return alert
 
 
+async def mark_detached(
+    session: AsyncSession, alert: Alert, *, updated_by: str
+) -> Alert:
+    """Reverse of `mark_promoted`: unlink the alert from its case and return it
+    to New. Records an audit entry scoped to the former case so the detach shows
+    up in that case's activity feed."""
+    former_case_id = alert.case_id
+    alert.case_id = None
+    alert.status = AlertStatus.new
+    alert.updated_at = datetime.now(UTC)
+    alert.updated_by = updated_by
+    session.add(alert)
+    await session.flush()
+    await record_audit(
+        session,
+        action="update",
+        obj=alert,
+        context_type="case",
+        context_id=str(former_case_id),
+        actor=updated_by,
+        details={"detached_from_case": former_case_id, "status": AlertStatus.new.value},
+    )
+    return alert
+
+
 async def delete_alert(session: AsyncSession, alert: Alert, deleted_by: str) -> None:
     """Soft delete."""
-    alert.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+    alert.deleted_at = datetime.now(UTC)
     alert.deleted_by = deleted_by
     session.add(alert)
     await session.flush()

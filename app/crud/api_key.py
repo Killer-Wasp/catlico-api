@@ -85,7 +85,7 @@ async def delete_key(
 ) -> None:
     from datetime import UTC, datetime
 
-    key.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+    key.deleted_at = datetime.now(UTC)
     key.deleted_by = deleted_by
     session.add(key)
     await session.flush()
@@ -106,6 +106,6 @@ async def touch_key(session: AsyncSession, key: ApiKey) -> None:
     """Update last_used_at after successful authentication."""
     from datetime import UTC, datetime
 
-    key.last_used_at = datetime.now(UTC).replace(tzinfo=None)
+    key.last_used_at = datetime.now(UTC)
     session.add(key)
     await session.flush()

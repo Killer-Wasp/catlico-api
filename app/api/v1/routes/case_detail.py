@@ -33,7 +33,12 @@ async def get_case(
     cfs = await custom_fields_for_case(session, case_ctx.case.id)
     lineage = await case_crud.lineage_for_many(session, [case_ctx.case.id])
     return await case_public_resolved(
-        case_ctx.case, session, flagged, cfs, lineage.get(case_ctx.case.id)
+        case_ctx.case,
+        session,
+        flagged,
+        cfs,
+        lineage.get(case_ctx.case.id),
+        organisation_id=case_ctx.organisation_id,
     )
 
 
@@ -71,12 +76,14 @@ async def update_case(
         session, FlagEntityType.case, str(case.id), case_ctx.organisation_id
     )
     cfs = await custom_fields_for_case(session, case.id)
-    return await case_public_resolved(case, session, flagged, cfs)
+    return await case_public_resolved(
+        case, session, flagged, cfs, organisation_id=case_ctx.organisation_id
+    )
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_case(
-    case_ctx: Annotated[CaseAuthContext, require_case_owner("write:case")],
+    case_ctx: Annotated[CaseAuthContext, require_case_owner("delete:case")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     await case_crud.delete_case(session, case_ctx.case, deleted_by=str(case_ctx.user.id))

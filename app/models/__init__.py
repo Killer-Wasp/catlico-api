@@ -16,6 +16,7 @@ from app.models.custom_field import CustomField, CustomFieldValue  # noqa: F401
 from app.models.flag import Flag  # noqa: F401
 from app.models.function import Function, FunctionRun  # noqa: F401
 from app.models.knowledge_base import KnowledgeBasePage, KnowledgeBasePageVersion  # noqa: F401
+from app.models.log import Log  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401
 from app.models.metric import Metric, CaseMetricValue  # noqa: F401
 from app.models.misp import MispServer  # noqa: F401
@@ -49,14 +50,23 @@ from app.models.task_share import TaskShare  # noqa: F401
 from app.models.user import User  # noqa: F401
 
 from sqlalchemy import DateTime as _DateTime  # noqa: E402
+from sqlalchemy import event as _event  # noqa: E402
+from sqlalchemy.orm import Mapper as _Mapper  # noqa: E402
 from sqlmodel import SQLModel as _SQLModel  # noqa: E402
 
-# All timestamps in this app are UTC instants produced by datetime.now(UTC) (tz-
-# aware). Force every DateTime column to be timezone-aware (Postgres timestamptz)
-# so those values bind correctly — asyncpg rejects an aware value into a naive
-# column. Applied once here, after every table is registered, so no field (now or
-# future) can silently regress to a naive column.
-for _table in _SQLModel.metadata.tables.values():
-    for _col in _table.columns:
-        if isinstance(_col.type, _DateTime):
-            _col.type.timezone = True
+
+# All timestamps in this app are tz-aware UTC instants (datetime.now(UTC) /
+# common.utcnow()). Force every DateTime column to be timezone-aware (Postgres
+# timestamptz) so those values bind and read back correctly.
+def _force_timezone_aware() -> None:
+    for _table in _SQLModel.metadata.tables.values():
+        for _col in _table.columns:
+            if isinstance(_col.type, _DateTime) and not _col.type.timezone:
+                _col.type.timezone = True
+
+
+# Apply now for every table imported above, and again after each mapper
+# configuration sweep so a model registered later (imported by a crud module but
+# not here — as `log` once was) can't silently regress to a naive column.
+_force_timezone_aware()
+_event.listen(_Mapper, "after_configured", _force_timezone_aware)

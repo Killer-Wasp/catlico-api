@@ -114,3 +114,112 @@ async def test_owner_can_update_and_delete(
     ).status_code == 204
     remaining = (await client.get("/api/v1/dashboards", headers=h)).json()
     assert board["id"] not in {d["id"] for d in remaining}
+
+
+async def _make_board(client, headers, name="Shared board"):
+    return (
+        await client.post(
+            "/api/v1/dashboards",
+            json={"name": name, "layout": _layout()},
+            headers=headers,
+        )
+    ).json()
+
+
+async def test_share_mint_then_public_view_renders_overview(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _h(analyst_a_token, org_a.id)
+    board = await _make_board(client, h)
+    assert board["share_enabled"] is False
+
+    mint = await client.post(f"/api/v1/dashboards/{board['id']}/share", headers=h)
+    assert mint.status_code == 200, mint.text
+    token = mint.json()["token"]
+    assert token and len(token) >= 32
+
+    # share_enabled now reflects the active link.
+    listed = (await client.get("/api/v1/dashboards", headers=h)).json()
+    assert next(d for d in listed if d["id"] == board["id"])["share_enabled"] is True
+
+    # The public view needs NO auth and returns layout + overview only.
+    pub = await client.get(f"/api/v1/public/dashboards/{token}")
+    assert pub.status_code == 200, pub.text
+    body = pub.json()
+    assert body["name"] == board["name"]
+    assert body["layout"] == _layout()
+    assert "overview" in body and "stats" in body["overview"]
+    # No tenancy metadata leaks.
+    assert "organisation_id" not in body
+    assert "created_by" not in body
+
+
+async def test_public_view_is_unauthenticated(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _h(analyst_a_token, org_a.id)
+    board = await _make_board(client, h)
+    token = (
+        await client.post(f"/api/v1/dashboards/{board['id']}/share", headers=h)
+    ).json()["token"]
+    # Explicitly no Authorization / X-Organisation-Id headers.
+    pub = await client.get(f"/api/v1/public/dashboards/{token}")
+    assert pub.status_code == 200
+
+
+async def test_revoke_invalidates_the_link(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _h(analyst_a_token, org_a.id)
+    board = await _make_board(client, h)
+    token = (
+        await client.post(f"/api/v1/dashboards/{board['id']}/share", headers=h)
+    ).json()["token"]
+    assert (await client.get(f"/api/v1/public/dashboards/{token}")).status_code == 200
+
+    rev = await client.delete(f"/api/v1/dashboards/{board['id']}/share", headers=h)
+    assert rev.status_code == 204
+    # Revoked token is now an indistinguishable 404.
+    assert (await client.get(f"/api/v1/public/dashboards/{token}")).status_code == 404
+    # Revoke is idempotent.
+    assert (
+        await client.delete(f"/api/v1/dashboards/{board['id']}/share", headers=h)
+    ).status_code == 204
+
+
+async def test_remint_rotates_and_invalidates_previous_token(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _h(analyst_a_token, org_a.id)
+    board = await _make_board(client, h)
+    first = (
+        await client.post(f"/api/v1/dashboards/{board['id']}/share", headers=h)
+    ).json()["token"]
+    second = (
+        await client.post(f"/api/v1/dashboards/{board['id']}/share", headers=h)
+    ).json()["token"]
+    assert first != second
+    assert (await client.get(f"/api/v1/public/dashboards/{first}")).status_code == 404
+    assert (await client.get(f"/api/v1/public/dashboards/{second}")).status_code == 200
+
+
+async def test_unknown_token_is_404(client: AsyncClient):
+    assert (
+        await client.get("/api/v1/public/dashboards/not-a-real-token")
+    ).status_code == 404
+
+
+async def test_only_owner_can_share_or_revoke(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token,
+    readonly_a, readonly_a_token,
+):
+    h = _h(analyst_a_token, org_a.id)
+    board = await _make_board(client, h)
+    other = _h(readonly_a_token, org_a.id)
+    # A non-owner in the same org cannot mint or revoke.
+    assert (
+        await client.post(f"/api/v1/dashboards/{board['id']}/share", headers=other)
+    ).status_code == 403
+    assert (
+        await client.delete(f"/api/v1/dashboards/{board['id']}/share", headers=other)
+    ).status_code == 403

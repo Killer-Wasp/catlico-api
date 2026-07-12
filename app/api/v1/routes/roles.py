@@ -118,7 +118,7 @@ async def update_role(
 @router.delete("/{role_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_role(
     role_id: uuid.UUID,
-    ctx: Annotated[AuthContext, require_active_permission("write:role")],
+    ctx: Annotated[AuthContext, require_active_permission("delete:role")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     role = await _role_in_org_or_404(session, role_id, ctx.organisation_id)

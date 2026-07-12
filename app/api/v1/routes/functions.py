@@ -102,7 +102,7 @@ async def delete_function(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    _require_perm(ctx, "write:function")
+    _require_perm(ctx, "delete:function")
     func = await func_crud.get_function(session, function_id, ctx.organisation_id)
     if not func:
         raise HTTPException(

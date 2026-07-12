@@ -249,7 +249,7 @@ async def delete_alert(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    _require_perm(ctx, "write:alert")
+    _require_perm(ctx, "delete:alert")
     alert = await _resolve_owned_alert(session, ctx, alert_id)
     await alert_crud.delete_alert(session, alert, deleted_by=str(ctx.user.id))
 
@@ -340,6 +340,29 @@ async def promote_alert(
             await tag_crud.set_tags(session, TaggableType.case, str(case.id), tpl_tags)
     await _import_alert_into_case(session, alert=alert, case_id=case.id, actor=str(ctx.user.id))
     return CasePublic.model_validate(case, from_attributes=True)
+
+
+@router.post("/{alert_id}/detach", response_model=AlertPublic)
+async def detach_alert(
+    alert_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AlertPublic:
+    """Reverse a promote/merge: unlink the alert from its case and return it to
+    New. Mirrors promotion's dual capability (it changes both alert and case
+    membership)."""
+    _require_perm(ctx, "write:alert")
+    _require_perm(ctx, "write:case")
+    alert = await _resolve_owned_alert(session, ctx, alert_id)
+
+    if alert.case_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Alert is not attached to a case",
+        )
+
+    alert = await alert_crud.mark_detached(session, alert, updated_by=str(ctx.user.id))
+    return AlertPublic.model_validate(alert, from_attributes=True)
 
 
 async def _import_alert_into_case(

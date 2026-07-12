@@ -7,11 +7,18 @@ from sqlmodel import Field, SQLModel
 T = TypeVar("T")
 
 
+def utcnow() -> datetime:
+    """The single source of truth for "now": a tz-aware UTC instant. Every
+    timestamp written by this app is tz-aware UTC (stored in Postgres
+    ``timestamptz``); never strip the tzinfo. See app/models/AGENTS.md."""
+    return datetime.now(UTC)
+
+
 class CreatedMixin(SQLModel):
     """Creation metadata. Subclasses that need a non-default author (e.g.
     system/analyzer-seeded rows) re-declare just `created_by`."""
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC).replace(tzinfo=None))
+    created_at: datetime = Field(default_factory=utcnow)
     created_by: str
 
 

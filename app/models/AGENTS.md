@@ -31,8 +31,13 @@ just `created_by`.
 **`SoftDeleteMixin` is a read-side obligation.** Every query against a soft-deletable
 table must filter `deleted_at IS NULL`. Nothing enforces this for you.
 
-Timestamps are stored **naive UTC** — `datetime.now(UTC).replace(tzinfo=None)`. Match
-that when writing a timestamp by hand; a tz-aware value will not compare correctly.
+Timestamps are **tz-aware UTC end-to-end** — call `common.utcnow()` (or
+`datetime.now(UTC)`) and store the aware value straight into the `timestamptz` column.
+**Never** `.replace(tzinfo=None)`: naive and aware values raise `TypeError` when
+compared, and every column here is `timestamptz`. Client-supplied datetimes are
+normalized to aware UTC on the way in (a naive input is assumed UTC). A test guard
+(`tests/test_datetime_normalization.py`) fails the build if a naive timestamp is
+reintroduced.
 
 ## Naming
 

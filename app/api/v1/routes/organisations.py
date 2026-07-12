@@ -261,7 +261,7 @@ async def update_member(
 )
 async def remove_member(
     member_user_id: uuid.UUID,
-    ctx: Annotated[OrgContext, require_permission("write:user")],
+    ctx: Annotated[OrgContext, require_permission("delete:user")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     member = await member_crud.get_member(session, member_user_id, ctx.organisation_id)
@@ -342,7 +342,7 @@ async def update_link(
 async def delete_link(
     organisation_id: str,
     to_org_id: str,
-    ctx: Annotated[OrgContext, require_permission("write:organisation")],
+    ctx: Annotated[OrgContext, require_permission("delete:organisation")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     link = await link_crud.get_link(session, organisation_id, to_org_id)

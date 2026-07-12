@@ -165,6 +165,59 @@ async def test_double_promote_conflicts(
     assert second.status_code == 409
 
 
+async def test_detach_unlinks_alert_and_returns_to_new(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    r = await client.post("/api/v1/alerts/", json=_alert_payload(), headers=h)
+    alert_id = r.json()["id"]
+    promo = await client.post(f"/api/v1/alerts/{alert_id}/promote", json={}, headers=h)
+    assert promo.status_code == 201, promo.text
+
+    detached = await client.post(f"/api/v1/alerts/{alert_id}/detach", headers=h)
+    assert detached.status_code == 200, detached.text
+    assert detached.json()["status"] == "New"
+    assert detached.json()["case_id"] is None
+
+    got = await client.get(f"/api/v1/alerts/{alert_id}", headers=h)
+    assert got.json()["status"] == "New"
+    assert got.json()["case_id"] is None
+
+    # Re-promotable after detaching (no longer 409).
+    assert (
+        await client.post(f"/api/v1/alerts/{alert_id}/promote", json={}, headers=h)
+    ).status_code == 201
+
+
+async def test_detach_unattached_alert_conflicts(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    r = await client.post("/api/v1/alerts/", json=_alert_payload(), headers=h)
+    alert_id = r.json()["id"]
+    # Never promoted → not attached to any case.
+    resp = await client.post(f"/api/v1/alerts/{alert_id}/detach", headers=h)
+    assert resp.status_code == 409
+
+
+async def test_detach_is_org_scoped(
+    client: AsyncClient, org_a, org_b, builtin_roles,
+    analyst_a, analyst_a_token, analyst_b, analyst_b_token,
+):
+    ha = _headers(analyst_a_token, org_a.id)
+    r = await client.post("/api/v1/alerts/", json=_alert_payload(), headers=ha)
+    alert_id = r.json()["id"]
+    assert (
+        await client.post(f"/api/v1/alerts/{alert_id}/promote", json={}, headers=ha)
+    ).status_code == 201
+
+    hb = _headers(analyst_b_token, org_b.id)
+    # Org B cannot see or detach org A's alert.
+    assert (
+        await client.post(f"/api/v1/alerts/{alert_id}/detach", headers=hb)
+    ).status_code == 404
+
+
 async def test_soft_delete_hides_alert(
     client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
 ):

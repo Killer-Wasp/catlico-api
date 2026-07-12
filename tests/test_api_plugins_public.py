@@ -335,6 +335,37 @@ async def test_superadmin_can_test_plugin_config(
     assert r.status_code == 200, r.text
 
 
+async def test_config_test_clears_auto_suspension(
+    client: AsyncClient, runner_secret, admin_token, org_a, session,
+):
+    """A passing config test lifts a circuit-breaker auto-suspension."""
+    from app.models.plugin_runner import OrgPlugin
+
+    plugin_id, _ = await _setup_runner_and_plugin(client, admin_token)
+    h = _h(admin_token, org_a.id)
+    await client.put(
+        f"/api/v1/plugins/{plugin_id}/config",
+        json={"settings": {}, "secrets": {"api_key": "s3cr3t"}},
+        headers=h,
+    )
+
+    # Simulate a tripped breaker on the org's plugin.
+    op = await session.get(OrgPlugin, (org_a.id, plugin_id))
+    if op is None:
+        op = OrgPlugin(organisation_id=org_a.id, plugin_id=plugin_id, enabled=True)
+        session.add(op)
+    op.suspended_reason = "Auto-suspended after 3 consecutive configuration failures."
+    op.config_failure_streak = 3
+    await session.flush()
+
+    r = await client.post(f"/api/v1/plugins/{plugin_id}/config/test", headers=h)
+    assert r.status_code == 200, r.text
+
+    refreshed = await session.get(OrgPlugin, (org_a.id, plugin_id))
+    assert refreshed.suspended_reason is None
+    assert refreshed.config_failure_streak == 0
+
+
 # A required secret declared via `type = "secret"` alone — no `secret: true`
 # boolean. `_is_secret_param` accepts this convention; the config/test route must
 # agree, otherwise it reports the plugin "valid" while the enable gate blocks it.

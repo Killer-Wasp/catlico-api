@@ -19,20 +19,28 @@ class Permission(str, Enum):
 
     read_investigation = "read:investigation"
     write_investigation = "write:investigation"
+    delete_investigation = "delete:investigation"
     read_intel = "read:intel"
     write_intel = "write:intel"
+    delete_intel = "delete:intel"
     run_enrichment = "run:enrichment"
     run_function = "run:function"
     read_org = "read:org"
     write_org = "write:org"
+    delete_org = "delete:org"
     read_access = "read:access"
     write_access = "write:access"
+    delete_access = "delete:access"
 
 
 # Each grantable group expands to the fine-grained capability strings that route
 # guards (`require_permission`, `require_case_permission`, ...) actually check. Any
 # string not a key here passes through ``expand_permissions`` unchanged, so a raw
 # capability or a plugin-only permission (e.g. "write:plugin_result") still works.
+# Delete is a distinct grantable group per domain (`delete:<domain>`), separate
+# from `write:<domain>`: a role can be granted edit without destroy. The DELETE
+# route guards check the fine-grained `delete:*` capabilities, which only the
+# delete groups expand to — a `write:*` grant no longer implies delete.
 PERMISSION_GROUPS: dict[str, set[str]] = {
     Permission.read_investigation.value: {
         "read:case", "read:task", "read:observable", "read:alert",
@@ -40,18 +48,26 @@ PERMISSION_GROUPS: dict[str, set[str]] = {
     Permission.write_investigation.value: {
         "write:case", "write:task", "write:observable", "write:alert",
     },
+    Permission.delete_investigation.value: {
+        "delete:case", "delete:task", "delete:observable", "delete:alert",
+    },
     Permission.read_intel.value: {
         "read:custom_field", "read:knowledge_base", "read:function",
     },
     Permission.write_intel.value: {
         "write:custom_field", "write:knowledge_base", "write:function",
     },
+    Permission.delete_intel.value: {
+        "delete:custom_field", "delete:knowledge_base", "delete:function",
+    },
     Permission.run_enrichment.value: {"run:enrichment"},
     Permission.run_function.value: {"run:function"},
     Permission.read_org.value: {"read:organisation", "read:connector"},
     Permission.write_org.value: {"write:organisation", "write:connector"},
+    Permission.delete_org.value: {"delete:organisation"},
     Permission.read_access.value: {"read:user", "read:role"},
     Permission.write_access.value: {"write:user", "write:role"},
+    Permission.delete_access.value: {"delete:user", "delete:role"},
 }
 
 #: Every group value — the full grant surface (what a superadmin holds).
@@ -76,6 +92,7 @@ BUILTIN_ROLES: dict[str, set[Permission]] = {
     "org-admin": set(Permission),
     "analyst": {
         Permission.read_investigation, Permission.write_investigation,
+        Permission.delete_investigation,
         Permission.read_intel,
         Permission.run_enrichment, Permission.run_function,
         Permission.read_org,

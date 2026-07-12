@@ -16,19 +16,19 @@ def _h(token, org):
     return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org}
 
 
-async def test_permission_catalog_lists_ten_groups(client: AsyncClient, admin_token):
+async def test_permission_catalog_lists_all_groups(client: AsyncClient, admin_token):
     r = await client.get("/api/v1/permissions/", headers={"Authorization": f"Bearer {admin_token}"})
     assert r.status_code == 200, r.text
     catalog = r.json()
     keys = {c["key"] for c in catalog}
     assert keys == {
-        "read:investigation", "write:investigation",
-        "read:intel", "write:intel",
+        "read:investigation", "write:investigation", "delete:investigation",
+        "read:intel", "write:intel", "delete:intel",
         "run:enrichment", "run:function",
-        "read:org", "write:org",
-        "read:access", "write:access",
+        "read:org", "write:org", "delete:org",
+        "read:access", "write:access", "delete:access",
     }
-    assert all(c["kind"] in {"read", "write", "run"} for c in catalog)
+    assert all(c["kind"] in {"read", "write", "delete", "run"} for c in catalog)
 
 
 async def test_me_permissions_expands_groups(

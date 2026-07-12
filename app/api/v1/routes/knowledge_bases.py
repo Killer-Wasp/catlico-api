@@ -9,6 +9,8 @@ from app.crud import knowledge_base as kb_crud
 from app.models.common import Page
 from app.models.knowledge_base import (
     KnowledgeBasePageCreate,
+    KnowledgeBasePageExport,
+    KnowledgeBasePageImport,
     KnowledgeBasePagePublic,
     KnowledgeBasePageUpdate,
     KnowledgeBasePageVersionPublic,
@@ -61,6 +63,26 @@ async def create_kb_page(
     return await kb_crud.public_page(session, page)
 
 
+@router.post(
+    "/import",
+    response_model=KnowledgeBasePagePublic,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_kb_page(
+    document: KnowledgeBasePageImport,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> KnowledgeBasePagePublic:
+    _require_perm(ctx, "write:knowledge_base")
+    page = await kb_crud.import_page(
+        session,
+        document,
+        organisation_id=ctx.organisation_id,
+        actor=ctx.user,
+    )
+    return await kb_crud.public_page(session, page)
+
+
 @router.patch("/{page_id}", response_model=KnowledgeBasePagePublic)
 async def update_kb_page(
     page_id: int,
@@ -97,6 +119,21 @@ async def list_kb_page_versions(
     ]
 
 
+@router.get("/{page_id}/export", response_model=KnowledgeBasePageExport)
+async def export_kb_page(
+    page_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> KnowledgeBasePageExport:
+    _require_perm(ctx, "read:knowledge_base")
+    page = await kb_crud.get_page(session, page_id, ctx.organisation_id)
+    if not page:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base page not found"
+        )
+    return await kb_crud.export_page(session, page)
+
+
 @router.post("/{page_id}/versions/{version_id}/revert", response_model=KnowledgeBasePagePublic)
 async def revert_kb_page(
     page_id: int,
@@ -127,7 +164,7 @@ async def delete_kb_page(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    _require_perm(ctx, "write:knowledge_base")
+    _require_perm(ctx, "delete:knowledge_base")
     page = await kb_crud.get_page(session, page_id, ctx.organisation_id)
     if not page:
         raise HTTPException(

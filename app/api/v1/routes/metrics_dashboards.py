@@ -1,8 +1,10 @@
 """G2+G3: Metrics and dashboards CRUD + routes (condensed)."""
 
+import hashlib
+import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_ as sa_or
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,13 +13,21 @@ from sqlmodel import select
 from app.api.deps import ActiveOrgContext, CaseAuthContext, require_case_permission
 from app.core.db import get_session
 from app.crud.pagination import paginate
+from app.crud.overview import build_overview
 
 # --- Metrics ---
 
 from app.models.metric import (
     CaseMetricUpdate, CaseMetricPublic, Metric, MetricCreate, MetricUpdate, MetricPublic, CaseMetricValue,
 )
-from app.models.dashboard import Dashboard, DashboardCreate, DashboardUpdate, DashboardPublic
+from app.models.dashboard import (
+    Dashboard,
+    DashboardCreate,
+    DashboardUpdate,
+    DashboardPublic,
+    DashboardShareToken,
+    PublicDashboardView,
+)
 from app.models.common import Page
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -144,9 +154,17 @@ def _public(dashboard: Dashboard, ctx: ActiveOrgContext, owner_name: str | None)
         created_by=dashboard.created_by,
         is_owner=_owns(dashboard, ctx),
         owner_name=owner_name,
+        share_enabled=dashboard.share_token_hash is not None,
         created_at=dashboard.created_at,
         updated_at=dashboard.updated_at,
     )
+
+
+def _hash_share_token(token: str) -> str:
+    """SHA-256 hex of a share token. Tokens are 256-bit random, so a plain hash
+    (no per-token salt) is sufficient — brute-forcing the preimage is infeasible
+    and the hash is only ever compared for equality on lookup."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 async def _load_owned(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db) -> Dashboard:
@@ -239,3 +257,59 @@ async def delete_dashboard(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db=De
     d = await _load_owned(dashboard_id, ctx, db)
     await db.delete(d)
     await db.flush()
+
+
+@dash_router.post("/{dashboard_id}/share", response_model=DashboardShareToken)
+async def create_share_link(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db=Depends(get_session)):
+    """Mint (or rotate) the read-only public share token for a dashboard. Only
+    the owner may share. The plaintext token is returned exactly once here — only
+    its hash is stored — so re-minting rotates and invalidates the previous link."""
+    d = await _load_owned(dashboard_id, ctx, db)
+    token = secrets.token_urlsafe(32)
+    d.share_token_hash = _hash_share_token(token)
+    d.updated_by = str(ctx.user.id)
+    db.add(d)
+    await db.flush()
+    return DashboardShareToken(token=token)
+
+
+@dash_router.delete("/{dashboard_id}/share", status_code=204)
+async def revoke_share_link(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db=Depends(get_session)):
+    """Revoke the public share link. Idempotent — revoking an unshared dashboard
+    is a no-op success."""
+    d = await _load_owned(dashboard_id, ctx, db)
+    d.share_token_hash = None
+    d.updated_by = str(ctx.user.id)
+    db.add(d)
+    await db.flush()
+
+
+# --- Public (unauthenticated) share view ---
+
+public_dash_router = APIRouter(prefix="/public/dashboards", tags=["dashboards"])
+
+
+@public_dash_router.get("/{token}", response_model=PublicDashboardView)
+async def public_dashboard(
+    token: str,
+    trend_days: int = Query(default=14, ge=1, le=365),
+    db=Depends(get_session),
+):
+    """Render a shared dashboard with no authentication. The token is hashed and
+    matched against ``share_token_hash``; a miss (or a revoked link) is an
+    indistinguishable 404. Only the board layout and the org-scoped overview
+    aggregates are returned — never owner/tenancy metadata."""
+    token_hash = _hash_share_token(token)
+    d = (
+        await db.execute(
+            select(Dashboard).where(Dashboard.share_token_hash == token_hash)
+        )
+    ).scalar_one_or_none()
+    if d is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    return PublicDashboardView(
+        name=d.name,
+        description=d.description,
+        layout=d.layout,
+        overview=await build_overview(db, d.organisation_id, trend_days=trend_days),
+    )

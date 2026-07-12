@@ -12,7 +12,7 @@ class PermissionInfo(SQLModel):
     key: str
     #: Display grouping for the UI matrix (one row per domain).
     domain: str
-    #: read | write | run — the column the checkbox sits in.
+    #: read | write | delete | run — the column the checkbox sits in.
     kind: str
     label: str
     description: str
@@ -28,12 +28,18 @@ PERMISSION_CATALOG: list[PermissionInfo] = [
     PermissionInfo(key="write:investigation", domain="Investigation", kind="write",
                    label="Edit investigations",
                    description="Create and edit cases, tasks, observables and alerts."),
+    PermissionInfo(key="delete:investigation", domain="Investigation", kind="delete",
+                   label="Delete investigations",
+                   description="Delete cases, tasks, observables and alerts."),
     PermissionInfo(key="read:intel", domain="Intel", kind="read",
                    label="View intel",
                    description="Read custom fields, knowledge base and function definitions."),
     PermissionInfo(key="write:intel", domain="Intel", kind="write",
                    label="Edit intel",
                    description="Manage custom fields, knowledge base and function definitions."),
+    PermissionInfo(key="delete:intel", domain="Intel", kind="delete",
+                   label="Delete intel",
+                   description="Delete custom fields, knowledge base pages and function definitions."),
     PermissionInfo(key="run:enrichment", domain="Automation", kind="run",
                    label="Run enrichment",
                    description="Trigger plugin / enrichment runs."),
@@ -46,12 +52,18 @@ PERMISSION_CATALOG: list[PermissionInfo] = [
     PermissionInfo(key="write:org", domain="Organisation", kind="write",
                    label="Manage organisation",
                    description="Manage org profile, SLAs, notifications, API keys and integrations."),
+    PermissionInfo(key="delete:org", domain="Organisation", kind="delete",
+                   label="Delete organisation links",
+                   description="Remove organisation links."),
     PermissionInfo(key="read:access", domain="Access", kind="read",
                    label="View members & roles",
                    description="Read members and roles."),
     PermissionInfo(key="write:access", domain="Access", kind="write",
                    label="Manage members & roles",
                    description="Add/remove members and assign roles."),
+    PermissionInfo(key="delete:access", domain="Access", kind="delete",
+                   label="Delete members & roles",
+                   description="Remove members and delete roles."),
 ]
 
 assert {info.key for info in PERMISSION_CATALOG} == {p.value for p in Permission}, (

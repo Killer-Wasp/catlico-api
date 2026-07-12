@@ -18,6 +18,7 @@ from app.core.db import get_session
 from app.crud import alert as alert_crud
 from app.crud import case_ as case_crud
 from app.crud import observable as obs_crud
+from app.services import plugin_circuit_breaker as circuit_breaker
 from app.models.plugin_runner import (
     PluginRunner as PluginRunnerModel,
     PluginRunnerHeartbeat,
@@ -647,5 +648,8 @@ async def submit_result(
     run.ended_at = datetime.now(UTC)
     if run.status in {"success", "failure", "timeout", "cancelled", "skipped"}:
         _invalidate_runtime_token(run)
+        await circuit_breaker.record_run_outcome(
+            session, run, threshold=settings.PLUGIN_CONFIG_FAILURE_THRESHOLD
+        )
     await session.flush()
     return {"status": run.status}

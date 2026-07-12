@@ -153,7 +153,7 @@ async def delete_observable(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     obs, is_owner, perms = await _resolve_observable_visibility(session, ctx, observable_id)
-    _require("write:observable", perms)
+    _require("delete:observable", perms)
     if not (is_owner or obs.organisation_id == ctx.organisation_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

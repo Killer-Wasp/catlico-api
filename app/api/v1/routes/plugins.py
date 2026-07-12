@@ -13,6 +13,7 @@ from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
 from app.crud import plugin_stats as stats_crud
 from app.services import plugin_audit
+from app.services import plugin_circuit_breaker as circuit_breaker
 from app.models.plugin_runner import (
     OrgPlugin,
     PluginConfig,
@@ -674,6 +675,9 @@ async def test_plugin_config(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"missing": required_secrets},
             )
+    # A passing config test is the admin's "config is fixed" signal: clear any
+    # auto-suspension so the circuit breaker re-enables dispatch.
+    await circuit_breaker.clear_suspension(session, ctx.organisation_id, plugin_id)
     return {"ok": True, "message": "Plugin configuration is valid."}
 
 

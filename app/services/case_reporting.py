@@ -1,7 +1,7 @@
 """G4: Case reporting service — render templates with case data."""
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -33,7 +33,7 @@ async def render_report(
         "created_at": case.created_at.isoformat() if case.created_at else "",
         "updated_at": case.updated_at.isoformat() if case.updated_at else "",
         "assignee": str(case.assignee_id) if case.assignee_id else "",
-        "date": datetime.now().isoformat(),
+        "date": datetime.now(UTC).isoformat(),
     }
 
     # Simple {{ placeholder }} replacement

@@ -74,6 +74,82 @@ async def test_get_unknown_runner_404(client: AsyncClient, admin_token):
     assert r.status_code == 404
 
 
+async def test_re_enroll_mints_fresh_token(
+    client: AsyncClient, admin_token,
+):
+    create = await client.post(
+        "/api/v1/plugin-runners",
+        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert create.status_code == 200, create.text
+    original_token = create.json()["enrollment_token"]
+
+    r = await client.post(
+        "/api/v1/plugin-runners/runner-1/re-enroll",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["id"] == "runner-1"
+    assert data["enrollment_state"] == "pending"
+    assert data["enrollment_token"]
+    assert data["enrollment_token"] != original_token
+    assert data["enrollment_token_expires_at"]
+
+
+async def test_re_enroll_unknown_runner_404(client: AsyncClient, admin_token):
+    r = await client.post(
+        "/api/v1/plugin-runners/ghost/re-enroll",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 404
+
+
+async def test_non_superadmin_cannot_re_enroll(
+    client: AsyncClient, org_a, analyst_a_token, admin_token,
+):
+    await client.post(
+        "/api/v1/plugin-runners",
+        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    r = await client.post(
+        "/api/v1/plugin-runners/runner-1/re-enroll",
+        headers=_h(analyst_a_token, org_a.id),
+    )
+    assert r.status_code == 403
+
+
+async def test_re_enrolled_token_can_register(
+    client: AsyncClient, admin_token,
+):
+    """The freshly minted token completes the runner-side register exchange."""
+    await client.post(
+        "/api/v1/plugin-runners",
+        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    r = await client.post(
+        "/api/v1/plugin-runners/runner-1/re-enroll",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    token = r.json()["enrollment_token"]
+    register = await client.post(
+        "/api/internal/plugin-runner/register",
+        json={
+            "id": "runner-1",
+            "name": "Test Runner",
+            "version": "0.1.0",
+            "capabilities": ["container"],
+            "isolation_mode": "container",
+            "enrollment_token": token,
+        },
+    )
+    assert register.status_code == 200, register.text
+    assert register.json()["runner_credential"].startswith("cpr_")
+
+
 async def test_health_check_endpoint(
     client: AsyncClient, admin_token, monkeypatch,
 ):

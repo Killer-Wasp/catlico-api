@@ -707,11 +707,11 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
         )
         # Backdate creation and stamp the resolve so the trend/MTTR windows see
         # it. `updated_at` is the resolve-time proxy the dashboard reads.
-        resolved_case.created_at = created_at.replace(tzinfo=None)
+        resolved_case.created_at = created_at
         resolved_case.status = CaseStatus.resolved
         resolved_case.resolution_status = spec.resolution
         resolved_case.end_date = resolved_at
-        resolved_case.updated_at = resolved_at.replace(tzinfo=None)
+        resolved_case.updated_at = resolved_at
         resolved_case.updated_by = str(analyst.id)
         session.add(resolved_case)
         await session.flush()
@@ -760,7 +760,7 @@ async def seed_local_demo_data(session: AsyncSession) -> None:
             owner_role_id=admin_role.id,
             created_by=str(analyst.id),
         )
-        open_case.created_at = created_at.replace(tzinfo=None)
+        open_case.created_at = created_at
         session.add(open_case)
         await session.flush()
         await tag_crud.set_tags(

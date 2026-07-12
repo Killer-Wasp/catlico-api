@@ -101,7 +101,7 @@ async def update_field(
         and field.field_type != CustomFieldType.string
     ):
         raise ValueError("options are only valid for string custom fields")
-    update_data["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
+    update_data["updated_at"] = datetime.now(UTC)
     update_data["updated_by"] = updated_by
     field.sqlmodel_update(update_data)
     session.add(field)
@@ -112,7 +112,7 @@ async def update_field(
 async def delete_field(
     session: AsyncSession, field: CustomField, deleted_by: str
 ) -> None:
-    field.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+    field.deleted_at = datetime.now(UTC)
     field.deleted_by = deleted_by
     session.add(field)
     await session.flush()

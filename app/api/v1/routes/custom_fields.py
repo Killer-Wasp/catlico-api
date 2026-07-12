@@ -108,6 +108,6 @@ async def delete_custom_field(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    _require_perm(ctx, "write:custom_field")
+    _require_perm(ctx, "delete:custom_field")
     field = await _resolve(session, ctx, field_id)
     await cf_crud.delete_field(session, field, deleted_by=str(ctx.user.id))

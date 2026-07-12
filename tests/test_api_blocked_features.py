@@ -221,6 +221,50 @@ async def test_sla_org_scoped(client: AsyncClient, org_a, org_b, analyst_a_token
     assert lst.json()["total"] == 0
 
 
+async def test_sla_delete(client: AsyncClient, org_a, analyst_a_token):
+    h = _h(analyst_a_token, org_a.id)
+    await client.put(
+        "/api/v1/sla-policies/",
+        json=[
+            {"severity": 2, "ack_seconds": 900, "resolve_seconds": 14400},
+            {"severity": 4, "ack_seconds": 300, "resolve_seconds": 3600},
+        ],
+        headers=h,
+    )
+    policies = (await client.get("/api/v1/sla-policies/", headers=h)).json()["items"]
+    target = next(p for p in policies if p["severity"] == 2)
+
+    deleted = await client.delete(f"/api/v1/sla-policies/{target['id']}", headers=h)
+    assert deleted.status_code == 204, deleted.text
+
+    remaining = (await client.get("/api/v1/sla-policies/", headers=h)).json()
+    assert remaining["total"] == 1
+    assert remaining["items"][0]["severity"] == 4
+
+    # Deleting an unknown id 404s.
+    missing = await client.delete("/api/v1/sla-policies/999999", headers=h)
+    assert missing.status_code == 404
+
+
+async def test_sla_delete_is_org_scoped(
+    client: AsyncClient, org_a, org_b, analyst_a_token, analyst_b_token
+):
+    ha = _h(analyst_a_token, org_a.id)
+    await client.put(
+        "/api/v1/sla-policies/",
+        json=[{"severity": 1, "ack_seconds": 60, "resolve_seconds": 120}],
+        headers=ha,
+    )
+    policy_id = (await client.get("/api/v1/sla-policies/", headers=ha)).json()["items"][0]["id"]
+
+    hb = _h(analyst_b_token, org_b.id)
+    # Org B cannot delete org A's policy — it resolves to 404, not a silent delete.
+    cross = await client.delete(f"/api/v1/sla-policies/{policy_id}", headers=hb)
+    assert cross.status_code == 404
+    still_there = (await client.get("/api/v1/sla-policies/", headers=ha)).json()
+    assert still_there["total"] == 1
+
+
 # ── Phase 2: Knowledge Base ─────────────────────────────────────────────────
 
 async def test_kb_crud(client: AsyncClient, org_a, analyst_a_token):
@@ -346,6 +390,76 @@ async def test_kb_versions_are_org_scoped(
             headers=hb,
         )
     ).status_code == 404
+
+
+async def test_kb_export_and_import_json_document(
+    client: AsyncClient, org_a, analyst_a_token
+):
+    h = _h(analyst_a_token, org_a.id)
+    created = await client.post(
+        "/api/v1/knowledge-base/",
+        json={
+            "title": "Exported",
+            "summary": "Portable",
+            "tags": ["portable"],
+            "content": "Carry me",
+        },
+        headers=h,
+    )
+    page_id = created.json()["id"]
+
+    exported = await client.get(f"/api/v1/knowledge-base/{page_id}/export", headers=h)
+    assert exported.status_code == 200, exported.text
+    document = exported.json()
+    assert document["page"]["title"] == "Exported"
+    assert document["versions"][0]["action"] == "create"
+
+    imported = await client.post(
+        "/api/v1/knowledge-base/import",
+        json=document,
+        headers=h,
+    )
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["id"] != page_id
+    assert imported.json()["title"] == "Exported"
+    assert imported.json()["content"] == "Carry me"
+
+    imported_history = await client.get(
+        f"/api/v1/knowledge-base/{imported.json()['id']}/versions",
+        headers=h,
+    )
+    assert imported_history.json()[0]["action"] == "import"
+
+
+async def test_kb_cross_org_cannot_export(
+    client: AsyncClient, org_a, org_b, analyst_a_token, analyst_b_token
+):
+    ha = _h(analyst_a_token, org_a.id)
+    hb = _h(analyst_b_token, org_b.id)
+    created = await client.post(
+        "/api/v1/knowledge-base/",
+        json={"title": "Org A", "content": "private"},
+        headers=ha,
+    )
+    page_id = created.json()["id"]
+
+    export = await client.get(f"/api/v1/knowledge-base/{page_id}/export", headers=hb)
+    assert export.status_code == 404
+
+
+async def test_kb_readonly_user_cannot_import(
+    client: AsyncClient, org_a, readonly_a_token
+):
+    reader_h = _h(readonly_a_token, org_a.id)
+    imported = await client.post(
+        "/api/v1/knowledge-base/import",
+        json={
+            "page": {"title": "Reader import", "content": "blocked"},
+            "versions": [],
+        },
+        headers=reader_h,
+    )
+    assert imported.status_code == 403
 
 
 # ── Phase 3: Notifiers ──────────────────────────────────────────────────────

@@ -10,9 +10,12 @@ from app.models.knowledge_base import (
     KnowledgeBaseContributor,
     KnowledgeBasePage,
     KnowledgeBasePageCreate,
+    KnowledgeBasePageExport,
+    KnowledgeBasePageImport,
     KnowledgeBasePagePublic,
     KnowledgeBasePageUpdate,
     KnowledgeBasePageVersion,
+    KnowledgeBasePageVersionPublic,
     KnowledgeBaseVersionAction,
 )
 from app.models.user import User
@@ -106,6 +109,7 @@ async def create_page(
     *,
     organisation_id: str,
     actor: User,
+    action: KnowledgeBaseVersionAction = "create",
 ) -> KnowledgeBasePage:
     page = KnowledgeBasePage(
         organisation_id=organisation_id,
@@ -117,7 +121,7 @@ async def create_page(
     )
     session.add(page)
     await session.flush()
-    await record_version(session, page, action="create", actor=actor)
+    await record_version(session, page, action=action, actor=actor)
     return page
 
 
@@ -131,7 +135,7 @@ async def update_page(
     update_data = page_in.model_dump(exclude_unset=True)
     for k, v in update_data.items():
         setattr(page, k, v)
-    page.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    page.updated_at = datetime.now(UTC)
     page.updated_by = str(actor.id)
     session.add(page)
     await session.flush()
@@ -142,7 +146,7 @@ async def update_page(
 async def delete_page(
     session: AsyncSession, page: KnowledgeBasePage, deleted_by: str
 ) -> None:
-    page.deleted_at = datetime.now(UTC).replace(tzinfo=None)
+    page.deleted_at = datetime.now(UTC)
     page.deleted_by = deleted_by
     session.add(page)
     await session.flush()
@@ -225,7 +229,7 @@ async def revert_page(
     page.summary = snapshot.get("summary", "")
     page.tags = list(snapshot.get("tags", []))
     page.content = snapshot.get("content", "")
-    page.updated_at = datetime.now(UTC).replace(tzinfo=None)
+    page.updated_at = datetime.now(UTC)
     page.updated_by = str(actor.id)
     session.add(page)
     await session.flush()
@@ -238,3 +242,39 @@ async def revert_page(
         reverted_from_version_id=version.id,
     )
     return page
+
+
+async def export_page(
+    session: AsyncSession, page: KnowledgeBasePage
+) -> KnowledgeBasePageExport:
+    """Assemble a portable JSON document: the current page plus full history."""
+    return KnowledgeBasePageExport(
+        page=await public_page(session, page),
+        versions=[
+            KnowledgeBasePageVersionPublic.model_validate(v, from_attributes=True)
+            for v in await list_versions(session, page.id, page.organisation_id)
+        ],
+    )
+
+
+async def import_page(
+    session: AsyncSession,
+    document: KnowledgeBasePageImport,
+    *,
+    organisation_id: str,
+    actor: User,
+) -> KnowledgeBasePage:
+    """Create a fresh page from an exported document.
+
+    A new id is minted in the importing org; the incoming version history is not
+    transplanted (ids/authorship belong to the source page). The import is
+    recorded as a single ``import`` version so the new page starts with a clean,
+    org-attributed history.
+    """
+    return await create_page(
+        session,
+        document.page,
+        organisation_id=organisation_id,
+        actor=actor,
+        action="import",
+    )

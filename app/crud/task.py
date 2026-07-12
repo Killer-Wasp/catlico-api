@@ -341,7 +341,7 @@ async def update_task(
         if field not in ("updated_at", "updated_by")
         and getattr(task, field, None) != new
     }
-    update_data["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
+    update_data["updated_at"] = datetime.now(UTC)
     update_data["updated_by"] = updated_by
     task.sqlmodel_update(update_data)
     session.add(task)
@@ -361,7 +361,7 @@ async def update_task(
 
 async def delete_task(session: AsyncSession, task: Task, deleted_by: str) -> None:
     """Soft delete: mark the task deleted and cascade the flag to its logs."""
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now = datetime.now(UTC)
     task.deleted_at = now
     task.deleted_by = deleted_by
     session.add(task)
