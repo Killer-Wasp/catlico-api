@@ -14,9 +14,11 @@ from uuid import uuid4
 from httpx import AsyncClient
 
 from app.core.security import TokenPayload, create_access_token
+from app.crud.api_key import create_key
 from app.crud.organisation_member import add_member
 from app.crud.role import create_role
 from app.crud.user import create_user
+from app.models.api_key import ApiKeyCreate
 from app.models.audit import Audit, AuditOutbox
 from app.models.organisation_member import OrganisationMemberCreate
 from app.models.role import Permission, RoleCreate
@@ -267,6 +269,93 @@ async def test_member_without_read_cap_forbidden(
     )
     assert r.status_code == 403, r.text
     assert "read:case" in r.json()["detail"]
+
+
+async def test_api_key_pinned_to_a_cannot_read_org_b_events(
+    client: AsyncClient, session, org_a, org_b, analyst_a
+):
+    """A thp_ API key is pinned to its own org (deps.py:220-224): using it to
+    request another org's events is a 403, never a cross-tenant leak."""
+    await _seed_event(session, org_b.id)
+    await session.commit()
+
+    _, api_key = await create_key(
+        session,
+        ApiKeyCreate(name="events-key", scopes=[Permission.read_investigation.value]),
+        organisation_id=org_a.id,
+        created_by="test",
+    )
+    await session.commit()
+
+    r = await client.get(
+        "/api/v1/events", params={"organisation_id": org_b.id}, headers=_auth(api_key)
+    )
+    assert r.status_code == 403, r.text
+
+
+async def test_api_key_reads_its_own_org_events(
+    client: AsyncClient, session, org_a, analyst_a
+):
+    """Positive control: the same key reads its OWN org's events (read:case
+    expanded from read:investigation scope)."""
+    oid = await _seed_event(session, org_a.id)
+    await session.commit()
+
+    _, api_key = await create_key(
+        session,
+        ApiKeyCreate(name="events-key-own", scopes=[Permission.read_investigation.value]),
+        organisation_id=org_a.id,
+        created_by="test",
+    )
+    await session.commit()
+
+    r = await client.get(
+        "/api/v1/events", params={"organisation_id": org_a.id}, headers=_auth(api_key)
+    )
+    assert r.status_code == 200, r.text
+    assert [e["event_id"] for e in r.json()["events"]] == [f"audit:{oid}"]
+
+
+async def test_member_of_both_orgs_can_read_either(
+    client: AsyncClient, session, org_a, org_b, builtin_roles, builtin_roles_b, admin_user
+):
+    """A user who is a member of both A and B can read either org's feed."""
+    user = await create_user(
+        session,
+        UserCreate(
+            first_name="Both", last_name="Orgs", email="both@test.com", password="password123"
+        ),
+    )
+    await add_member(
+        session,
+        org_a.id,
+        OrganisationMemberCreate(user_id=user.id, role_id=builtin_roles["org-admin"].id),
+        created_by=str(admin_user.id),
+    )
+    await add_member(
+        session,
+        org_b.id,
+        OrganisationMemberCreate(user_id=user.id, role_id=builtin_roles_b["org-admin"].id),
+        created_by=str(admin_user.id),
+    )
+    a_id = await _seed_event(session, org_a.id)
+    b_id = await _seed_event(session, org_b.id)
+    await session.commit()
+    token = create_access_token(
+        TokenPayload(user_id=user.id, is_superadmin=False, organisations=[org_a.id, org_b.id])
+    )
+
+    ra = await client.get(
+        "/api/v1/events", params={"organisation_id": org_a.id}, headers=_auth(token)
+    )
+    assert ra.status_code == 200, ra.text
+    assert [e["event_id"] for e in ra.json()["events"]] == [f"audit:{a_id}"]
+
+    rb = await client.get(
+        "/api/v1/events", params={"organisation_id": org_b.id}, headers=_auth(token)
+    )
+    assert rb.status_code == 200, rb.text
+    assert [e["event_id"] for e in rb.json()["events"]] == [f"audit:{b_id}"]
 
 
 # --- Edge: nothing new / beyond retention -----------------------------------
