@@ -304,7 +304,13 @@ async def apply(
         else:
             allowed = {"severity", "status"}
         update = CaseUpdate(**{k: v for k, v in payload.items() if k in allowed})
-        await case_crud.update_case(session, case, update, updated_by=actor)
+        await case_crud.update_case(
+            session,
+            case,
+            update,
+            updated_by=actor,
+            organisation_id=action.organisation_id,
+        )
         return
 
     if action_type == "create_task":

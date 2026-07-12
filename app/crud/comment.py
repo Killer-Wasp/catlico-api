@@ -65,6 +65,7 @@ async def create_comment(
         context_type=ctx_type,
         context_id=ctx_id,
         actor=created_by,
+        organisation_id=comment.organisation_id,
     )
     return comment
 
@@ -85,6 +86,7 @@ async def update_comment(
         context_type=ctx_type,
         context_id=ctx_id,
         actor=updated_by,
+        organisation_id=comment.organisation_id,
     )
     return comment
 
@@ -102,4 +104,5 @@ async def delete_comment(session: AsyncSession, comment: Comment, deleted_by: st
         context_type=ctx_type,
         context_id=ctx_id,
         actor=deleted_by,
+        organisation_id=comment.organisation_id,
     )

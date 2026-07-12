@@ -317,6 +317,7 @@ async def create_task(
         context_id=str(case_id),
         actor=created_by,
         details={"title": task.title, "group": task.group},
+        organisation_id=task.organisation_id,
     )
     return task
 
@@ -355,6 +356,7 @@ async def update_task(
             context_id=str(task.case_id),
             actor=updated_by,
             details=changes,
+            organisation_id=task.organisation_id,
         )
     return task
 
@@ -382,4 +384,5 @@ async def delete_task(session: AsyncSession, task: Task, deleted_by: str) -> Non
         context_type="case",
         context_id=str(task.case_id),
         actor=deleted_by,
+        organisation_id=task.organisation_id,
     )

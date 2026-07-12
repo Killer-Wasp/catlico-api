@@ -398,6 +398,7 @@ async def merge_cases(
             "moved": moved,
             "shares_not_carried": secondary_orgs,
         },
+        organisation_id=owner_org_id,
     )
     for case in sources:
         await record_audit(
@@ -408,5 +409,6 @@ async def merge_cases(
             actor=actor,
             main_action=False,
             details={"merged_into": new_case.id},
+            organisation_id=owner_org_id,
         )
     return new_case

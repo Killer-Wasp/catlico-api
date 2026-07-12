@@ -76,12 +76,18 @@ async def create_case(
             "tlp": case.tlp,
             "pap": case.pap,
         },
+        organisation_id=owner_org_id,
     )
     return case
 
 
 async def update_case(
-    session: AsyncSession, case: Case, case_in: CaseUpdate, updated_by: str
+    session: AsyncSession,
+    case: Case,
+    case_in: CaseUpdate,
+    updated_by: str,
+    *,
+    organisation_id: str,
 ) -> Case:
     update_data = case_in.model_dump(exclude_unset=True)
     changes = {
@@ -102,11 +108,18 @@ async def update_case(
             context=case,
             actor=updated_by,
             details=changes,
+            organisation_id=organisation_id,
         )
     return case
 
 
-async def delete_case(session: AsyncSession, case: Case, deleted_by: str) -> None:
+async def delete_case(
+    session: AsyncSession,
+    case: Case,
+    deleted_by: str,
+    *,
+    organisation_id: str,
+) -> None:
     """Soft delete: flag the case and cascade the flag across the whole investigation
     — its tasks, those tasks' logs, its observables, and its comments. Mirrors
     delete_task's task->log cascade, widened to the case scope. CaseShare rows are
@@ -142,7 +155,12 @@ async def delete_case(session: AsyncSession, case: Case, deleted_by: str) -> Non
     )
     await session.flush()
     await record_audit(
-        session, action="delete", obj=case, context=case, actor=deleted_by
+        session,
+        action="delete",
+        obj=case,
+        context=case,
+        actor=deleted_by,
+        organisation_id=organisation_id,
     )
 
 

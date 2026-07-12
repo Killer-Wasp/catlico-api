@@ -84,6 +84,7 @@ async def create_organisation(
         obj=org,
         actor=str(current_user.id),
         details={"id": org.id, "name": org.name},
+        organisation_id=org.id,
     )
     return org
 
@@ -117,6 +118,7 @@ async def update_organisation(
         obj=org,
         actor=str(ctx.user.id),
         details=org_in.model_dump(exclude_unset=True),
+        organisation_id=org.id,
     )
     return org
 
@@ -130,7 +132,13 @@ async def delete_organisation(
     org = await org_crud.get_organisation(session, organisation_id)
     if not org:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organisation not found")
-    await record_audit(session, action="delete", obj=org, actor=str(current_user.id))
+    await record_audit(
+        session,
+        action="delete",
+        obj=org,
+        actor=str(current_user.id),
+        organisation_id=org.id,
+    )
     await org_crud.delete_organisation(session, org)
 
 
@@ -186,6 +194,7 @@ async def add_member(
                 actor=str(ctx.user.id),
                 details={"email": user.email, "is_superadmin": user.is_superadmin},
                 main_action=False,
+                organisation_id=ctx.organisation_id,
             )
         user_id = user.id
 
@@ -216,6 +225,7 @@ async def add_member(
         context_id=ctx.organisation_id,
         actor=str(ctx.user.id),
         details={"user_id": str(member.user_id), "role_id": str(member.role_id)},
+        organisation_id=member.organisation_id,
     )
     return _member_public(member, await _member_user(session, member))
 
@@ -251,6 +261,7 @@ async def update_member(
         context_id=ctx.organisation_id,
         actor=str(ctx.user.id),
         details={"role_id": str(member.role_id)},
+        organisation_id=member.organisation_id,
     )
     return _member_public(member, await _member_user(session, member))
 
@@ -274,6 +285,7 @@ async def remove_member(
         context_type="organisation",
         context_id=ctx.organisation_id,
         actor=str(ctx.user.id),
+        organisation_id=member.organisation_id,
     )
     await member_crud.remove_member(session, member)
 

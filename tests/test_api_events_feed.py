@@ -14,12 +14,14 @@ from uuid import uuid4
 from httpx import AsyncClient
 
 from app.core.security import TokenPayload, create_access_token
+from app.crud import case_ as case_crud
 from app.crud.api_key import create_key
 from app.crud.organisation_member import add_member
 from app.crud.role import create_role
 from app.crud.user import create_user
 from app.models.api_key import ApiKeyCreate
 from app.models.audit import Audit, AuditOutbox
+from app.models.case_ import CaseCreate
 from app.models.organisation_member import OrganisationMemberCreate
 from app.models.role import Permission, RoleCreate
 from app.models.user import UserCreate
@@ -356,6 +358,51 @@ async def test_member_of_both_orgs_can_read_either(
     )
     assert rb.status_code == 200, rb.text
     assert [e["event_id"] for e in rb.json()["events"]] == [f"audit:{b_id}"]
+
+
+# --- End-to-end: a real mutation stamps the org and becomes feed-visible ----
+
+
+async def test_real_case_create_is_feed_visible_to_owner_org_only(
+    client: AsyncClient,
+    session,
+    org_a,
+    org_b,
+    builtin_roles,
+    analyst_a,
+    analyst_a_token,
+    analyst_b,
+    analyst_b_token,
+):
+    """Creating a case through the CRUD (not direct seeding) now stamps
+    organisation_id on its outbox payload, so it surfaces in org A's feed and is
+    invisible to org B."""
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="e2e feed case"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await session.commit()
+
+    ra = await client.get(
+        "/api/v1/events",
+        params={"organisation_id": org_a.id},
+        headers=_auth(analyst_a_token),
+    )
+    assert ra.status_code == 200, ra.text
+    events = ra.json()["events"]
+    assert [e["event_type"] for e in events] == ["case.created"]
+    assert events[0]["object"]["id"] == str(case.id)
+
+    rb = await client.get(
+        "/api/v1/events",
+        params={"organisation_id": org_b.id},
+        headers=_auth(analyst_b_token),
+    )
+    assert rb.status_code == 200, rb.text
+    assert rb.json()["events"] == []
 
 
 # --- Edge: nothing new / beyond retention -----------------------------------

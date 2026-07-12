@@ -555,6 +555,7 @@ async def merge_alerts(
             "moved": {"observables": total_obs},
             "tlp_pap_raised": raised,
         },
+        organisation_id=ctx.organisation_id,
     )
     return CasePublic.model_validate(case, from_attributes=True)
 

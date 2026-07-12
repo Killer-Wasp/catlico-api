@@ -479,7 +479,9 @@ class TestSearchVisibility:
     async def test_soft_deleted_case_excluded(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token, observable_types):
         case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="deleted phishing case")
         await session.commit()
-        await case_crud.delete_case(session, case, deleted_by=str(admin_user.id))
+        await case_crud.delete_case(
+            session, case, deleted_by=str(admin_user.id), organisation_id=org_a.id
+        )
         await session.commit()
 
         r = await client.get("/api/v1/search", params={"q": "deleted phishing"}, headers=_headers(admin_token, org_a))
@@ -499,7 +501,9 @@ class TestSearchVisibility:
         r = await client.get("/api/v1/search", params={"q": "phishing kit"}, headers=_headers(admin_token, org_a))
         assert r.json()["counts"]["comment"] == 1
 
-        await case_crud.delete_case(session, case, deleted_by=str(admin_user.id))
+        await case_crud.delete_case(
+            session, case, deleted_by=str(admin_user.id), organisation_id=org_a.id
+        )
         await session.commit()
 
         r = await client.get("/api/v1/search", params={"q": "phishing kit"}, headers=_headers(admin_token, org_a))

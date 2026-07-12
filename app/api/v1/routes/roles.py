@@ -75,6 +75,7 @@ async def create_role(
         context_id=ctx.organisation_id,
         actor=str(ctx.user.id),
         details={"name": role.name, "permissions": [p.value for p in role_in.permissions]},
+        organisation_id=role.organisation_id,
     )
     return await _build_role_public(session, role)
 
@@ -111,6 +112,7 @@ async def update_role(
         context_id=ctx.organisation_id,
         actor=str(ctx.user.id),
         details={"permissions": [p.value for p in role_in.permissions]},
+        organisation_id=role.organisation_id,
     )
     return await _build_role_public(session, role)
 
@@ -129,5 +131,6 @@ async def delete_role(
         context_type="organisation",
         context_id=ctx.organisation_id,
         actor=str(ctx.user.id),
+        organisation_id=role.organisation_id,
     )
     await role_crud.delete_role(session, role)

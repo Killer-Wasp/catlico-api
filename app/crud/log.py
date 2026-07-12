@@ -100,6 +100,7 @@ async def create_log(
         context_type="case",
         context_id=str(case_id),
         actor=created_by,
+        organisation_id=log.organisation_id,
     )
     return log
 
@@ -122,6 +123,7 @@ async def update_log(
         context_type="case",
         context_id=str(log.case_id),
         actor=updated_by,
+        organisation_id=log.organisation_id,
     )
     return log
 
@@ -139,4 +141,5 @@ async def delete_log(session: AsyncSession, log: Log, deleted_by: str) -> None:
         context_type="case",
         context_id=str(log.case_id),
         actor=deleted_by,
+        organisation_id=log.organisation_id,
     )

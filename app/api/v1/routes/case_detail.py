@@ -70,7 +70,11 @@ async def update_case(
         await assert_assignee_in_org(session, update_data["assignee_id"], owner_org_id)
 
     case = await case_crud.update_case(
-        session, case_ctx.case, case_in, updated_by=str(case_ctx.user.id)
+        session,
+        case_ctx.case,
+        case_in,
+        updated_by=str(case_ctx.user.id),
+        organisation_id=case_ctx.organisation_id,
     )
     flagged = await flag_crud.is_flagged(
         session, FlagEntityType.case, str(case.id), case_ctx.organisation_id
@@ -86,4 +90,9 @@ async def delete_case(
     case_ctx: Annotated[CaseAuthContext, require_case_owner("delete:case")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    await case_crud.delete_case(session, case_ctx.case, deleted_by=str(case_ctx.user.id))
+    await case_crud.delete_case(
+        session,
+        case_ctx.case,
+        deleted_by=str(case_ctx.user.id),
+        organisation_id=case_ctx.organisation_id,
+    )

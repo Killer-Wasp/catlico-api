@@ -466,6 +466,7 @@ async def create_case_observable(
             "data": observable.data,
             "ioc": observable.ioc,
         },
+        organisation_id=observable.organisation_id,
     )
     return observable
 
@@ -554,6 +555,7 @@ async def update_observable(
             context_id=ctx_id,
             actor=updated_by,
             details=changes,
+            organisation_id=observable.organisation_id,
         )
     return observable
 
@@ -573,4 +575,5 @@ async def delete_observable(
         context_type=ctx_type,
         context_id=ctx_id,
         actor=deleted_by,
+        organisation_id=observable.organisation_id,
     )

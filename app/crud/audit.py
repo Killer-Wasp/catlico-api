@@ -96,6 +96,15 @@ async def record_audit(
     `object_type` is derived from `obj.__tablename__`. Pass a `context` model
     (typically the owning Case) to scope the row for the activity feed, or pass
     `context_type`/`context_id` directly when the parent object isn't in hand.
+
+    `organisation_id` (when truthy) is stamped onto the outbox payload and is what
+    makes the event visible in the org-scoped `GET /api/v1/events` feed and the WS
+    `/activity` stream (both filter on `payload->>'organisation_id'`). Omit it for
+    genuinely org-agnostic events (global user/account and platform-wide catalog
+    changes); pass the acting org for product mutations. Note the payload holds a
+    single org, so for a case owned by one org but edited by a collaborating org the
+    `update` event carries the *acting* org (delete is owner-gated, so it can't
+    diverge).
     """
     if context is not None:
         context_type = _type_of(context)

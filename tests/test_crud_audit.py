@@ -2,9 +2,16 @@ from datetime import UTC, datetime
 
 from sqlmodel import select
 
+from app.crud import alert as alert_crud
 from app.crud import audit as audit_crud
+from app.crud import case_ as case_crud
+from app.crud import observable as observable_crud
+from app.crud import task as task_crud
+from app.models.alert import AlertCreate
 from app.models.audit import Audit, AuditOutbox
-from app.models.case_ import Case
+from app.models.case_ import Case, CaseCreate, CaseUpdate
+from app.models.observable import ObservableCreate
+from app.models.task import TaskCreate
 
 
 async def _a_case(session) -> Case:
@@ -135,6 +142,124 @@ async def test_dispatch_invokes_registered_consumer(session):
 
     assert len(seen) == 1
     assert seen[0]["action"] == "create"
+
+
+async def _latest_outbox(session) -> AuditOutbox:
+    """The most recently written outbox row — used to inspect the payload a mutation
+    just produced."""
+    return (
+        (await session.execute(select(AuditOutbox).order_by(AuditOutbox.id.desc())))
+        .scalars()
+        .first()
+    )
+
+
+# --- Product mutations stamp organisation_id into the outbox payload ---------
+# These prove the feed-visibility fix: each mutation's outbox row now carries the
+# acting org, which GET /events and the WS /activity stream filter on.
+
+
+async def test_create_case_outbox_carries_org(session, org_a, builtin_roles, analyst_a):
+    await case_crud.create_case(
+        session,
+        CaseCreate(title="c"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    assert (await _latest_outbox(session)).payload["organisation_id"] == org_a.id
+
+
+async def test_update_case_outbox_carries_org(session, org_a, builtin_roles, analyst_a):
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="c"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await case_crud.update_case(
+        session,
+        case,
+        CaseUpdate(title="c2"),
+        updated_by=str(analyst_a.id),
+        organisation_id=org_a.id,
+    )
+    row = await _latest_outbox(session)
+    assert row.payload["action"] == "update"
+    assert row.payload["organisation_id"] == org_a.id
+
+
+async def test_delete_case_outbox_carries_org(session, org_a, builtin_roles, analyst_a):
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="c"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await case_crud.delete_case(
+        session, case, deleted_by=str(analyst_a.id), organisation_id=org_a.id
+    )
+    row = await _latest_outbox(session)
+    assert row.payload["action"] == "delete"
+    assert row.payload["organisation_id"] == org_a.id
+
+
+async def test_create_alert_outbox_carries_org(session, org_a, analyst_a):
+    await alert_crud.ingest_alert(
+        session,
+        AlertCreate(
+            type="phishing", source="EDR", source_ref="x1", title="t", severity=2, tlp=2
+        ),
+        organisation_id=org_a.id,
+        created_by=str(analyst_a.id),
+    )
+    row = await _latest_outbox(session)
+    assert row.payload["object_type"] == "alert"
+    assert row.payload["organisation_id"] == org_a.id
+
+
+async def test_create_observable_outbox_carries_org(
+    session, org_a, builtin_roles, analyst_a
+):
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="c"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await observable_crud.create_case_observable(
+        session,
+        ObservableCreate(observable_type="ip", data="1.1.1.1"),
+        case_id=case.id,
+        organisation_id=org_a.id,
+        created_by=str(analyst_a.id),
+    )
+    row = await _latest_outbox(session)
+    assert row.payload["object_type"] == "observable"
+    assert row.payload["organisation_id"] == org_a.id
+
+
+async def test_create_task_outbox_carries_org(session, org_a, builtin_roles, analyst_a):
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="c"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await task_crud.create_task(
+        session,
+        TaskCreate(title="triage"),
+        case_id=case.id,
+        organisation_id=org_a.id,
+        created_by=str(analyst_a.id),
+    )
+    row = await _latest_outbox(session)
+    assert row.payload["object_type"] == "task"
+    assert row.payload["organisation_id"] == org_a.id
 
 
 async def test_record_audit_is_transactional_with_mutation(session):

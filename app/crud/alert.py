@@ -251,6 +251,7 @@ async def ingest_alert(
             obj=alert,
             actor=created_by,
             details={"type": alert.type, "source": alert.source, "title": alert.title},
+            organisation_id=alert.organisation_id,
         )
         return alert, True
 
@@ -275,6 +276,7 @@ async def ingest_alert(
         obj=existing,
         actor=created_by,
         details={"reason": "source sync"},
+        organisation_id=existing.organisation_id,
     )
     return existing, False
 
@@ -295,7 +297,12 @@ async def update_alert(
     await session.flush()
     if changes:
         await record_audit(
-            session, action="update", obj=alert, actor=updated_by, details=changes
+            session,
+            action="update",
+            obj=alert,
+            actor=updated_by,
+            details=changes,
+            organisation_id=alert.organisation_id,
         )
     return alert
 
@@ -318,6 +325,7 @@ async def mark_promoted(
         context_id=str(case_id),
         actor=updated_by,
         details={"promoted_to_case": case_id, "status": AlertStatus.imported.value},
+        organisation_id=alert.organisation_id,
     )
     return alert
 
@@ -343,6 +351,7 @@ async def mark_detached(
         context_id=str(former_case_id),
         actor=updated_by,
         details={"detached_from_case": former_case_id, "status": AlertStatus.new.value},
+        organisation_id=alert.organisation_id,
     )
     return alert
 
@@ -353,4 +362,10 @@ async def delete_alert(session: AsyncSession, alert: Alert, deleted_by: str) -> 
     alert.deleted_by = deleted_by
     session.add(alert)
     await session.flush()
-    await record_audit(session, action="delete", obj=alert, actor=deleted_by)
+    await record_audit(
+        session,
+        action="delete",
+        obj=alert,
+        actor=deleted_by,
+        organisation_id=alert.organisation_id,
+    )

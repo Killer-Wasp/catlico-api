@@ -712,6 +712,7 @@ async def set_case_custom_fields(
         context=case_ctx.case,
         actor=str(case_ctx.user.id),
         details={"custom_fields": values},
+        organisation_id=case_ctx.organisation_id,
     )
     return values
 
