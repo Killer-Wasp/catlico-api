@@ -88,4 +88,4 @@ async def ws_activity(
                 return
 
         hub = get_hub()
-        await hub.handle(organisation_id, websocket)
+        await hub.handle(organisation_id, websocket, str(user.id))

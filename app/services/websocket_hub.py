@@ -18,17 +18,29 @@ logger = logging.getLogger(__name__)
 
 
 class WebSocketHub:
-    """Global org→connections registry. Each org can have multiple connections."""
+    """Global org→connections registry. Each org can have multiple connections.
+
+    A connection is registered under two indexes: its org (for org-wide
+    broadcast) and its (org, user) pair (for targeted per-user push). The same
+    socket lives in both buckets and is removed from both on disconnect.
+    """
 
     def __init__(self) -> None:
         self._orgs: dict[str, list[WebSocket]] = defaultdict(list)
+        self._users: dict[tuple[str, str], list[WebSocket]] = defaultdict(list)
 
-    async def connect(self, org_id: str, ws: WebSocket) -> None:
+    async def connect(self, org_id: str, ws: WebSocket, user_id: str) -> None:
         await ws.accept()
         self._orgs[org_id].append(ws)
-        logger.info("ws connected org=%s total=%d", org_id, len(self._orgs[org_id]))
+        self._users[(org_id, user_id)].append(ws)
+        logger.info(
+            "ws connected org=%s user=%s total=%d",
+            org_id,
+            user_id,
+            len(self._orgs[org_id]),
+        )
 
-    def disconnect(self, org_id: str, ws: WebSocket) -> None:
+    def disconnect(self, org_id: str, ws: WebSocket, user_id: str) -> None:
         try:
             self._orgs[org_id].remove(ws)
             logger.info("ws disconnected org=%s remaining=%d", org_id, len(self._orgs[org_id]))
@@ -36,22 +48,64 @@ class WebSocketHub:
                 del self._orgs[org_id]
         except (ValueError, KeyError):
             pass
+        try:
+            self._users[(org_id, user_id)].remove(ws)
+            if not self._users[(org_id, user_id)]:
+                del self._users[(org_id, user_id)]
+        except (ValueError, KeyError):
+            pass
 
     async def broadcast(self, org_id: str, message: dict[str, Any]) -> None:
         """Send a JSON message to every connected client in `org_id`."""
         dead: list[WebSocket] = []
-        for ws in self._orgs.get(org_id, []):
+        # Iterate a snapshot: a concurrent disconnect of a sibling socket during
+        # an `await send_json` would otherwise mutate the live list mid-loop and
+        # skip a still-connected client.
+        for ws in list(self._orgs.get(org_id, [])):
             try:
                 if ws.client_state == WebSocketState.CONNECTED:
                     await ws.send_json(message)
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self.disconnect(org_id, ws)
+            # Prune from the org bucket; the socket's user bucket is cleaned on
+            # its own disconnect path. We don't know the user_id here, so drop
+            # from the org index only — same effect for broadcast liveness.
+            try:
+                self._orgs[org_id].remove(ws)
+                if not self._orgs[org_id]:
+                    del self._orgs[org_id]
+            except (ValueError, KeyError):
+                pass
 
-    async def handle(self, org_id: str, ws: WebSocket) -> None:
+    async def send_to_user(
+        self, org_id: str, user_id: str, message: dict[str, Any]
+    ) -> None:
+        """Send a JSON message to every connection for `(org_id, user_id)`.
+
+        No-op when the user has no live connections. Dead sockets are pruned,
+        mirroring `broadcast`.
+        """
+        dead: list[WebSocket] = []
+        # Snapshot (see broadcast): guards against a sibling-tab disconnect
+        # mutating the bucket during an `await send_json`.
+        for ws in list(self._users.get((org_id, user_id), [])):
+            try:
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            try:
+                self._users[(org_id, user_id)].remove(ws)
+                if not self._users[(org_id, user_id)]:
+                    del self._users[(org_id, user_id)]
+            except (ValueError, KeyError):
+                pass
+
+    async def handle(self, org_id: str, ws: WebSocket, user_id: str) -> None:
         """Keep-alive loop: hold the connection open until the client disconnects."""
-        await self.connect(org_id, ws)
+        await self.connect(org_id, ws, user_id)
         try:
             while ws.client_state == WebSocketState.CONNECTED:
                 # ponytail: simple ping/pong keepalive; add heartbeat config if needed
@@ -66,7 +120,7 @@ class WebSocketHub:
                 except Exception:
                     break
         finally:
-            self.disconnect(org_id, ws)
+            self.disconnect(org_id, ws, user_id)
 
 
 # ponytail: global singleton — per-org sharding if throughput matters

@@ -57,7 +57,7 @@ async def test_hub_disconnect_cleanup():
     ws = AsyncMock()
     ws.client_state = WebSocketState.CONNECTED
     hub._orgs["org-a"] = [ws]
-    hub.disconnect("org-a", ws)
+    hub.disconnect("org-a", ws, "user-1")
     assert "org-a" not in hub._orgs
 
 
@@ -71,6 +71,90 @@ async def test_broadcast_dead_connections_cleaned():
     await hub.broadcast("org-a", {"type": "event", "event": {}})
     # Dead connection should be removed
     assert "org-a" not in hub._orgs or len(hub._orgs.get("org-a", [])) == 0
+
+
+# --- Per-user targeted delivery (send_to_user) ----------------------------------------
+
+
+async def test_connect_registers_in_both_org_and_user_buckets():
+    """connect() puts the socket in both _orgs[org] and _users[(org,user)]."""
+    hub = get_hub()
+    ws = AsyncMock()
+    ws.client_state = WebSocketState.CONNECTED
+
+    await hub.connect("org-a", ws, "user-1")
+
+    assert ws in hub._orgs["org-a"]
+    assert ws in hub._users[("org-a", "user-1")]
+
+
+async def test_disconnect_removes_from_both_buckets_and_cleans_empty():
+    """disconnect() removes the socket from both indexes and drops empty buckets."""
+    hub = get_hub()
+    ws = AsyncMock()
+    ws.client_state = WebSocketState.CONNECTED
+
+    await hub.connect("org-a", ws, "user-1")
+    hub.disconnect("org-a", ws, "user-1")
+
+    assert "org-a" not in hub._orgs
+    assert ("org-a", "user-1") not in hub._users
+
+
+async def test_send_to_user_delivers_only_to_target_user():
+    """send_to_user reaches the target (org,user)'s sockets only."""
+    hub = get_hub()
+    ws_target = AsyncMock()
+    ws_target.client_state = WebSocketState.CONNECTED
+    ws_other_user = AsyncMock()
+    ws_other_user.client_state = WebSocketState.CONNECTED
+
+    await hub.connect("org-a", ws_target, "user-1")
+    await hub.connect("org-a", ws_other_user, "user-2")
+
+    msg = {"type": "notification", "notification": {"id": "n1"}}
+    await hub.send_to_user("org-a", "user-1", msg)
+
+    ws_target.send_json.assert_called_once_with(msg)
+    ws_other_user.send_json.assert_not_called()
+
+
+async def test_send_to_user_does_not_cross_org():
+    """A socket for the same user id in a different org does not receive it."""
+    hub = get_hub()
+    ws_a = AsyncMock()
+    ws_a.client_state = WebSocketState.CONNECTED
+    ws_b = AsyncMock()
+    ws_b.client_state = WebSocketState.CONNECTED
+
+    await hub.connect("org-a", ws_a, "user-1")
+    await hub.connect("org-b", ws_b, "user-1")
+
+    await hub.send_to_user("org-a", "user-1", {"type": "notification"})
+
+    ws_a.send_json.assert_called_once()
+    ws_b.send_json.assert_not_called()
+
+
+async def test_send_to_user_noop_when_user_absent():
+    """No connections for the user → silent no-op (no raise)."""
+    hub = get_hub()
+    await hub.send_to_user("org-a", "ghost", {"type": "notification"})  # must not raise
+
+
+async def test_send_to_user_prunes_dead_sockets():
+    """A socket that raises on send is removed from the user bucket."""
+    hub = get_hub()
+    ws = AsyncMock()
+    ws.client_state = WebSocketState.CONNECTED
+    ws.send_json.side_effect = RuntimeError("connection lost")
+
+    await hub.connect("org-a", ws, "user-1")
+    await hub.send_to_user("org-a", "user-1", {"type": "notification"})
+
+    assert ("org-a", "user-1") not in hub._users or ws not in hub._users.get(
+        ("org-a", "user-1"), []
+    )
 
 
 # --- Route-level tests ----------------------------------------------------------------

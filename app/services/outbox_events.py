@@ -7,12 +7,17 @@ WebSocket broadcast) sees the same envelope.
 
 from __future__ import annotations
 
+import logging
+import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import notification as notif_crud
 from app.models.audit import AuditOutbox
+from app.models.notification import UserNotificationPublic
+
+logger = logging.getLogger(__name__)
 
 # ponytail: simple heuristics for notification titles — upgrade to config-driven
 # templates when the product needs polish
@@ -86,3 +91,84 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
         body=body,
         payload=envelope,
     )
+
+    # Per-user routing: a (re)assignment of a case/task also gets a targeted
+    # notification for the assignee, pushed live over the WS hub. The org-wide
+    # row above is unchanged; this is additive.
+    if obj_type in {"case", "task"}:
+        target_user_id = _assignee_target(envelope.get("details") or {})
+        if target_user_id:
+            object_id = envelope["object"]["id"]
+            await _notify_assignee(
+                session,
+                org_id=org_id,
+                target_user_id=target_user_id,
+                envelope=envelope,
+                obj_type=obj_type,
+                object_id=object_id,
+            )
+
+
+def _assignee_target(details: dict[str, Any]) -> str | None:
+    """Return the newly-assigned user id from an audit `details` dict, or None.
+
+    Two shapes are recognised:
+    - update: ``assignee_id == [old, new]`` (the audit `{field: [old, new]}`
+      diff form) → target ``new`` when it is truthy.
+    - create-with-assignee: a bare ``assignee_id`` string → target it.
+    """
+    value = details.get("assignee_id")
+    if isinstance(value, list):
+        if len(value) == 2 and value[1]:
+            return str(value[1])
+        return None
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+async def _notify_assignee(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    target_user_id: str,
+    envelope: dict[str, Any],
+    obj_type: str,
+    object_id: str,
+) -> None:
+    """Create the assignee's targeted notification (source of truth) and best-effort
+    push it over the WS hub. A DB error propagates (drain retries); a WS send error
+    is swallowed so a transient hub failure can't undo the notification."""
+    try:
+        user_uuid = uuid.UUID(target_user_id)
+    except (ValueError, AttributeError, TypeError):
+        # Malformed details value — skip the targeted notification rather than 500
+        # the drain. The org-wide notification already landed.
+        logger.warning("assignment routing: invalid assignee id %r", target_user_id)
+        return
+
+    notif = await notif_crud.create_notification(
+        session,
+        organisation_id=org_id,
+        user_id=user_uuid,
+        event_type=envelope["event_type"],
+        title=f"You were assigned {obj_type} {object_id}",
+        body=envelope.get("details", {}).get("summary", ""),
+        payload=envelope,
+    )
+
+    # Best-effort live push. Local import to avoid an import cycle (matches
+    # ws_broadcast_consumer). A hub/send failure must not raise: the notification
+    # row is the source of truth and the drain must not be marked undelivered.
+    try:
+        from app.services.websocket_hub import get_hub
+
+        message = {
+            "type": "notification",
+            "notification": UserNotificationPublic.model_validate(notif).model_dump(
+                mode="json"
+            ),
+        }
+        await get_hub().send_to_user(org_id, target_user_id, message)
+    except Exception:
+        logger.exception("assignment routing: WS push failed (notification persisted)")
