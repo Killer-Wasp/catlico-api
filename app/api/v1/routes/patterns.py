@@ -7,13 +7,20 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ActiveOrgOrApiKeyContext, CaseAuthContext, require_case_permission
+from app.api.deps import (
+    ActiveOrgOrApiKeyContext,
+    AuthContext,
+    CaseAuthContext,
+    require_active_permission,
+    require_case_permission,
+)
 from app.core.db import get_session
 from app.crud import pattern as pattern_crud
 from app.models.common import Page
 from app.models.pattern import (
     AttackImportResult,
     Pattern,
+    PatternCaseSummary,
     PatternImportItem,
     PatternPublic,
     ProcedurePublic,
@@ -97,6 +104,31 @@ async def import_patterns(
         session, items, created_by=str(ctx.user.id)
     )
     return [PatternPublic.model_validate(p, from_attributes=True) for p in patterns]
+
+
+@pattern_router.get("/case-stats", response_model=dict[str, int])
+async def pattern_case_stats(
+    ctx: Annotated[AuthContext, require_active_permission("read:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, int]:
+    """Per-technique distinct case counts for the caller's org (matrix heatmap)."""
+    return await pattern_crud.case_stats(session, ctx.organisation_id)
+
+
+@pattern_router.get("/{external_id}/cases", response_model=list[PatternCaseSummary])
+async def pattern_cases(
+    external_id: str,
+    ctx: Annotated[AuthContext, require_active_permission("read:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[PatternCaseSummary]:
+    """Org-visible cases that observed this technique (matrix click-through)."""
+    pattern = await pattern_crud.get_pattern_by_external_id(session, external_id)
+    if pattern is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Unknown technique"
+        )
+    cases = await pattern_crud.cases_for_pattern(session, pattern.id, ctx.organisation_id)
+    return [PatternCaseSummary.model_validate(c, from_attributes=True) for c in cases]
 
 
 # --- Procedures (case-scoped) ---

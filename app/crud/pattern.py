@@ -3,10 +3,13 @@
 import uuid
 
 from sqlalchemy import delete as sql_delete
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.crud.pagination import paginate
+from app.models.case_ import Case
+from app.models.case_share import CaseShare
 from app.models.pattern import Pattern, PatternImportItem, Procedure, ProcedureReplace
 
 
@@ -64,6 +67,42 @@ async def import_patterns(
             out.append(new)
     await session.flush()
     return out
+
+
+async def case_stats(session: AsyncSession, organisation_id: str) -> dict[str, int]:
+    """Distinct visible-case count per technique external_id for one org."""
+    stmt = (
+        select(Pattern.external_id, func.count(func.distinct(Procedure.case_id)))
+        .join(Procedure, Procedure.pattern_id == Pattern.id)
+        .join(Case, Case.id == Procedure.case_id)
+        .join(CaseShare, CaseShare.case_id == Case.id)
+        .where(
+            CaseShare.organisation_id == organisation_id,
+            Case.deleted_at.is_(None),
+        )
+        .group_by(Pattern.external_id)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {external_id: count for external_id, count in rows}
+
+
+async def cases_for_pattern(
+    session: AsyncSession, pattern_id: uuid.UUID, organisation_id: str
+) -> list[Case]:
+    """Org-visible, non-deleted cases linked to a pattern, newest first."""
+    stmt = (
+        select(Case)
+        .join(Procedure, Procedure.case_id == Case.id)
+        .join(CaseShare, CaseShare.case_id == Case.id)
+        .where(
+            Procedure.pattern_id == pattern_id,
+            CaseShare.organisation_id == organisation_id,
+            Case.deleted_at.is_(None),
+        )
+        .order_by(Case.id.desc())
+        .distinct()
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 # --- Procedures ---

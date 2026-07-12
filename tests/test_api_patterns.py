@@ -148,3 +148,103 @@ async def test_replace_procedures_requires_write(
         headers=h,
     )
     assert r.status_code == 403, r.text
+
+
+async def _link_ttp(client, h, case_id, external_id, name):
+    r = await client.put(
+        f"/api/v1/cases/{case_id}/procedures",
+        json={"procedures": [{"external_id": external_id, "name": name}]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_case_stats_counts_distinct_cases_per_technique(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    case1 = await _make_case(session, org_a, builtin_roles, analyst_a)
+    case2 = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _link_ttp(client, h, case1.id, "T1566", "Phishing")
+    await _link_ttp(client, h, case2.id, "T1566", "Phishing")
+
+    r = await client.get("/api/v1/patterns/case-stats", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"T1566": 2}
+
+
+async def test_case_stats_is_org_scoped(
+    client: AsyncClient, session, org_a, org_b, builtin_roles,
+    analyst_a, analyst_a_token, analyst_b, analyst_b_token,
+):
+    ha = _headers(analyst_a_token, org_a.id)
+    hb = _headers(analyst_b_token, org_b.id)
+    case_a = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _link_ttp(client, ha, case_a.id, "T1059", "Command Execution")
+
+    assert (await client.get("/api/v1/patterns/case-stats", headers=ha)).json() == {
+        "T1059": 1
+    }
+    assert (await client.get("/api/v1/patterns/case-stats", headers=hb)).json() == {}
+
+
+async def test_cases_by_technique(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _link_ttp(client, h, case.id, "T1566", "Phishing")
+
+    r = await client.get("/api/v1/patterns/T1566/cases", headers=h)
+    assert r.status_code == 200, r.text
+    cases = r.json()
+    assert [c["id"] for c in cases] == [case.id]
+    assert cases[0]["title"] == "c"
+
+    missing = await client.get("/api/v1/patterns/T0000/cases", headers=h)
+    assert missing.status_code == 404
+
+
+async def test_case_stats_dedups_one_case_with_repeated_technique(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """One case linked to the same technique via two procedure rows must count
+    once. replace_procedures inserts one Procedure per list item without
+    deduping, so a single PUT with T1566 listed twice yields 2 Procedure rows
+    for 1 case — proving COUNT(DISTINCT case_id) collapses them to 1."""
+    h = _headers(analyst_a_token, org_a.id)
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    r = await client.put(
+        f"/api/v1/cases/{case.id}/procedures",
+        json={
+            "procedures": [
+                {"external_id": "T1566", "name": "Phishing"},
+                {"external_id": "T1566", "name": "Phishing"},
+            ]
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()) == 2  # two Procedure rows for the one case
+
+    stats = await client.get("/api/v1/patterns/case-stats", headers=h)
+    assert stats.status_code == 200, stats.text
+    assert stats.json() == {"T1566": 1}
+
+
+async def test_cases_by_technique_is_org_scoped(
+    client: AsyncClient, session, org_a, org_b, builtin_roles,
+    analyst_a, analyst_a_token, analyst_b, analyst_b_token,
+):
+    ha = _headers(analyst_a_token, org_a.id)
+    hb = _headers(analyst_b_token, org_b.id)
+    case_a = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _link_ttp(client, ha, case_a.id, "T1566", "Phishing")
+
+    mine = await client.get("/api/v1/patterns/T1566/cases", headers=ha)
+    assert mine.status_code == 200, mine.text
+    assert [c["id"] for c in mine.json()] == [case_a.id]
+
+    theirs = await client.get("/api/v1/patterns/T1566/cases", headers=hb)
+    assert theirs.status_code == 200, theirs.text
+    assert theirs.json() == []

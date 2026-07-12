@@ -79,6 +79,16 @@ class ProcedurePublic(SQLModel):
     created_at: datetime
 
 
+class PatternCaseSummary(SQLModel):
+    """Slim case row for matrix click-through — deliberately not CasePublic."""
+
+    id: int
+    title: str
+    severity: int
+    status: str
+    created_at: datetime
+
+
 class ProcedureReplace(SQLModel):
     """Replace all procedures for a case — the request body is a list of patterns
     to link (by external_id) with optional descriptions."""
