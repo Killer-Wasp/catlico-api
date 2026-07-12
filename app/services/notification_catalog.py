@@ -2,9 +2,10 @@
 
 Each entry is ``(event_type, label, category)``. The ``event_type`` strings match
 the emitted ``<object_type>.<normalized_action>`` format produced by
-``app.services.outbox_events`` (e.g. ``case.created``, ``alert.promoted``). This
-list drives the notification-preferences UI; being slightly over-inclusive is
-fine because the read-time filter defaults every event to visible.
+``app.services.outbox_events`` (e.g. ``case.created``, ``case.merged``) — where
+``object_type`` is the model ``__tablename__`` with a trailing ``_`` stripped.
+Every entry here is verified to correspond to an audit event that the codebase
+actually emits, so no mute toggle is silently dead.
 """
 
 from __future__ import annotations
@@ -20,8 +21,6 @@ NOTIFICATION_EVENT_CATALOG: list[tuple[str, str, str]] = [
     ("alert.created", "Alert created", "Alerts"),
     ("alert.updated", "Alert updated", "Alerts"),
     ("alert.deleted", "Alert deleted", "Alerts"),
-    ("alert.promoted", "Alert promoted", "Alerts"),
-    ("alert.merged", "Alert merged", "Alerts"),
     # Tasks
     ("task.created", "Task created", "Tasks"),
     ("task.updated", "Task updated", "Tasks"),
@@ -34,9 +33,6 @@ NOTIFICATION_EVENT_CATALOG: list[tuple[str, str, str]] = [
     ("comment.created", "Comment added", "Comments"),
     # Case log entries
     ("log.created", "Case log entry added", "Case log"),
-    # Knowledge base
-    ("knowledge_base_page.created", "Knowledge base page created", "Knowledge base"),
-    ("knowledge_base_page.updated", "Knowledge base page updated", "Knowledge base"),
 ]
 
 

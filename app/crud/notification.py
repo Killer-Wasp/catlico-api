@@ -2,11 +2,13 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crypto import encrypt_secrets
 from app.crud.pagination import paginate
+from app.models.common import utcnow
 from app.models.notification import (
     Notifier,
     NotifierCreate,
@@ -304,26 +306,32 @@ async def set_user_preferences(
     prefs: dict[str, bool],
     actor: str,
 ) -> None:
-    """Upsert each `(user, org, event_type)` preference row."""
-    for event_type, enabled in prefs.items():
-        result = await session.execute(
-            select(UserNotificationPreference).where(
-                UserNotificationPreference.organisation_id == organisation_id,
-                UserNotificationPreference.user_id == user_id,
-                UserNotificationPreference.event_type == event_type,
-            )
-        )
-        pref = result.scalar_one_or_none()
-        if pref is None:
-            pref = UserNotificationPreference(
-                organisation_id=organisation_id,
-                user_id=user_id,
-                event_type=event_type,
-                enabled=enabled,
-                created_by=actor,
-            )
-        else:
-            pref.enabled = enabled
-            pref.updated_by = actor
-        session.add(pref)
+    """Upsert each `(user, org, event_type)` preference row in one atomic
+    statement. Concurrent PUTs can't race into a `uq_user_notif_pref` violation
+    because the conflict is resolved by the DB via `ON CONFLICT DO UPDATE`."""
+    if not prefs:
+        return
+    now = utcnow()
+    rows = [
+        {
+            "id": uuid.uuid4(),
+            "user_id": user_id,
+            "organisation_id": organisation_id,
+            "event_type": event_type,
+            "enabled": enabled,
+            "created_at": now,
+            "created_by": actor,
+        }
+        for event_type, enabled in prefs.items()
+    ]
+    stmt = pg_insert(UserNotificationPreference).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["user_id", "organisation_id", "event_type"],
+        set_={
+            "enabled": stmt.excluded.enabled,
+            "updated_by": actor,
+            "updated_at": now,
+        },
+    )
+    await session.execute(stmt)
     await session.flush()
