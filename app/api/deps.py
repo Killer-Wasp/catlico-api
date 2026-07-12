@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +26,8 @@ from app.models.role import (
 )
 from app.models.user import User
 from app.services.plugin_audit import record_admin_action
+
+logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -501,20 +504,29 @@ async def get_plugin_runtime_principal(
         # rejection in an INDEPENDENT session that commits on its own — the
         # request session is rolled back when this raises (get_session rolls back
         # on any exception), which would otherwise discard the audit row.
-        async with AsyncSessionLocal() as audit_session:
-            await record_admin_action(
-                audit_session,
-                action="rejected_late_result",
-                object_type="plugin_run",
-                object_id=str(run.id),
-                actor=f"plugin:{run.plugin_id}@{run.plugin_version_id}",
-                organisation_id=run.organisation_id,
-                details={
-                    "status": run.status,
-                    "reason": "runtime token used after run reached terminal/inactive status",
-                },
+        # Auditing is best-effort: a DB hiccup in the independent-session write
+        # must never turn the designed 409 rejection into a 500. Swallow any
+        # failure (logged) and ALWAYS fall through to the 409 — the security
+        # invariant (no route body runs) holds regardless of whether we logged.
+        try:
+            async with AsyncSessionLocal() as audit_session:
+                await record_admin_action(
+                    audit_session,
+                    action="rejected_late_result",
+                    object_type="plugin_run",
+                    object_id=str(run.id),
+                    actor=f"plugin:{run.plugin_id}@{run.plugin_version_id}",
+                    organisation_id=run.organisation_id,
+                    details={
+                        "status": run.status,
+                        "reason": "runtime token used after run reached terminal/inactive status",
+                    },
+                )
+                await audit_session.commit()
+        except Exception:  # noqa: BLE001 — audit is best-effort, rejection is not
+            logger.warning(
+                "failed to audit late result for run %s", run.id, exc_info=True
             )
-            await audit_session.commit()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Plugin runtime token is not active for this run",

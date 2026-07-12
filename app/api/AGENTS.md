@@ -33,8 +33,9 @@ Resolved in `deps.py`. The bearer-token **prefix** decides which one you're on:
   everyone else must be a member of that org.
 - **Runner credentials** are SHA-256 hashed and additionally require
   `enrollment_state == "enrolled"`, so revocation is immediate.
-- **Runtime tokens** are per-`PluginRun`, hashed, and expiring. A run's token dies with
-  the run.
+- **Runtime tokens** are per-`PluginRun`, hashed, and expiring. At terminal status the
+  token stays resolvable; terminal status — not a nulled hash — is what rejects late
+  runtime calls (409), which are audited as `rejected_late_result`.
 
 ## Choosing the right dependency
 

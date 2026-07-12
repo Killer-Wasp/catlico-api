@@ -484,6 +484,51 @@ async def test_late_result_after_terminal_is_rejected_and_audited(
     assert "terminal" in audit.details["reason"]
 
 
+async def test_late_result_still_409_when_audit_write_fails(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """Auditing is best-effort: if the independent audit write raises, the late
+    call must still get the designed 409 rejection, never a 500."""
+    _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    runtime_token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id)
+    )
+
+    progress = await client.post(
+        f"{_RUNTIME_PREFIX}/progress",
+        json={"message": "Done", "percent": 100},
+        headers=_runtime_h(runtime_token),
+    )
+    run_id = progress.json()["run_id"]
+    _, runner_credential = await _register_runner(
+        client, admin_token, RUNNER1, plugins=[RUNTIME_MANIFEST],
+    )
+    terminal = await client.post(
+        f"{_RUNNER_PREFIX}/runs/{run_id}/result",
+        json={"status": "success", "result_summary": {"ok": True}},
+        headers=_runner_h(runner_credential),
+    )
+    assert terminal.status_code == 200, terminal.text
+
+    # Force the audit write to blow up; the rejection must be unconditional.
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("audit backend down")
+
+    monkeypatch.setattr("app.api.deps.record_admin_action", _boom)
+
+    late = await client.post(
+        f"{_RUNTIME_PREFIX}/results",
+        json={
+            "entity_type": "observable",
+            "entity_id": str(obs_id),
+            "summary": "Late duplicate",
+            "fingerprint": "late-audit-boom",
+        },
+        headers=_runtime_h(runtime_token),
+    )
+    assert late.status_code == 409, late.text
+
+
 async def test_patch_case(
     client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
 ):
