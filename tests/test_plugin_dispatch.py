@@ -2,11 +2,15 @@
 import hashlib
 import hmac
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlmodel import select
 
+from app.api.deps import PluginRunnerPrincipal
+from app.api.internal.routes.plugin_runner import submit_result
+from app.core.configs import settings
 from app.core.crypto import encrypt_string
 from app.models.audit import AuditOutbox
 from app.models.plugin_runner import (
@@ -346,14 +350,6 @@ async def test_push_expires_past_max_age(session, org_a):
 
 
 # --- Auto-retry of transient failures in submit_result (Task 12) ---
-import uuid
-
-from app.api.deps import PluginRunnerPrincipal
-from app.api.internal.routes.plugin_runner import submit_result
-from app.core.configs import settings
-from app.models.plugin_runner import OrgPlugin
-
-
 async def _seed_run_for_result(session, org_id, *, attempt=1):
     """Seed a runner + enabled plugin + a running PluginRun ready to submit_result."""
     runner = await _seed_runner(session, runner_id=f"r-{uuid.uuid4().hex[:8]}")
@@ -455,6 +451,9 @@ async def test_submit_result_transient_gives_up_at_cap(session, org_a):
     assert run.ended_at is not None
     # Terminal path leaves the token resolvable (Task 11), does not null it.
     assert run.runtime_token_hash == "live-token-hash"
+    # A terminal TRANSIENT failure is not a config signal: breaker untouched.
+    op = await session.get(OrgPlugin, (org_a.id, pdef.id))
+    assert op.config_failure_streak == 0
 
 
 async def test_submit_result_config_failure_terminalizes_and_records_breaker(session, org_a):

@@ -732,6 +732,8 @@ async def submit_result(
         run.attempt += 1
         run.error = None
         run.error_kind = None
+        # No skip_reason to clear (unlike the retry_failed template): a run reaching
+        # submit_result was running, never skipped, so skip_reason is always None here.
         run.started_at = None
         run.ended_at = None
         run.runtime_token_hash = None
