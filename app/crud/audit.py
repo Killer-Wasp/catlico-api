@@ -7,6 +7,7 @@ raising — but a genuine DB-write failure propagates and rolls back the mutatio
 rather than silently dropping the trail.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.context import get_request_id
 from app.crud.pagination import paginate
 from app.models.audit import Audit, AuditOutbox
+
+logger = logging.getLogger(__name__)
 
 # Keys whose values must never be written to an audit row. Match is by exact key
 # or by substring for the obviously-sensitive families. Audit rows are themselves
@@ -176,8 +179,14 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
         all_succeeded = True
         for consumer in _consumers:
             try:
-                await consumer(session, row)
+                async with session.begin_nested():
+                    await consumer(session, row)
             except Exception:
+                logger.exception(
+                    "outbox consumer %s failed for outbox row %d",
+                    getattr(consumer, "__name__", repr(consumer)),
+                    row.id,
+                )
                 all_succeeded = False
         if all_succeeded:
             row.delivered_at = datetime.now(UTC)

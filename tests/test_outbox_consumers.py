@@ -215,6 +215,51 @@ async def test_first_consumer_failure_stops_fan_out(session):
         _consumers.remove(_c2)
 
 
+async def test_failing_consumer_does_not_poison_later_consumers(session, org_a):
+    """A consumer that dirties the transaction (e.g. FK violation) must not break
+    the next consumer or the batch commit — each consumer runs in a SAVEPOINT."""
+    from app.models.notification import UserNotification
+
+    row = await _an_outbox_row(session, org_id=org_a.id)
+    seen: list[int] = []
+
+    async def poison_consumer(s, r):
+        # Simulate the historical bug: insert a row violating the org FK.
+        s.add(
+            UserNotification(
+                organisation_id="no-such-org",
+                user_id=None,
+                event_type="x",
+                title="x",
+            )
+        )
+        await s.flush()
+
+    async def good_consumer(s, r):
+        seen.append(r.id)
+
+    register_consumer(poison_consumer)
+    register_consumer(good_consumer)
+    try:
+        row.delivered_at = None
+        row.attempts = 0
+        session.add(row)
+        await session.commit()
+
+        delivered = await audit_crud.dispatch_pending_outbox(session)
+
+        assert seen, "good consumer must still run after the poison consumer"
+        # The poison consumer's failure keeps the row undelivered.
+        assert delivered == 0
+
+        # And the session must still be usable — a follow-up query must not raise
+        # PendingRollbackError / InFailedSQLTransaction.
+        await session.execute(select(AuditOutbox))
+    finally:
+        _consumers.remove(poison_consumer)
+        _consumers.remove(good_consumer)
+
+
 async def test_no_consumers_still_marks_delivered(session):
     """With zero registered consumers, rows are delivered (existing v1 behavior)."""
     row = await _an_outbox_row(session)
