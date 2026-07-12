@@ -256,6 +256,48 @@ async def test_add_generic_plugin_result_is_idempotent(
     assert second.json()["created"] is False
 
 
+async def test_add_result_missing_entity_type_is_422(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    runtime_token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id)
+    )
+    body = {
+        "entity_id": str(obs_id),
+        "summary": "Missing entity_type",
+        "fingerprint": "missing-entity-type-1",
+    }
+
+    r = await client.post(
+        f"{_RUNTIME_PREFIX}/results",
+        json=body,
+        headers=_runtime_h(runtime_token),
+    )
+    assert r.status_code == 422, r.text
+
+
+async def test_add_result_missing_entity_id_is_422(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    runtime_token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id)
+    )
+    body = {
+        "entity_type": "observable",
+        "summary": "Missing entity_id",
+        "fingerprint": "missing-entity-id-1",
+    }
+
+    r = await client.post(
+        f"{_RUNTIME_PREFIX}/results",
+        json=body,
+        headers=_runtime_h(runtime_token),
+    )
+    assert r.status_code == 422, r.text
+
+
 async def test_upload_runtime_file_and_attach_to_result(
     client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
 ):

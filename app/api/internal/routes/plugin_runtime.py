@@ -297,8 +297,19 @@ async def add_result(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
     _require_any(principal, {"write:plugin_result", "write:observable_enrichment"})
-    entity_type = body["entity_type"]
-    entity_id = str(body["entity_id"])
+    entity_type = body.get("entity_type")
+    if not entity_type:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="entity_type is required",
+        )
+    entity_id = body.get("entity_id")
+    if not entity_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="entity_id is required",
+        )
+    entity_id = str(entity_id)
     fingerprint = body.get("fingerprint")
     if not fingerprint:
         raise HTTPException(
