@@ -4,6 +4,8 @@ These endpoints are called by plugin runs through the internal runtime API.
 They require a run-scoped token and enforce plugin permissions, org scope,
 and TLP/PAP constraints.
 """
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -549,6 +551,22 @@ def _proposed(action) -> dict:
     return {"proposed_action_id": str(action.id), "status": action.status}
 
 
+def _proposal_fingerprint(
+    action_type: str, entity_type: str, entity_id: str, payload: dict
+) -> str:
+    """Deterministic idempotency key for a proposed action.
+
+    A stable sha256 over the semantic content, so two identical proposals from
+    the same run collide (dedup) while a different payload does not. Mirrors
+    ``PluginResult.fingerprint``; scoping to a single run is enforced by the
+    partial unique index on ``(plugin_run_id, fingerprint)``.
+    """
+    canonical = f"{action_type}|{entity_type}|{entity_id}|" + json.dumps(
+        payload, sort_keys=True
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 @router.patch("/cases/{case_id}", status_code=status.HTTP_202_ACCEPTED)
 async def patch_case(
     case_id: int,
@@ -561,13 +579,17 @@ async def patch_case(
     _require(principal, "write:case")
     await _case_for_runtime(session, principal, case_id)
     run = await _run_or_409(session, principal)
+    payload = {k: v for k, v in body.items() if k in ("title", "description")}
     action = await ppa_crud.create(
         session,
         run=run,
         action_type="patch_case_description",
         entity_type="case",
         entity_id=str(case_id),
-        payload={k: v for k, v in body.items() if k in ("title", "description")},
+        payload=payload,
+        fingerprint=_proposal_fingerprint(
+            "patch_case_description", "case", str(case_id), payload
+        ),
     )
     return _proposed(action)
 
@@ -583,17 +605,21 @@ async def create_task(
     _require(principal, "write:task")
     await _case_for_runtime(session, principal, case_id)
     run = await _run_or_409(session, principal)
+    payload = {
+        "title": body["title"],
+        "description": body.get("description", ""),
+        "group": body.get("group", ""),
+    }
     action = await ppa_crud.create(
         session,
         run=run,
         action_type="create_task",
         entity_type="case",
         entity_id=str(case_id),
-        payload={
-            "title": body["title"],
-            "description": body.get("description", ""),
-            "group": body.get("group", ""),
-        },
+        payload=payload,
+        fingerprint=_proposal_fingerprint(
+            "create_task", "case", str(case_id), payload
+        ),
     )
     return _proposed(action)
 
@@ -657,13 +683,15 @@ async def add_tag(
     _require(principal, "write:case")
     await _case_for_runtime(session, principal, case_id)
     run = await _run_or_409(session, principal)
+    payload = {"tag": body["tag"]}
     action = await ppa_crud.create(
         session,
         run=run,
         action_type="add_tag",
         entity_type="case",
         entity_id=str(case_id),
-        payload={"tag": body["tag"]},
+        payload=payload,
+        fingerprint=_proposal_fingerprint("add_tag", "case", str(case_id), payload),
     )
     return _proposed(action)
 

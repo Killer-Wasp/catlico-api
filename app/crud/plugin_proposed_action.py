@@ -93,13 +93,34 @@ async def create(
     entity_type: str,
     entity_id: str,
     payload: dict,
+    fingerprint: str | None = None,
 ) -> PluginProposedAction:
-    """Record a plugin-proposed mutation awaiting approval."""
+    """Record a plugin-proposed mutation awaiting approval.
+
+    Idempotency mirrors ``add_result``: when a non-None ``fingerprint`` is given,
+    an existing proposal from the SAME run with the same fingerprint is returned
+    unchanged — no new row, and no re-apply of an already auto-applied action.
+    This makes redelivered events / retried runs (which reuse the run row) safe.
+    """
     if action_type not in ACTION_TYPES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unknown proposed action_type: {action_type}",
         )
+    if fingerprint is not None:
+        existing = (
+            await session.execute(
+                select(PluginProposedAction).where(
+                    PluginProposedAction.plugin_run_id == run.id,
+                    PluginProposedAction.fingerprint == fingerprint,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            # Already proposed on this run (redelivery/retry). Return it as-is —
+            # do not insert again and do not re-run the auto-apply policy on an
+            # action that may already be applied.
+            return existing
     action = PluginProposedAction(
         plugin_run_id=run.id,
         organisation_id=run.organisation_id,
@@ -107,6 +128,7 @@ async def create(
         action_type=action_type,
         entity_type=entity_type,
         entity_id=str(entity_id),
+        fingerprint=fingerprint,
         payload=payload,
         status="proposed",
         created_by=run.plugin_id,

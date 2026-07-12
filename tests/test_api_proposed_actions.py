@@ -648,6 +648,195 @@ async def test_auto_apply_policy_rejects_high_impact(
     assert r.status_code == 422, r.text
 
 
+# --- Fingerprint idempotency: dedup within a run ---
+
+
+async def _case_action_rows(client, analyst_a_token, org_a, case_id, action_type):
+    h = _user_h(analyst_a_token, org_a.id)
+    listed = await client.get(
+        f"{_ACTIONS}?entity_type=case&entity_id={case_id}", headers=h
+    )
+    assert listed.status_code == 200, listed.text
+    return [a for a in listed.json() if a["action_type"] == action_type]
+
+
+async def test_patch_case_propose_twice_dedups_within_run(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """Re-proposing the same patch_case from the same run (redelivery/retry)
+    returns the existing proposal — exactly one row, no 500, no duplicate."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    token = await _case_runtime_token(client, runner_secret, admin_token, org_a, case_id)
+
+    first = await client.patch(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}",
+        json={"description": "Same patch"},
+        headers=_runtime_h(token),
+    )
+    second = await client.patch(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}",
+        json={"description": "Same patch"},
+        headers=_runtime_h(token),
+    )
+    assert first.status_code == 202, first.text
+    assert second.status_code == 202, second.text
+    assert first.json()["proposed_action_id"] == second.json()["proposed_action_id"]
+
+    rows = await _case_action_rows(
+        client, analyst_a_token, org_a, case_id, "patch_case_description"
+    )
+    assert len(rows) == 1
+
+
+async def test_add_tag_propose_twice_dedups_within_run(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    token = await _case_runtime_token(client, runner_secret, admin_token, org_a, case_id)
+
+    first = await client.post(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}/tags",
+        json={"tag": "dupe"},
+        headers=_runtime_h(token),
+    )
+    second = await client.post(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}/tags",
+        json={"tag": "dupe"},
+        headers=_runtime_h(token),
+    )
+    assert first.status_code == 202, first.text
+    assert second.status_code == 202, second.text
+    assert first.json()["proposed_action_id"] == second.json()["proposed_action_id"]
+
+    rows = await _case_action_rows(client, analyst_a_token, org_a, case_id, "add_tag")
+    assert len(rows) == 1
+
+
+async def test_create_task_propose_twice_dedups_within_run(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    token = await _case_runtime_token(client, runner_secret, admin_token, org_a, case_id)
+
+    body = {"title": "Investigate", "description": "look"}
+    first = await client.post(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}/tasks", json=body, headers=_runtime_h(token)
+    )
+    second = await client.post(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}/tasks", json=body, headers=_runtime_h(token)
+    )
+    assert first.status_code == 202, first.text
+    assert second.status_code == 202, second.text
+    assert first.json()["proposed_action_id"] == second.json()["proposed_action_id"]
+
+    rows = await _case_action_rows(
+        client, analyst_a_token, org_a, case_id, "create_task"
+    )
+    assert len(rows) == 1
+
+
+async def test_different_payload_creates_distinct_proposal(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """A different payload is a different fingerprint: it must NOT dedup."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    token = await _case_runtime_token(client, runner_secret, admin_token, org_a, case_id)
+
+    first = await client.post(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}/tags",
+        json={"tag": "alpha"},
+        headers=_runtime_h(token),
+    )
+    second = await client.post(
+        f"{_RUNTIME_PREFIX}/cases/{case_id}/tags",
+        json={"tag": "beta"},
+        headers=_runtime_h(token),
+    )
+    assert first.json()["proposed_action_id"] != second.json()["proposed_action_id"]
+
+    rows = await _case_action_rows(client, analyst_a_token, org_a, case_id, "add_tag")
+    assert len(rows) == 2
+
+
+async def test_same_content_different_run_is_not_deduped(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """Dedup is scoped to (plugin_run_id, fingerprint): a genuinely different run
+    (a different event) may propose identical content and get its own row."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id_1 = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run_id_2 = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    assert run_id_1 != run_id_2
+    run1 = await session.get(PluginRun, uuid.UUID(run_id_1))
+    run2 = await session.get(PluginRun, uuid.UUID(run_id_2))
+
+    fp = "shared-fingerprint"
+    first = await ppa_crud.create(
+        session, run=run1, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "shared"}, fingerprint=fp,
+    )
+    second = await ppa_crud.create(
+        session, run=run2, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "shared"}, fingerprint=fp,
+    )
+    assert first.id != second.id
+
+    rows = await _case_action_rows(client, analyst_a_token, org_a, case_id, "add_tag")
+    assert len(rows) == 2
+
+
+async def test_dedup_holds_across_run_retry_reusing_run_row(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """A retried run reuses the same PluginRun row (bumping attempt). Re-proposing
+    the same fingerprint on that reused run returns the existing row, not a dup."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+
+    fp = "retry-fingerprint"
+    first = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "x"}, fingerprint=fp,
+    )
+    second = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "x"}, fingerprint=fp,
+    )
+    assert first.id == second.id
+
+
+async def test_dedup_does_not_reapply_autoapplied_action(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """When an auto-applied low-risk action is re-proposed with the same
+    fingerprint, the existing (already 'applied') row is returned WITHOUT running
+    the auto-apply policy again — the change is applied exactly once."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+    await _enable_auto_apply(session, org_a.id, run.plugin_id, ["add_tag"])
+
+    fp = "autoapply-fingerprint"
+    first = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "auto"}, fingerprint=fp,
+    )
+    assert first.status == "applied"
+    second = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "auto"}, fingerprint=fp,
+    )
+    assert second.id == first.id
+    assert second.status == "applied"
+
+    # The tag was applied exactly once (no duplicate tag from a re-apply).
+    h = _user_h(analyst_a_token, org_a.id)
+    tags = await client.get(f"/api/v1/cases/{case_id}/tags", headers=h)
+    assert tags.status_code == 200, tags.text
+    assert tags.json().count("auto") == 1
+
+
 async def test_proposed_actions_scoped_to_org(
     client: AsyncClient,
     org_a,

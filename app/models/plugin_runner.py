@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import JSON, Column, UniqueConstraint
+from sqlalchemy import JSON, Column, Index, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 from app.models.common import TimestampMixin
@@ -281,6 +281,22 @@ class PluginProposedAction(TimestampMixin, table=True):
     """A plugin-requested canonical mutation awaiting policy/approval."""
 
     __tablename__ = "plugin_proposed_action"
+    # Idempotency, mirroring PluginResult.fingerprint: a redelivered event or a
+    # retried run (which reuses this run row) that re-proposes the same action
+    # must not create a duplicate proposal. Scoped to (plugin_run_id, fingerprint)
+    # like uq_plugin_result_run_fingerprint — a genuinely different run may still
+    # create its own proposal with identical content. Nullable + partial (WHERE
+    # fingerprint IS NOT NULL) so legacy/direct rows without a fingerprint don't
+    # collide with one another on NULL.
+    __table_args__ = (
+        Index(
+            "uq_plugin_proposed_action_run_fingerprint",
+            "plugin_run_id",
+            "fingerprint",
+            unique=True,
+            postgresql_where=text("fingerprint IS NOT NULL"),
+        ),
+    )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     plugin_run_id: uuid.UUID = Field(foreign_key="plugin_run.id", ondelete="CASCADE")
@@ -289,6 +305,7 @@ class PluginProposedAction(TimestampMixin, table=True):
     action_type: str
     entity_type: str
     entity_id: str
+    fingerprint: str | None = Field(default=None)
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
     # proposed | approved | rejected | applied | failed | expired | superseded
     status: str = Field(default="proposed")
