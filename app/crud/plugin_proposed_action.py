@@ -85,6 +85,24 @@ def approve_permission(action_type: str, entity_type: str) -> str:
     }[action_type]
 
 
+async def _existing_by_fingerprint(
+    session: AsyncSession, run_id: uuid.UUID, fingerprint: str
+) -> PluginProposedAction | None:
+    """The proposal already recorded on ``run_id`` for ``fingerprint``, if any.
+
+    Backs both the fast-path pre-check and the post-IntegrityError re-select in
+    ``create`` so the two agree on the dedup key.
+    """
+    return (
+        await session.execute(
+            select(PluginProposedAction).where(
+                PluginProposedAction.plugin_run_id == run_id,
+                PluginProposedAction.fingerprint == fingerprint,
+            )
+        )
+    ).scalar_one_or_none()
+
+
 async def create(
     session: AsyncSession,
     *,
@@ -108,14 +126,7 @@ async def create(
             detail=f"Unknown proposed action_type: {action_type}",
         )
     if fingerprint is not None:
-        existing = (
-            await session.execute(
-                select(PluginProposedAction).where(
-                    PluginProposedAction.plugin_run_id == run.id,
-                    PluginProposedAction.fingerprint == fingerprint,
-                )
-            )
-        ).scalar_one_or_none()
+        existing = await _existing_by_fingerprint(session, run.id, fingerprint)
         if existing is not None:
             # Already proposed on this run (redelivery/retry). Return it as-is —
             # do not insert again and do not re-run the auto-apply policy on an
@@ -133,8 +144,26 @@ async def create(
         status="proposed",
         created_by=run.plugin_id,
     )
-    session.add(action)
-    await session.flush()
+    try:
+        # Insert under a savepoint: the fast-path pre-check above is a TOCTOU, so a
+        # concurrent duplicate that beat us to the flush trips
+        # uq_plugin_proposed_action_run_fingerprint. Without the savepoint that
+        # IntegrityError aborts the outer transaction and surfaces as a 500;
+        # rolling back to the savepoint keeps it usable so we can re-select the
+        # winner and resolve to it (mirrors the add_related_observable TOCTOU
+        # handling below). This re-select-and-return path deliberately does NOT
+        # fall through to auto-apply — the winning row already ran that policy.
+        async with session.begin_nested():
+            session.add(action)
+            await session.flush()
+    except IntegrityError:
+        if fingerprint is not None:
+            existing = await _existing_by_fingerprint(session, run.id, fingerprint)
+            if existing is not None:
+                return existing
+        # Not the fingerprint dedup race (or no fingerprint to resolve against):
+        # a genuine constraint violation the caller must handle.
+        raise
 
     # Org auto-apply policy: low-risk actions the org opted into are applied
     # immediately (born applied). Anything else waits for analyst approval.

@@ -806,6 +806,51 @@ async def test_dedup_holds_across_run_retry_reusing_run_row(
     assert first.id == second.id
 
 
+async def test_create_concurrent_duplicate_resolves_to_existing_row(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
+):
+    """The fingerprint pre-check is a TOCTOU: a concurrent duplicate can insert
+    the row between our pre-check and our flush, tripping the partial unique
+    index. Simulate it deterministically by making the pre-check report the row
+    absent while it in fact exists (mirrors the add_related_observable racy_find
+    tests). The loser must roll back to the savepoint, re-select, and return the
+    existing row — never a 500, never a duplicate."""
+    case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+
+    fp = "race-fingerprint"
+    first = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "x"}, fingerprint=fp,
+    )
+
+    # First lookup (the pre-check) sees nothing, as if the concurrent insert
+    # hadn't landed yet; the post-IntegrityError re-select sees the truth.
+    real = ppa_crud._existing_by_fingerprint
+    calls = {"n": 0}
+
+    async def racy(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(ppa_crud, "_existing_by_fingerprint", racy)
+
+    second = await ppa_crud.create(
+        session, run=run, action_type="add_tag", entity_type="case",
+        entity_id=str(case_id), payload={"tag": "x"}, fingerprint=fp,
+    )
+    # Resolved to the pre-existing row via the IntegrityError re-select branch.
+    assert second.id == first.id
+    assert calls["n"] == 2
+
+    monkeypatch.undo()
+    rows = await _case_action_rows(client, analyst_a_token, org_a, case_id, "add_tag")
+    assert len(rows) == 1
+
+
 async def test_dedup_does_not_reapply_autoapplied_action(
     client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
 ):

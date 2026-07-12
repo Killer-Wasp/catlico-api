@@ -13,6 +13,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -308,14 +309,17 @@ async def add_result(
     attachments = body.get("attachments", [])
     await _validate_result_attachments(session, principal, attachments)
 
-    existing = (
-        await session.execute(
-            select(PluginResult).where(
-                PluginResult.plugin_run_id == principal.run_id,
-                PluginResult.fingerprint == fingerprint,
+    async def _existing_result():
+        return (
+            await session.execute(
+                select(PluginResult).where(
+                    PluginResult.plugin_run_id == principal.run_id,
+                    PluginResult.fingerprint == fingerprint,
+                )
             )
-        )
-    ).scalar_one_or_none()
+        ).scalar_one_or_none()
+
+    existing = await _existing_result()
     if existing is not None:
         return {"id": str(existing.id), "created": False}
 
@@ -339,8 +343,20 @@ async def add_result(
         fingerprint=fingerprint,
         expires_at=body.get("expires_at"),
     )
-    session.add(result)
-    await session.flush()
+    try:
+        # Insert under a savepoint: the pre-check above is a TOCTOU, so a
+        # concurrent duplicate that beat us to the flush trips
+        # uq_plugin_result_run_fingerprint. Rolling back to the savepoint keeps
+        # the outer transaction usable so we resolve to the winner instead of
+        # 500ing (mirrors ppa_crud.create).
+        async with session.begin_nested():
+            session.add(result)
+            await session.flush()
+    except IntegrityError:
+        existing = await _existing_result()
+        if existing is None:
+            raise
+        return {"id": str(existing.id), "created": False}
     return {"id": str(result.id), "created": True}
 
 
