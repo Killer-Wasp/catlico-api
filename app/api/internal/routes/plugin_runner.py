@@ -61,11 +61,6 @@ def _new_push_signing_secret() -> str:
     return f"cps_{secrets.token_urlsafe(32)}"
 
 
-def _invalidate_runtime_token(run: PluginRun) -> None:
-    run.runtime_token_hash = None
-    run.runtime_token_expires_at = None
-
-
 def _event_object_from_body(body: dict) -> tuple[str | None, str | None]:
     event_object = body.get("event_object") or {}
     object_type = body.get("event_object_type") or event_object.get("type")
@@ -661,7 +656,10 @@ async def skip_run(
     run.status = "skipped"
     run.skip_reason = body.get("skip_reason", "")
     run.ended_at = datetime.now(UTC)
-    _invalidate_runtime_token(run)
+    # Token is intentionally left resolvable: a late runtime call now reaches the
+    # status check in get_plugin_runtime_principal, which rejects it (409) and
+    # audits the late result. The terminal status — not a null token — is what
+    # makes the token accept no further work.
     await session.flush()
     return {"status": run.status}
 
@@ -715,7 +713,10 @@ async def submit_result(
     run.log_tail = body.get("log_tail")
     run.ended_at = datetime.now(UTC)
     if run.status in {"success", "failure", "timeout", "cancelled", "skipped"}:
-        _invalidate_runtime_token(run)
+        # Token is intentionally left resolvable (not nulled): a late runtime call
+        # then reaches the status check in get_plugin_runtime_principal, which
+        # rejects it (409) and audits the late result rather than hitting the
+        # anonymous 401 branch. The terminal status makes the token accept no work.
         await circuit_breaker.record_run_outcome(
             session, run, threshold=settings.PLUGIN_CONFIG_FAILURE_THRESHOLD
         )

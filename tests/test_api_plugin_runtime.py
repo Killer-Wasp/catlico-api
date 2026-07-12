@@ -7,6 +7,10 @@ import hashlib
 import uuid
 
 from httpx import AsyncClient
+from sqlalchemy import func, select
+
+from app.models.audit import Audit
+from app.models.plugin_runner import PluginResult
 
 from tests.test_api_plugin_runners import (
     RUNNER1,
@@ -386,12 +390,98 @@ async def test_runtime_token_is_invalid_after_terminal_status(
     )
     assert terminal.status_code == 200, terminal.text
 
+    # The runtime token is deliberately left resolvable at terminal status so the
+    # late call can be attributed; it is rejected by the run-status check (409),
+    # not the anonymous 401 "unknown token" branch.
     late = await client.post(
         f"{_RUNTIME_PREFIX}/progress",
         json={"message": "late", "percent": 100},
         headers=_runtime_h(runtime_token),
     )
-    assert late.status_code == 401
+    assert late.status_code == 409
+
+
+async def test_late_result_after_terminal_is_rejected_and_audited(
+    client: AsyncClient, session, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """A runtime call on a terminal run is rejected (409), applies no result, and
+    is recorded as an independent `rejected_late_result` audit that survives the
+    request rollback (proving the audit committed on its own session)."""
+    org_id = org_a.id
+    _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    runtime_token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id)
+    )
+
+    # Land one legitimate result while the run is still active (baseline).
+    body = {
+        "entity_type": "observable",
+        "entity_id": str(obs_id),
+        "source": "acme-threatintel",
+        "summary": "First result",
+        "fingerprint": "late-audit-1",
+    }
+    first = await client.post(
+        f"{_RUNTIME_PREFIX}/results", json=body, headers=_runtime_h(runtime_token)
+    )
+    assert first.status_code == 200, first.text
+
+    # Resolve run id, then drive the run to a terminal status via the runner API.
+    progress = await client.post(
+        f"{_RUNTIME_PREFIX}/progress",
+        json={"message": "Done", "percent": 100},
+        headers=_runtime_h(runtime_token),
+    )
+    run_id = progress.json()["run_id"]
+    _, runner_credential = await _register_runner(
+        client, admin_token, RUNNER1, plugins=[RUNTIME_MANIFEST],
+    )
+    terminal = await client.post(
+        f"{_RUNNER_PREFIX}/runs/{run_id}/result",
+        json={"status": "success", "result_summary": {"ok": True}},
+        headers=_runner_h(runner_credential),
+    )
+    assert terminal.status_code == 200, terminal.text
+
+    # The audit is written on an INDEPENDENT session; under READ COMMITTED a fresh
+    # statement on the shared test session observes it once committed. We query the
+    # shared session directly (no rollback — that would expire ORM fixtures).
+    count_before = (
+        await session.execute(select(func.count()).select_from(PluginResult))
+    ).scalar_one()
+
+    # Late result on the terminal run: must be rejected (409) and NOT applied.
+    late = await client.post(
+        f"{_RUNTIME_PREFIX}/results",
+        json={**body, "summary": "Late duplicate", "fingerprint": "late-audit-2"},
+        headers=_runtime_h(runtime_token),
+    )
+    assert late.status_code == 409, late.text
+
+    count_after = (
+        await session.execute(select(func.count()).select_from(PluginResult))
+    ).scalar_one()
+    assert count_after == count_before, "late result must not create a PluginResult"
+
+    audits = (
+        (
+            await session.execute(
+                select(Audit).where(
+                    Audit.action == "rejected_late_result",
+                    Audit.object_type == "plugin_run",
+                    Audit.object_id == str(run_id),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(audits) == 1, "expected exactly one late-result audit row"
+    audit = audits[0]
+    assert audit.main_action is True
+    assert audit.details["status"] == "success"
+    assert audit.details["organisation_id"] == org_id
+    assert "terminal" in audit.details["reason"]
 
 
 async def test_patch_case(

@@ -77,6 +77,7 @@ _wait_for_db(_DB_URL)
 
 # App imports must come after DATABASE_URL is set above.
 import app.models  # noqa: E402, F401 — registers all table models with SQLModel metadata
+from app.core.db import engine as app_engine  # noqa: E402
 from app.core.db import get_session, run_migrations  # noqa: E402
 from app.core.security import TokenPayload, create_access_token  # noqa: E402
 from app.crud.organisation import create_organisation  # noqa: E402
@@ -138,6 +139,12 @@ async def _reset_db() -> AsyncGenerator[None, None]:
     """Reset every table after each test for isolation. The schema (built once by
     the migrations) persists; only row data is wiped."""
     yield
+    # Dispose the app's pooled engine so no asyncpg connection survives into the
+    # next test's event loop. Code paths that use the module-level session factory
+    # directly (e.g. the independent audit write in get_plugin_runtime_principal)
+    # would otherwise reuse a connection bound to this test's loop and raise
+    # "attached to a different loop".
+    await app_engine.dispose()
     eng = create_async_engine(_DB_URL, poolclass=NullPool)
     try:
         async with eng.begin() as conn:

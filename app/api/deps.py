@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.db import get_session
+from app.core.db import AsyncSessionLocal, get_session
 from app.core.security import TokenPayload, decode_access_token
 from app.crud.api_key import get_key_by_hash, touch_key
 from app.crud.organisation_member import get_member_permissions
@@ -24,6 +24,7 @@ from app.models.role import (
     expand_permissions,
 )
 from app.models.user import User
+from app.services.plugin_audit import record_admin_action
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -494,6 +495,26 @@ async def get_plugin_runtime_principal(
             headers={"WWW-Authenticate": "Bearer"},
         )
     if run.status not in {"accepted", "running"}:
+        # Late result: the token still resolves to its run (we deliberately no
+        # longer null the hash at terminal status) so we can attribute the call,
+        # but the run is terminal/inactive and must accept no work. Audit the
+        # rejection in an INDEPENDENT session that commits on its own — the
+        # request session is rolled back when this raises (get_session rolls back
+        # on any exception), which would otherwise discard the audit row.
+        async with AsyncSessionLocal() as audit_session:
+            await record_admin_action(
+                audit_session,
+                action="rejected_late_result",
+                object_type="plugin_run",
+                object_id=str(run.id),
+                actor=f"plugin:{run.plugin_id}@{run.plugin_version_id}",
+                organisation_id=run.organisation_id,
+                details={
+                    "status": run.status,
+                    "reason": "runtime token used after run reached terminal/inactive status",
+                },
+            )
+            await audit_session.commit()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Plugin runtime token is not active for this run",
