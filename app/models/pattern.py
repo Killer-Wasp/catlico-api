@@ -51,6 +51,14 @@ class PatternImportItem(PatternCreate):
     """One record in a bulk import. Upserted by external_id."""
 
 
+class AttackImportResult(SQLModel):
+    """Outcome of a server-side MITRE catalog import."""
+
+    created: int
+    updated: int
+    total: int
+
+
 class PatternPublic(SQLModel):
     id: uuid.UUID
     external_id: str

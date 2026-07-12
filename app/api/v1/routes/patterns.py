@@ -2,14 +2,24 @@
 
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ActiveOrgOrApiKeyContext, CaseAuthContext, require_case_permission
 from app.core.db import get_session
 from app.crud import pattern as pattern_crud
 from app.models.common import Page
-from app.models.pattern import PatternImportItem, PatternPublic, ProcedurePublic, ProcedureReplace
+from app.models.pattern import (
+    AttackImportResult,
+    Pattern,
+    PatternImportItem,
+    PatternPublic,
+    ProcedurePublic,
+    ProcedureReplace,
+)
+from app.services import attack_import
 
 router = APIRouter(tags=["patterns"])
 
@@ -32,6 +42,38 @@ async def list_patterns(
         total=total,
         skip=skip,
         limit=limit,
+    )
+
+
+@pattern_router.post("/import-attack", response_model=AttackImportResult)
+async def import_attack_catalog(
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AttackImportResult:
+    """Fetch the MITRE CTI enterprise-attack bundle and upsert the catalog.
+
+    Like ``POST /patterns/import``, writing the global pattern catalog is an
+    admin surface gated on ``write:organisation``."""
+    if "write:organisation" not in ctx.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing permission: write:organisation",
+        )
+    try:
+        bundle = await attack_import.fetch_attack_bundle()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch ATT&CK bundle: {exc}",
+        ) from exc
+    items = attack_import.parse_attack_bundle(bundle)
+    existing = set(
+        (await session.execute(select(Pattern.external_id))).scalars().all()
+    )
+    created = sum(1 for i in items if i.external_id not in existing)
+    await pattern_crud.import_patterns(session, items, created_by=str(ctx.user.id))
+    return AttackImportResult(
+        created=created, updated=len(items) - created, total=len(items)
     )
 
 

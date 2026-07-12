@@ -1,4 +1,8 @@
 """STIX enterprise-attack bundle parsing (no network)."""
+import httpx
+import pytest
+from httpx import AsyncClient
+
 from app.services.attack_import import parse_attack_bundle
 
 # Trimmed to the fields the parser reads. Real bundles carry ~40MB of objects.
@@ -105,3 +109,53 @@ def test_missing_optional_fields_fall_back():
 def test_empty_bundle_parses_to_nothing():
     assert parse_attack_bundle({"objects": []}) == []
     assert parse_attack_bundle({}) == []
+
+
+def _headers(token, org_id):
+    return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org_id}
+
+
+@pytest.fixture
+def fake_bundle(monkeypatch):
+    async def _fake():
+        return FIXTURE_BUNDLE
+    monkeypatch.setattr("app.services.attack_import.fetch_attack_bundle", _fake)
+
+
+async def test_import_attack_upserts_catalog(
+    client: AsyncClient, org_a, admin_user, admin_token, fake_bundle
+):
+    h = _headers(admin_token, org_a.id)
+    r = await client.post("/api/v1/patterns/import-attack", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"created": 2, "updated": 0, "total": 2}
+
+    # Re-import: idempotent upsert, nothing duplicated.
+    r2 = await client.post("/api/v1/patterns/import-attack", headers=h)
+    assert r2.json() == {"created": 0, "updated": 2, "total": 2}
+
+    listed = (await client.get("/api/v1/patterns", headers=h)).json()
+    assert listed["total"] == 2
+    by_id = {p["external_id"]: p for p in listed["items"]}
+    assert by_id["T1078"]["tactics"] == ["defense-evasion", "persistence"]
+    assert by_id["T1078.001"]["parent_external_id"] == "T1078"
+
+
+async def test_import_attack_requires_org_admin(
+    client: AsyncClient, org_a, readonly_a, readonly_a_token, fake_bundle
+):
+    h = _headers(readonly_a_token, org_a.id)
+    r = await client.post("/api/v1/patterns/import-attack", headers=h)
+    assert r.status_code == 403, r.text
+
+
+async def test_import_attack_fetch_failure_returns_502(
+    client: AsyncClient, org_a, admin_user, admin_token, monkeypatch
+):
+    async def _boom():
+        raise httpx.ConnectError("no route to github")
+    monkeypatch.setattr("app.services.attack_import.fetch_attack_bundle", _boom)
+    h = _headers(admin_token, org_a.id)
+    r = await client.post("/api/v1/patterns/import-attack", headers=h)
+    assert r.status_code == 502, r.text
