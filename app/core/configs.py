@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     PLUGIN_RUN_RETENTION_DAYS: int = 30
     PLUGIN_DELIVERY_RETENTION_DAYS: int = 7
     PLUGIN_RESULT_RETENTION_DAYS: int = 90
+    # Config circuit breaker: consecutive `config`-kind failures that auto-suspend
+    # an org's plugin. A passing config test (or any successful run) resets it.
+    PLUGIN_CONFIG_FAILURE_THRESHOLD: int = 3
     # Event push to runners (delivery retry policy).
     PLUGIN_PUSH_INTERVAL_SECONDS: int = 5
     PLUGIN_PUSH_BACKOFF_BASE_SECONDS: int = 30
@@ -113,20 +116,12 @@ class Settings(BaseSettings):
     # Fernet key (urlsafe base64, 32 bytes) used to encrypt connector secrets at
     # rest. Required at startup.
     SECRET_ENCRYPTION_KEY: str | None = None
-    # Dedup window: an enrich request reuses a successful job younger than this
-    # instead of re-dispatching. force_refresh overrides.
-    CONNECTOR_CACHE_TTL_SECONDS: int = 86400
-    # Fallback lease for jobs whose connector didn't declare a runtime, and the
-    # default the lease is derived from.
-    ANALYZER_LEASE_SECONDS: int = 300
-    # Upper bound on a per-connector lease so a misbehaving connector can't hold a
-    # job for hours. The effective lease is clamped to this.
-    ANALYZER_LEASE_SECONDS_MAX: int = 3600
-    # Slack added to a connector's declared runtime when leasing, so the worker
-    # kills and reports a timed-out job before its lease expires (no double-run).
-    ANALYZER_LEASE_GRACE_SECONDS: int = 30
-    # Give up after this many lease attempts and mark the job failed.
-    ANALYZER_MAX_ATTEMPTS: int = 3
+
+    # MITRE CTI enterprise-attack STIX bundle (ATT&CK catalog import).
+    ATTACK_BUNDLE_URL: str = (
+        "https://raw.githubusercontent.com/mitre/cti/master/"
+        "enterprise-attack/enterprise-attack.json"
+    )
 
     # Function runner mode.
     # - "stub": test stub marks every run successful (no sandbox). Local/test only.
