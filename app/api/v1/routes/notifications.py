@@ -16,9 +16,16 @@ from app.models.notification import (
     NotificationRuleCreate,
     NotificationRulePublic,
     NotificationRuleUpdate,
+    NotificationPreferenceItem,
+    NotificationPreferencesPublic,
+    NotificationPreferencesUpdate,
     UserNotification,
     UserNotificationPublic,
     UserNotificationUpdate,
+)
+from app.services.notification_catalog import (
+    NOTIFICATION_EVENT_CATALOG,
+    catalog_event_types,
 )
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -233,6 +240,53 @@ async def list_feed(
         skip=skip,
         limit=limit,
     )
+
+
+async def _merged_preferences(
+    session: AsyncSession, organisation_id: str, user_id: UUID
+) -> NotificationPreferencesPublic:
+    stored = await notif_crud.get_user_preferences(session, organisation_id, user_id)
+    items = [
+        NotificationPreferenceItem(
+            event_type=event_type,
+            label=label,
+            category=category,
+            enabled=stored.get(event_type, True),
+        )
+        for event_type, label, category in NOTIFICATION_EVENT_CATALOG
+    ]
+    return NotificationPreferencesPublic(items=items)
+
+
+@feed_router.get("/preferences", response_model=NotificationPreferencesPublic)
+async def get_preferences(
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> NotificationPreferencesPublic:
+    return await _merged_preferences(session, ctx.organisation_id, ctx.user.id)
+
+
+@feed_router.put("/preferences", response_model=NotificationPreferencesPublic)
+async def update_preferences(
+    prefs_in: NotificationPreferencesUpdate,
+    ctx: ActiveOrgContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> NotificationPreferencesPublic:
+    valid = catalog_event_types()
+    unknown = set(prefs_in.preferences) - valid
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown event type(s): {', '.join(sorted(unknown))}",
+        )
+    await notif_crud.set_user_preferences(
+        session,
+        ctx.organisation_id,
+        ctx.user.id,
+        prefs_in.preferences,
+        actor=str(ctx.user.id),
+    )
+    return await _merged_preferences(session, ctx.organisation_id, ctx.user.id)
 
 
 @feed_router.patch("/{notification_id}", response_model=UserNotificationPublic)

@@ -148,6 +148,46 @@ class UserNotificationUpdate(SQLModel):
     read_at: datetime | None = None  # set to now() to mark read, None for unread
 
 
+# --- User Notification Preferences (A2) ---
+
+
+class UserNotificationPreference(TimestampMixin, table=True):
+    """Per-user, per-org in-app notification mute setting. A row exists only for
+    event types the user has explicitly configured; absence means enabled."""
+
+    __tablename__ = "user_notification_preference"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "organisation_id", "event_type", name="uq_user_notif_pref"
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID = Field(
+        foreign_key="user.id", index=True, ondelete="CASCADE"
+    )
+    organisation_id: str = Field(
+        foreign_key="organisation.id", index=True, ondelete="CASCADE"
+    )
+    event_type: str = Field(index=True)
+    enabled: bool = Field(default=True)
+
+
+class NotificationPreferenceItem(SQLModel):
+    event_type: str
+    label: str
+    category: str
+    enabled: bool
+
+
+class NotificationPreferencesPublic(SQLModel):
+    items: list[NotificationPreferenceItem]
+
+
+class NotificationPreferencesUpdate(SQLModel):
+    preferences: dict[str, bool]  # event_type -> enabled
+
+
 # --- Notifier Delivery (A3) ---
 
 
