@@ -59,8 +59,10 @@ async def import_patterns(
 
 # --- Procedures (case-scoped) ---
 
+procedures_router = APIRouter(prefix="/cases")
 
-@router.get("/{case_id}/procedures", response_model=list[ProcedurePublic])
+
+@procedures_router.get("/{case_id}/procedures", response_model=list[ProcedurePublic])
 async def list_case_procedures(
     case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -87,7 +89,7 @@ async def list_case_procedures(
     return out
 
 
-@router.put("/{case_id}/procedures", response_model=list[ProcedurePublic])
+@procedures_router.put("/{case_id}/procedures", response_model=list[ProcedurePublic])
 async def replace_case_procedures(
     body: ProcedureReplace,
     case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
@@ -115,3 +117,4 @@ async def replace_case_procedures(
 
 
 router.include_router(pattern_router)
+router.include_router(procedures_router)

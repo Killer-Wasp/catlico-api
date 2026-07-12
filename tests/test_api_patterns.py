@@ -109,7 +109,7 @@ async def test_replace_and_list_procedures(
     case = await _make_case(session, org_a, builtin_roles, analyst_a)
 
     put = await client.put(
-        f"/api/v1/{case.id}/procedures",
+        f"/api/v1/cases/{case.id}/procedures",
         json={
             "procedures": [
                 {"external_id": "T1566", "name": "Phishing", "description": "spear-phish"}
@@ -123,17 +123,17 @@ async def test_replace_and_list_procedures(
     assert procs[0]["description"] == "spear-phish"
     assert procs[0]["pattern"]["external_id"] == "T1566"
 
-    listed = await client.get(f"/api/v1/{case.id}/procedures", headers=h)
+    listed = await client.get(f"/api/v1/cases/{case.id}/procedures", headers=h)
     assert listed.status_code == 200
     assert len(listed.json()) == 1
 
     # Replace with empty set clears them.
     cleared = await client.put(
-        f"/api/v1/{case.id}/procedures", json={"procedures": []}, headers=h
+        f"/api/v1/cases/{case.id}/procedures", json={"procedures": []}, headers=h
     )
     assert cleared.status_code == 200
     assert cleared.json() == []
-    assert (await client.get(f"/api/v1/{case.id}/procedures", headers=h)).json() == []
+    assert (await client.get(f"/api/v1/cases/{case.id}/procedures", headers=h)).json() == []
 
 
 async def test_replace_procedures_requires_write(
@@ -143,7 +143,7 @@ async def test_replace_procedures_requires_write(
     case = await _make_case(session, org_a, builtin_roles, readonly_a)
     h = _headers(readonly_a_token, org_a.id)
     r = await client.put(
-        f"/api/v1/{case.id}/procedures",
+        f"/api/v1/cases/{case.id}/procedures",
         json={"procedures": [{"external_id": "T1566", "name": "Phishing"}]},
         headers=h,
     )
