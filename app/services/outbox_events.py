@@ -81,7 +81,12 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
     body = envelope.get("details", {}).get("summary", "")
     # ponytail: org-wide notifications (user_id=None) for now; per-user routing
     # when notification rules gain user-scoping
-    org_id = row.payload.get("organisation_id", "")
+    org_id = row.payload.get("organisation_id")
+    if not org_id:
+        # Org-agnostic event (global user/account mutation) — the in-app feed is
+        # org-scoped, so there is nothing to notify. Mirrors the guard in
+        # notifier_delivery_consumer and ws_broadcast_consumer.
+        return
     await notif_crud.create_notification(
         session,
         organisation_id=org_id,

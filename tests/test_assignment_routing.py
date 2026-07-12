@@ -139,6 +139,41 @@ async def test_cleared_assignee_is_not_routed(session, org_a, monkeypatch):
     mock_hub.send_to_user.assert_not_called()
 
 
+async def test_org_less_event_creates_no_notification(session, org_a):
+    """An audit event without organisation_id (e.g. a global user mutation) must
+    be skipped by the feed consumer — not inserted with org_id='' (FK violation)."""
+    from app.models.user import User
+
+    user = User(
+        email="orgless@test.com",
+        first_name="Org",
+        last_name="Less",
+        hashed_password="x",
+    )
+    session.add(user)
+    await session.flush()
+    await audit_crud.record_audit(
+        session,
+        action="update",
+        obj=user,
+        actor="system",
+        details={"full_name": ["Old", "New"]},
+        # organisation_id deliberately omitted — global event
+    )
+    await session.flush()
+    result = await session.execute(
+        select(AuditOutbox).order_by(AuditOutbox.id.desc()).limit(1)
+    )
+    row = result.scalars().one()
+    assert "organisation_id" not in row.payload
+
+    await notify_feed_consumer(session, row)  # must not raise IntegrityError
+    await session.flush()
+
+    result = await session.execute(select(UserNotification))
+    assert result.scalars().all() == []
+
+
 async def test_malformed_assignee_uuid_is_skipped(session, org_a, monkeypatch):
     """A non-uuid assignee value must not 500 the drain; org-wide row still lands."""
     row = await _outbox_row_for_update(
