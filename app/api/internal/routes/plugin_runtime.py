@@ -239,7 +239,7 @@ async def _validate_result_entity(
         await _task_for_runtime(session, principal, int(case_id), int(entity_id))
         return f"{int(case_id)}:{int(entity_id)}"
     raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail="Unsupported plugin result entity_type",
     )
 
@@ -299,7 +299,7 @@ async def add_result(
     fingerprint = body.get("fingerprint")
     if not fingerprint:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="fingerprint is required",
         )
     entity_id = await _validate_result_entity(session, principal, entity_type, entity_id)

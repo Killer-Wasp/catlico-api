@@ -79,7 +79,7 @@ async def update_current_user(
     changing = body.email is not None or body.new_password is not None
     if changing and not body.current_password:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="current_password is required when changing email or password",
         )
     if changing:
@@ -131,7 +131,7 @@ async def upload_avatar(
 ) -> UserPublic:
     if not (file.content_type or "").startswith("image/"):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Profile picture must be an image",
         )
     sha256, size, content_type = await ingest_upload(storage, file)

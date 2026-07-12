@@ -211,7 +211,7 @@ async def update_task(
         allowed = TASK_STATUS_TRANSITIONS.get(task.status, set())
         if task_in.status not in allowed:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     f"Illegal status transition {task.status.value} -> "
                     f"{task_in.status.value}"
@@ -225,7 +225,7 @@ async def update_task(
             session, task_in.assignee_id, task.organisation_id
         ):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Assignee must be a member of the task's organisation",
             )
     task = await task_crud.update_task(session, task, task_in, updated_by=str(ctx.user.id))

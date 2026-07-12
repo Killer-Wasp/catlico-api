@@ -98,7 +98,7 @@ async def import_case_template(
     _require_perm(ctx, "write:case")
     if doc.kind != "catlico.caseTemplate":
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unsupported document kind: {doc.kind}",
         )
     if await ct_crud.get_template_by_name(session, doc.name, ctx.organisation_id):

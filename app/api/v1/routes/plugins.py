@@ -262,7 +262,7 @@ async def create_manual_plugin_run(
 
     if entity_type != "observable":
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Manual plugin runs currently support observable entities",
         )
     # The same visibility resolution the observable read routes use — a bare
@@ -361,7 +361,7 @@ async def get_plugin_stats(
             session, ctx.organisation_id, plugin_id, window
         )
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
 
 
 @router.get("/{plugin_id}/resources/{resource_path:path}")
@@ -538,7 +538,7 @@ async def set_auto_apply_policy(
     invalid = set(requested) - LOW_RISK_ACTIONS
     if invalid:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Not auto-appliable: {sorted(invalid)}",
         )
     org_plugin = await session.get(OrgPlugin, (ctx.organisation_id, plugin_id))

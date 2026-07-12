@@ -102,7 +102,7 @@ async def assert_assignee_in_org(
     member = await member_crud.get_member(session, assignee_id, organisation_id)
     if not member:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Assignee must be a member of the owner organisation",
         )
 

@@ -21,12 +21,12 @@ async def assert_attachment_type(session: AsyncSession, type_name: str) -> None:
     t = await obs_crud.get_type(session, type_name)
     if t is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown observable type: {type_name}",
         )
     if not t.is_attachment:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"'{type_name}' is a string type — use the JSON observables endpoint",
         )
 
