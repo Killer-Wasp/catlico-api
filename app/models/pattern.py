@@ -3,6 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 from app.models.common import TimestampMixin
@@ -18,7 +19,7 @@ class Pattern(TimestampMixin, table=True):
     external_id: str = Field(index=True, unique=True)
     name: str = Field(index=True)
     description: str = Field(default="")
-    tactic: str = Field(default="")
+    tactics: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     url: str = Field(default="")
     parent_external_id: str | None = Field(default=None)
 
@@ -41,7 +42,7 @@ class PatternCreate(SQLModel):
     external_id: str
     name: str
     description: str = ""
-    tactic: str = ""
+    tactics: list[str] = []
     url: str = ""
     parent_external_id: str | None = None
 
@@ -55,7 +56,7 @@ class PatternPublic(SQLModel):
     external_id: str
     name: str
     description: str
-    tactic: str
+    tactics: list[str]
     url: str
     parent_external_id: str | None
     created_at: datetime

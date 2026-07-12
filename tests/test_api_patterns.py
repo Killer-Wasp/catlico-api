@@ -28,8 +28,8 @@ async def test_import_and_list_patterns(
     r = await client.post(
         "/api/v1/patterns/import",
         json=[
-            {"external_id": "T1566", "name": "Phishing", "tactic": "initial-access"},
-            {"external_id": "T1059", "name": "Command Execution", "tactic": "execution"},
+            {"external_id": "T1566", "name": "Phishing", "tactics": ["initial-access"]},
+            {"external_id": "T1059", "name": "Command Execution", "tactics": ["execution"]},
         ],
         headers=admin_h,
     )
@@ -43,6 +43,28 @@ async def test_import_and_list_patterns(
     body = listed.json()
     assert body["total"] == 2
     assert {p["external_id"] for p in body["items"]} == {"T1566", "T1059"}
+
+    by_id = {p["external_id"]: p for p in body["items"]}
+    assert by_id["T1566"]["tactics"] == ["initial-access"]
+
+
+async def test_pattern_supports_multiple_tactics(
+    client: AsyncClient, org_a, admin_token
+):
+    h = _headers(admin_token, org_a.id)
+    r = await client.post(
+        "/api/v1/patterns/import",
+        json=[{
+            "external_id": "T1078",
+            "name": "Valid Accounts",
+            "tactics": ["defense-evasion", "persistence", "privilege-escalation", "initial-access"],
+        }],
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["tactics"] == [
+        "defense-evasion", "persistence", "privilege-escalation", "initial-access",
+    ]
 
 
 async def test_import_upserts_by_external_id(

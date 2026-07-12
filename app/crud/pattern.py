@@ -44,7 +44,7 @@ async def import_patterns(
         if existing:
             existing.name = item.name
             existing.description = item.description
-            existing.tactic = item.tactic
+            existing.tactics = item.tactics
             existing.url = item.url
             existing.parent_external_id = item.parent_external_id
             existing.updated_by = created_by
@@ -55,7 +55,7 @@ async def import_patterns(
                 external_id=item.external_id,
                 name=item.name,
                 description=item.description,
-                tactic=item.tactic,
+                tactics=item.tactics,
                 url=item.url,
                 parent_external_id=item.parent_external_id,
                 created_by=created_by,
@@ -100,7 +100,7 @@ async def replace_procedures(
                 external_id=proc_item.external_id,
                 name=proc_item.name or proc_item.external_id,
                 description=proc_item.description,
-                tactic=proc_item.tactic,
+                tactics=proc_item.tactics,
                 url=proc_item.url,
                 parent_external_id=proc_item.parent_external_id,
                 created_by=created_by,
