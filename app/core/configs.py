@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     # Config circuit breaker: consecutive `config`-kind failures that auto-suspend
     # an org's plugin. A passing config test (or any successful run) resets it.
     PLUGIN_CONFIG_FAILURE_THRESHOLD: int = 3
+    # Max total attempts for a run that keeps failing with a `transient` error
+    # before we give up. Semantic: a run may be ATTEMPTED at most this many times.
+    # Auto-retry fires while `run.attempt < PLUGIN_TRANSIENT_MAX_ATTEMPTS`, so with
+    # the default 3 attempts 1 and 2 re-queue and a transient failure on attempt 3
+    # stays terminal. Only `transient` failures retry; other outcomes never do.
+    PLUGIN_TRANSIENT_MAX_ATTEMPTS: int = 3
     # Event push to runners (delivery retry policy).
     PLUGIN_PUSH_INTERVAL_SECONDS: int = 5
     PLUGIN_PUSH_BACKOFF_BASE_SECONDS: int = 30

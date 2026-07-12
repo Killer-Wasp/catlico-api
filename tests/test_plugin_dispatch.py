@@ -343,3 +343,156 @@ async def test_push_expires_past_max_age(session, org_a):
     assert result["expired"] == 1
     delivery = (await session.execute(select(PluginEventDelivery))).scalar_one()
     assert delivery.status == "expired"
+
+
+# --- Auto-retry of transient failures in submit_result (Task 12) ---
+import uuid
+
+from app.api.deps import PluginRunnerPrincipal
+from app.api.internal.routes.plugin_runner import submit_result
+from app.core.configs import settings
+from app.models.plugin_runner import OrgPlugin
+
+
+async def _seed_run_for_result(session, org_id, *, attempt=1):
+    """Seed a runner + enabled plugin + a running PluginRun ready to submit_result."""
+    runner = await _seed_runner(session, runner_id=f"r-{uuid.uuid4().hex[:8]}")
+    pdef = PluginDefinition(id=f"p-{uuid.uuid4().hex[:8]}", display_name="P")
+    session.add(pdef)
+    await session.flush()
+    version_id = f"{pdef.id}@1.0.0"
+    session.add(
+        PluginVersion(id=version_id, plugin_id=pdef.id, version="1.0.0", status="active")
+    )
+    session.add(OrgPlugin(organisation_id=org_id, plugin_id=pdef.id, enabled=True))
+    run = PluginRun(
+        event_id=f"evt-{uuid.uuid4().hex[:8]}",
+        event_type="observable.created",
+        organisation_id=org_id,
+        plugin_id=pdef.id,
+        plugin_version_id=version_id,
+        runner_id=runner.id,
+        status="running",
+        attempt=attempt,
+        runtime_token_hash="live-token-hash",
+        runtime_token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        started_at=datetime.now(UTC),
+    )
+    session.add(run)
+    await session.flush()
+    return runner, pdef, run
+
+
+async def test_submit_result_transient_failure_requeues(session, org_a):
+    runner, pdef, run = await _seed_run_for_result(session, org_a.id, attempt=1)
+    principal = PluginRunnerPrincipal(runner_id=runner.id)
+
+    resp = await submit_result(
+        run.id,
+        {"status": "failure", "error_kind": "transient", "log_tail": "boom"},
+        principal,
+        session,
+    )
+    await session.flush()
+    await session.refresh(run)
+
+    # Re-queued (reusing the same row), attempt bumped, terminal fields cleared.
+    assert resp["status"] == "queued"
+    assert run.status == "queued"
+    assert run.attempt == 2
+    assert run.error is None
+    assert run.error_kind is None
+    assert run.started_at is None
+    assert run.ended_at is None
+    # Old runtime token invalidated on the re-queue path.
+    assert run.runtime_token_hash is None
+    assert run.runtime_token_expires_at is None
+    # Diagnostics from the failed attempt are preserved.
+    assert run.log_tail == "boom"
+    # redeliver_run made the delivery re-pending.
+    delivery = (
+        await session.execute(
+            select(PluginEventDelivery).where(
+                PluginEventDelivery.event_id == run.event_id,
+                PluginEventDelivery.runner_id == runner.id,
+            )
+        )
+    ).scalar_one()
+    assert delivery.status == "pending"
+    # Circuit breaker NOT recorded: no config-failure streak movement.
+    op = await session.get(OrgPlugin, (org_a.id, pdef.id))
+    assert op.config_failure_streak == 0
+    # Exactly one run row for (event_id, plugin_id) — no second insert.
+    runs = (
+        await session.execute(
+            select(PluginRun).where(
+                PluginRun.event_id == run.event_id, PluginRun.plugin_id == pdef.id
+            )
+        )
+    ).scalars().all()
+    assert len(runs) == 1
+
+
+async def test_submit_result_transient_gives_up_at_cap(session, org_a):
+    cap = settings.PLUGIN_TRANSIENT_MAX_ATTEMPTS
+    runner, pdef, run = await _seed_run_for_result(session, org_a.id, attempt=cap)
+    principal = PluginRunnerPrincipal(runner_id=runner.id)
+
+    resp = await submit_result(
+        run.id,
+        {"status": "failure", "error_kind": "transient", "log_tail": "boom"},
+        principal,
+        session,
+    )
+    await session.flush()
+    await session.refresh(run)
+
+    # At the cap a transient failure terminalizes rather than re-queueing.
+    assert resp["status"] == "failure"
+    assert run.status == "failure"
+    assert run.attempt == cap
+    assert run.error_kind == "transient"
+    assert run.ended_at is not None
+    # Terminal path leaves the token resolvable (Task 11), does not null it.
+    assert run.runtime_token_hash == "live-token-hash"
+
+
+async def test_submit_result_config_failure_terminalizes_and_records_breaker(session, org_a):
+    runner, pdef, run = await _seed_run_for_result(session, org_a.id, attempt=1)
+    principal = PluginRunnerPrincipal(runner_id=runner.id)
+
+    resp = await submit_result(
+        run.id,
+        {"status": "failure", "error_kind": "config"},
+        principal,
+        session,
+    )
+    await session.flush()
+    await session.refresh(run)
+
+    # Non-transient failure never retries: terminal immediately.
+    assert resp["status"] == "failure"
+    assert run.status == "failure"
+    assert run.attempt == 1
+    # Circuit breaker recorded the config failure.
+    op = await session.get(OrgPlugin, (org_a.id, pdef.id))
+    assert op.config_failure_streak == 1
+
+
+async def test_submit_result_success_terminalizes(session, org_a):
+    runner, pdef, run = await _seed_run_for_result(session, org_a.id, attempt=1)
+    principal = PluginRunnerPrincipal(runner_id=runner.id)
+
+    resp = await submit_result(
+        run.id,
+        {"status": "success", "result_summary": {"verdict": "info"}},
+        principal,
+        session,
+    )
+    await session.flush()
+    await session.refresh(run)
+
+    assert resp["status"] == "success"
+    assert run.status == "success"
+    assert run.attempt == 1
+    assert run.ended_at is not None

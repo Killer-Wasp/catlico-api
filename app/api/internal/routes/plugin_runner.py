@@ -705,12 +705,44 @@ async def submit_result(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     if run.runner_id != principal.runner_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    run.status = body["status"]
+    reported_status = body["status"]
+    reported_error_kind = body.get("error_kind")
     run.result_summary = body.get("result_summary")
     run.operation_count = body.get("operation_count", 0)
+    # Persist diagnostics from this attempt before deciding retry-vs-terminal so a
+    # re-queue does not drop the failed attempt's log_tail/error.
     run.error = body.get("error")
-    run.error_kind = body.get("error_kind")
+    run.error_kind = reported_error_kind
     run.log_tail = body.get("log_tail")
+
+    # Auto-retry a TRANSIENT failure while the run still has attempts left. This is
+    # the re-queue path (NOT the terminal path): the old runtime token must die, so
+    # we NULL it here — unlike the terminal path, which deliberately leaves the token
+    # resolvable so late calls 409. Reuses the same run row (bump attempt), never
+    # inserts a second, preserving the (event_id, plugin_id) invariant.
+    if (
+        reported_status == "failure"
+        and reported_error_kind == "transient"
+        and run.attempt < settings.PLUGIN_TRANSIENT_MAX_ATTEMPTS
+    ):
+        from app.services.plugin_dispatch import redeliver_run
+
+        now = datetime.now(UTC)
+        run.status = "queued"
+        run.attempt += 1
+        run.error = None
+        run.error_kind = None
+        run.started_at = None
+        run.ended_at = None
+        run.runtime_token_hash = None
+        run.runtime_token_expires_at = None
+        await redeliver_run(session, run, now)
+        # A re-queued run is not terminal, and transient is not a config signal, so
+        # do NOT record the circuit breaker here.
+        await session.flush()
+        return {"status": run.status}
+
+    run.status = reported_status
     run.ended_at = datetime.now(UTC)
     if run.status in {"success", "failure", "timeout", "cancelled", "skipped"}:
         # Token is intentionally left resolvable (not nulled): a late runtime call
