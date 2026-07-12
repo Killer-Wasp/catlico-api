@@ -6,11 +6,17 @@ import pytest
 from sqlmodel import select
 
 from app.crud import audit as audit_crud
+from app.crud import notification as notif_crud
 from app.crud.audit import register_consumer, _consumers
 from app.models.audit import AuditOutbox
 from app.models.case_ import Case
 from app.models.notification import UserNotification
+from app.services.notification_catalog import catalog_event_types
 from app.services.outbox_events import notify_feed_consumer
+
+
+def _auth(token, org):
+    return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org.id}
 
 
 async def test_feed_returns_notifications(org_a, analyst_a_token, client, session):
@@ -155,3 +161,140 @@ async def test_notification_not_created_for_other_org(org_a, org_b, session):
     finally:
         _consumers.clear()
         _consumers.extend(saved)
+
+
+# --- A2: notification preferences ---
+
+
+async def test_get_preferences_defaults_all_enabled(org_a, analyst_a_token, client):
+    resp = await client.get(
+        "/api/v1/notifications/preferences", headers=_auth(analyst_a_token, org_a)
+    )
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert {i["event_type"] for i in items} == catalog_event_types()
+    assert all(i["enabled"] is True for i in items)
+
+
+async def test_put_preferences_persists(org_a, analyst_a_token, client):
+    resp = await client.put(
+        "/api/v1/notifications/preferences",
+        json={"preferences": {"task.updated": False}},
+        headers=_auth(analyst_a_token, org_a),
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        "/api/v1/notifications/preferences", headers=_auth(analyst_a_token, org_a)
+    )
+    items = {i["event_type"]: i["enabled"] for i in resp.json()["items"]}
+    assert items["task.updated"] is False
+    assert items["case.created"] is True
+
+
+async def test_disabled_event_type_hidden_from_feed(org_a, analyst_a_token, client, session):
+    await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="task.updated", title="Task updated",
+    )
+    await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="case.created", title="Case created",
+    )
+    await session.commit()
+
+    resp = await client.put(
+        "/api/v1/notifications/preferences",
+        json={"preferences": {"task.updated": False}},
+        headers=_auth(analyst_a_token, org_a),
+    )
+    assert resp.status_code == 200
+
+    resp = await client.get(
+        "/api/v1/notifications/", headers=_auth(analyst_a_token, org_a)
+    )
+    data = resp.json()
+    event_types = {i["event_type"] for i in data["items"]}
+    assert "task.updated" not in event_types
+    assert "case.created" in event_types
+    assert data["total"] == 1
+
+
+async def test_read_all_skips_muted_notification(org_a, analyst_a_token, client, session):
+    muted = await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="task.updated", title="Task updated",
+    )
+    await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="case.created", title="Case created",
+    )
+    await session.commit()
+
+    await client.put(
+        "/api/v1/notifications/preferences",
+        json={"preferences": {"task.updated": False}},
+        headers=_auth(analyst_a_token, org_a),
+    )
+
+    resp = await client.post(
+        "/api/v1/notifications/read-all", headers=_auth(analyst_a_token, org_a)
+    )
+    assert resp.status_code == 200
+    assert resp.json()["marked_read"] == 1
+
+    await session.refresh(muted)
+    assert muted.read_at is None
+
+
+async def test_mute_is_per_user(org_a, analyst_a_token, readonly_a_token, client, session):
+    await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="task.updated", title="Task updated",
+    )
+    await session.commit()
+
+    await client.put(
+        "/api/v1/notifications/preferences",
+        json={"preferences": {"task.updated": False}},
+        headers=_auth(analyst_a_token, org_a),
+    )
+
+    resp = await client.get(
+        "/api/v1/notifications/", headers=_auth(readonly_a_token, org_a)
+    )
+    event_types = {i["event_type"] for i in resp.json()["items"]}
+    assert "task.updated" in event_types
+
+
+async def test_put_preferences_unknown_event_type_422(org_a, analyst_a_token, client):
+    resp = await client.put(
+        "/api/v1/notifications/preferences",
+        json={"preferences": {"not.a.real.event": False}},
+        headers=_auth(analyst_a_token, org_a),
+    )
+    assert resp.status_code == 422
+
+
+async def test_reenabling_event_makes_it_visible(org_a, analyst_a_token, client, session):
+    await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="task.updated", title="Task updated",
+    )
+    await session.commit()
+
+    await client.put(
+        "/api/v1/notifications/preferences",
+        json={"preferences": {"task.updated": False}},
+        headers=_auth(analyst_a_token, org_a),
+    )
+    resp = await client.get("/api/v1/notifications/", headers=_auth(analyst_a_token, org_a))
+    assert resp.json()["total"] == 0
+
+    await client.put(
+        "/api/v1/notifications/preferences",
+        json={"preferences": {"task.updated": True}},
+        headers=_auth(analyst_a_token, org_a),
+    )
+    resp = await client.get("/api/v1/notifications/", headers=_auth(analyst_a_token, org_a))
+    assert resp.json()["total"] == 1

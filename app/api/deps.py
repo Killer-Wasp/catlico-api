@@ -129,7 +129,7 @@ def assert_permissions_grantable(requested: set[str], granter_groups: set[str]) 
     unknown = requested - set(ALL_GROUPS)
     if unknown:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown permissions: {sorted(unknown)}",
         )
     excess = requested - granter_groups

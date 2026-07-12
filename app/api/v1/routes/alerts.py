@@ -211,13 +211,13 @@ async def update_alert(
     if alert_in.status is not None and alert_in.status != alert.status:
         if alert_in.status == AlertStatus.imported:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Set status to Imported by promoting the alert, not directly",
             )
         allowed = ALERT_STATUS_TRANSITIONS.get(alert.status, set())
         if alert_in.status not in allowed:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     f"Illegal status transition {alert.status.value} -> "
                     f"{alert_in.status.value}"
@@ -229,7 +229,7 @@ async def update_alert(
             session, alert_in.assignee_id, alert.organisation_id
         ):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Assignee must be a member of the alert's organisation",
             )
 
@@ -281,7 +281,7 @@ async def promote_alert(
         session, assignee_id, alert.organisation_id
     ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Assignee must be a member of the owner organisation",
         )
 
@@ -303,7 +303,7 @@ async def promote_alert(
         )
         if template is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Case template not found in this organisation",
             )
 
@@ -425,7 +425,7 @@ async def merge_alerts(
     alert_ids = sorted(set(req.alert_ids))
     if not alert_ids:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="At least one alert is required",
         )
     alerts = [await _resolve_owned_alert(session, ctx, aid) for aid in alert_ids]
@@ -482,7 +482,7 @@ async def merge_alerts(
             session, req.assignee_id, ctx.organisation_id
         ):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Assignee must be a member of the owner organisation",
             )
         owner_role = await role_crud.get_role_by_name(
@@ -500,7 +500,7 @@ async def merge_alerts(
             )
             if template is None:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="Case template not found in this organisation",
                 )
         base_title = req.title or alerts[0].title
@@ -624,7 +624,7 @@ async def create_alert_observable(
     alert = await _resolve_owned_alert(session, ctx, alert_id)
     err = await obs_crud.check_creatable_type(session, obs_in.observable_type)
     if err:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=err)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=err)
     observable = await obs_crud.create_alert_observable(
         session,
         obs_in,
@@ -877,5 +877,5 @@ async def set_alert_custom_fields(
         )
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc

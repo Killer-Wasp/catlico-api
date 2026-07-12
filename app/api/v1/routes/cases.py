@@ -188,7 +188,7 @@ async def create_case(
         )
         if template is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Case template not found in this organisation",
             )
         # Explicit request fields win; the template fills the rest.
@@ -409,7 +409,7 @@ async def create_case_observable(
 ) -> ObservablePublic:
     err = await obs_crud.check_creatable_type(session, obs_in.observable_type)
     if err:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=err)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=err)
     conflict = HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail="Observable with this type and value already exists on the case",
@@ -703,7 +703,7 @@ async def set_case_custom_fields(
         )
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     await audit_crud.record_audit(
         session,

@@ -2,11 +2,13 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crypto import encrypt_secrets
 from app.crud.pagination import paginate
+from app.models.common import utcnow
 from app.models.notification import (
     Notifier,
     NotifierCreate,
@@ -15,6 +17,7 @@ from app.models.notification import (
     NotificationRuleCreate,
     NotificationRuleUpdate,
     UserNotification,
+    UserNotificationPreference,
     UserNotificationUpdate,
 )
 
@@ -205,6 +208,9 @@ async def list_user_notifications(
     )
     if unread_only:
         base = base.where(UserNotification.read_at.is_(None))
+    disabled = await disabled_event_types(session, organisation_id, user_id)
+    if disabled:
+        base = base.where(UserNotification.event_type.notin_(disabled))
     return await paginate(
         session, base, UserNotification.created_at.desc(), skip=skip, limit=limit
     )
@@ -250,9 +256,82 @@ async def mark_all_read(
         )
     )
     rows = result.scalars().all()
+    disabled = await disabled_event_types(session, organisation_id, user_id)
     now = datetime.now(UTC)
+    marked = 0
     for r in rows:
+        if r.event_type in disabled:
+            continue
         r.read_at = now
         session.add(r)
+        marked += 1
     await session.flush()
-    return len(rows)
+    return marked
+
+
+# --- UserNotificationPreference (A2) ---
+
+
+async def get_user_preferences(
+    session: AsyncSession, organisation_id: str, user_id: uuid.UUID
+) -> dict[str, bool]:
+    """Stored preference rows only: `{event_type: enabled}`."""
+    result = await session.execute(
+        select(UserNotificationPreference).where(
+            UserNotificationPreference.organisation_id == organisation_id,
+            UserNotificationPreference.user_id == user_id,
+        )
+    )
+    return {p.event_type: p.enabled for p in result.scalars().all()}
+
+
+async def disabled_event_types(
+    session: AsyncSession, organisation_id: str, user_id: uuid.UUID
+) -> set[str]:
+    """Event types the user has explicitly disabled (`enabled is False`)."""
+    result = await session.execute(
+        select(UserNotificationPreference.event_type).where(
+            UserNotificationPreference.organisation_id == organisation_id,
+            UserNotificationPreference.user_id == user_id,
+            UserNotificationPreference.enabled.is_(False),
+        )
+    )
+    return set(result.scalars().all())
+
+
+async def set_user_preferences(
+    session: AsyncSession,
+    organisation_id: str,
+    user_id: uuid.UUID,
+    prefs: dict[str, bool],
+    actor: str,
+) -> None:
+    """Upsert each `(user, org, event_type)` preference row in one atomic
+    statement. Concurrent PUTs can't race into a `uq_user_notif_pref` violation
+    because the conflict is resolved by the DB via `ON CONFLICT DO UPDATE`."""
+    if not prefs:
+        return
+    now = utcnow()
+    rows = [
+        {
+            "id": uuid.uuid4(),
+            "user_id": user_id,
+            "organisation_id": organisation_id,
+            "event_type": event_type,
+            "enabled": enabled,
+            "created_at": now,
+            "created_by": actor,
+        }
+        for event_type, enabled in prefs.items()
+    ]
+    stmt = pg_insert(UserNotificationPreference).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["user_id", "organisation_id", "event_type"],
+        set_={
+            "enabled": stmt.excluded.enabled,
+            "updated_by": actor,
+            "updated_at": now,
+        },
+    )
+    await session.execute(stmt)
+    await session.flush()

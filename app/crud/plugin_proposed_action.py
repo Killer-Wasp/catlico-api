@@ -122,7 +122,7 @@ async def create(
     """
     if action_type not in ACTION_TYPES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown proposed action_type: {action_type}",
         )
     if fingerprint is not None:
@@ -276,7 +276,7 @@ async def apply(
     if action_type not in _APPLICABLE:
         if action_type == "execute_responder_action":
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     "execute_responder_action cannot be approved: there is no "
                     "post-approval path from a proposed action to a responder "
@@ -285,7 +285,7 @@ async def apply(
                 ),
             )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Action type {action_type!r} cannot be applied yet",
         )
     payload = action.payload or {}
@@ -349,7 +349,7 @@ async def apply(
 
         if action.entity_type != "case":
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     "add_related_observable only supports entity_type 'case', "
                     f"got {action.entity_type!r}"
@@ -369,7 +369,7 @@ async def apply(
         type_error = await obs_crud.check_creatable_type(session, obs_in.observable_type)
         if type_error:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=type_error
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=type_error
             )
         # Idempotent "create/link": if this exact observable is already on the
         # case (matches the same within-case dedup key the manual create route

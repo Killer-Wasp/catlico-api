@@ -222,7 +222,7 @@ async def report_install_status(
         )
     if body.state not in _INSTALL_PIPELINE_STATES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown install state: {body.state}",
         )
 

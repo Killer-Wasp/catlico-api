@@ -77,7 +77,7 @@ async def create_custom_field(
         )
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     return CustomFieldPublic.model_validate(field, from_attributes=True)
 
@@ -97,7 +97,7 @@ async def update_custom_field(
         )
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     return CustomFieldPublic.model_validate(field, from_attributes=True)
 
