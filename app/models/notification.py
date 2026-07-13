@@ -151,8 +151,29 @@ class UserNotification(SQLModel, table=True):
     title: str
     body: str = ""
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
-    read_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class UserNotificationRead(SQLModel, table=True):
+    """Per-user read receipt: a row exists iff `user_id` has read
+    `notification_id`. Gives org-wide (user_id=None) notifications per-user
+    read state instead of one shared read_at."""
+
+    __tablename__ = "user_notification_read"
+    __table_args__ = (
+        UniqueConstraint(
+            "notification_id", "user_id", name="uq_user_notification_read"
+        ),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    notification_id: uuid.UUID = Field(
+        foreign_key="user_notification.id", index=True, ondelete="CASCADE"
+    )
+    user_id: uuid.UUID = Field(
+        foreign_key="user.id", index=True, ondelete="CASCADE"
+    )
+    read_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class UserNotificationPublic(SQLModel):
