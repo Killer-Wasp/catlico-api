@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import init_db
@@ -33,6 +33,10 @@ _ORG_ID = "catlico-demo"
 # ── sla_policy ───────────────────────────────────────────────────────────────
 
 async def test_sla_policy_insert(session, org):
+    # The demo seed gives the org an SLA policy per severity; clear them so this
+    # test owns the (org, severity) space it asserts on.
+    await session.execute(delete(SlaPolicy).where(SlaPolicy.organisation_id == org))
+    await session.commit()
     sla = SlaPolicy(
         organisation_id=org,
         severity=2,
@@ -57,6 +61,10 @@ async def test_sla_policy_insert(session, org):
 
 
 async def test_sla_policy_unique_org_severity(session, org):
+    # The demo seed already occupies severities 1-4 for this org; clear them so
+    # the duplicate we insert below is the one that trips the constraint.
+    await session.execute(delete(SlaPolicy).where(SlaPolicy.organisation_id == org))
+    await session.commit()
     a = SlaPolicy(organisation_id=org, severity=1, ack_seconds=60, resolve_seconds=120, created_by="system")
     b = SlaPolicy(organisation_id=org, severity=1, ack_seconds=30, resolve_seconds=60, created_by="system")
     session.add(a)

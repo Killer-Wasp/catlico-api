@@ -1,0 +1,28 @@
+{
+  "tasks": [
+    {
+      "case": "dev-1",
+      "title": "Review sign-in and device details",
+      "group": "Identify",
+      "description": "Check the sign-in logs and device fingerprint for the flagged account.",
+      "assignee": "analyst@example.com",
+      "order": 1,
+      "status": "in_progress",
+      "due": "+2h",
+      "logs": [
+        {
+          "message": "Pulled sign-in logs — **new device**, no MFA prompt. Continuing review.",
+          "occurred": "-30m"
+        }
+      ]
+    },
+    {
+      "case": "dev-1",
+      "title": "Confirm containment",
+      "group": "Contain",
+      "description": "Reset credentials and revoke sessions if the sign-in is confirmed malicious.",
+      "order": 2,
+      "due": "+1d"
+    }
+  ]
+}

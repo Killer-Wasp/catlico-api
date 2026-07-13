@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     FRONTEND_HOST: str = "http://localhost:5173"
     ENVIRONMENT: Literal["local", "staging", "production"] = "local"
 
+    # Which JSON seed profile to apply on local startup (a directory under
+    # app/core/seed_data/). "demo" is the rich showcase; "dev" is minimal;
+    # "none" disables seeding. Only consulted when ENVIRONMENT == "local".
+    SEED_PROFILE: str = "demo"
+
     BACKEND_CORS_ORIGINS: Annotated[
         list[AnyUrl] | str, BeforeValidator(parse_cors)
     ] = []

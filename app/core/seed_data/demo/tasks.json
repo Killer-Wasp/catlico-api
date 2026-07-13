@@ -1,0 +1,311 @@
+{
+  "tasks": [
+    {
+      "case": "oauth",
+      "title": "Triage consent grant alert and confirm scope",
+      "group": "Identify",
+      "description": "Confirm which accounts, scopes, and application ids are involved.",
+      "assignee": "analyst@example.com",
+      "order": 1,
+      "status": "completed",
+      "start": "-2h54m",
+      "due": "-2h",
+      "logs": [
+        {
+          "message": "Scoped the consent grant from the Defender alert. **Three** privileged accounts consented to the unverified app within an 11-minute window:\n\n| Account | Scopes | Consent time |\n| --- | --- | --- |\n| `priya.nadar@example.com` | `Mail.ReadWrite`, `offline_access` | 09:02 |\n| `daniel.okoro@example.com` | `Mail.ReadWrite`, `offline_access` | 09:07 |\n| `svc-billing@example.com` | `Mail.ReadWrite`, `offline_access` | 09:13 |\n\nApp client id `9f4c2a17-…` — *unverified publisher*.",
+          "occurred": "-2h50m"
+        },
+        {
+          "message": "Scope **confirmed** and documented on the case. Handing off to containment for token revocation.\n\n- [x] Accounts identified\n- [x] Scopes captured\n- [x] App client id recorded",
+          "occurred": "-2h6m"
+        }
+      ]
+    },
+    {
+      "case": "oauth",
+      "title": "Revoke refresh tokens and reset credentials",
+      "group": "Contain",
+      "description": "Revoke active sessions for the affected accounts and force password resets.",
+      "assignee": "analyst@example.com",
+      "order": 2,
+      "status": "completed",
+      "start": "-2h32m",
+      "due": "-1h",
+      "logs": [
+        {
+          "message": "Revoked all active refresh tokens and forced a credential reset for the three accounts via `Revoke-AzureADUserAllRefreshToken`. Sessions killed across web and mobile.",
+          "occurred": "-2h20m"
+        },
+        {
+          "message": "Verified **no active sessions** remain and users re-authenticated cleanly. Task complete — *phishing-resistant MFA re-enrolment* tracked separately under the Recover task.",
+          "occurred": "-1h8m"
+        }
+      ]
+    },
+    {
+      "case": "oauth",
+      "title": "Disable malicious app registration tenant-wide",
+      "group": "Contain",
+      "description": "Block the app registration across the tenant and add it to policy.",
+      "assignee": "analyst@example.com",
+      "order": 3,
+      "status": "in_progress",
+      "start": "-2h15m",
+      "due": "+1h"
+    },
+    {
+      "case": "oauth",
+      "title": "Hunt for the same app id across connected tenants",
+      "group": "Hunt",
+      "description": "Search for matching OAuth consent grants across every connected tenant.",
+      "order": 4,
+      "due": "+21h"
+    },
+    {
+      "case": "oauth",
+      "title": "Remove mailbox rules and check forwarding",
+      "group": "Eradicate",
+      "description": "**Objective:** find and remove attacker-created inbox rules and forwarding on the\nthree affected mailboxes, then confirm none remain.\n\n### Steps\n\n1. Export inbox rules with `Get-InboxRule` for each mailbox.\n2. Check forwarding (`ForwardingSMTPAddress`, `ForwardingAddress`).\n3. Remove malicious rules and capture each as evidence.\n\n### Acceptance criteria\n\n- [ ] All three mailboxes audited\n- [ ] Malicious rules removed and screenshotted\n- [ ] Forwarding confirmed disabled\n\nSee the [BEC investigation guide](/knowledge-base) for the full rule-abuse checklist.\n",
+      "assignee": "analyst@example.com",
+      "order": 5,
+      "status": "in_progress",
+      "due": "+2h",
+      "logs": [
+        {
+          "message": "Pulled inbox rules for all three mailboxes. Found a malicious rule on\n`svc-billing`:\n\n| Rule | Action |\n| --- | --- |\n| `.` (single-dot match) | Move to **RSS Feeds**, mark as read |\n\nRule **deleted** and exported as evidence. Forwarding was clean on the two user\nmailboxes.\n",
+          "occurred": "-1h35m"
+        },
+        {
+          "message": "Re-ran `Get-InboxRule` after the deletion — *no* residual rules remain. Mailbox\nside is done; the shared-account forwarding audit is still **pending**.\n",
+          "occurred": "-32m"
+        }
+      ]
+    },
+    {
+      "case": "oauth",
+      "title": "User comms + phishing-resistant MFA enrolment",
+      "group": "Recover",
+      "description": "**Objective:** notify affected users and re-enrol them onto phishing-resistant MFA.\n\n- Send the templated compromise notice to each user **and** their manager.\n- Walk users through FIDO2 / passkey enrolment.\n- Revoke legacy MFA methods (*SMS*, *voice*) once passkeys are active.\n\n> Do not re-trust the old phone numbers — the lure harvested them.\n",
+      "order": 6,
+      "due": "+2d"
+    },
+    {
+      "case": "oauth",
+      "title": "Publish executive situation summary",
+      "group": "Comms",
+      "description": "**Objective:** publish a one-page situation summary for leadership.\n\n| Section | Content |\n| --- | --- |\n| What happened | OAuth consent grant to an unverified app |\n| Impact | 3 privileged mailboxes, 1 service account |\n| Status | Contained — tokens revoked |\n| Next update | +4h |\n\nKeep it *non-technical* and link the full timeline in the case.\n",
+      "assignee": "analyst@example.com",
+      "order": 7,
+      "due": "+5h"
+    },
+    {
+      "case": "oauth",
+      "title": "Collect SaaS audit logs for legal hold",
+      "group": "Evidence",
+      "description": "**Objective:** collect SaaS audit logs for the access window and place them under\nlegal hold.\n\n- Pull the Unified Audit Log for the app `client_id` (`9f4c2a17-…`).\n- Export Graph sign-in + consent logs.\n- Hash each export and attach it to the case as evidence.\n",
+      "assignee": "analyst@example.com",
+      "order": 8,
+      "due": "+3d"
+    },
+    {
+      "case": "oauth",
+      "title": "Archive mailbox investigation artefacts",
+      "group": "Closeout",
+      "description": "**Objective:** archive all mailbox investigation artefacts before closing the case.\n\n- [ ] Inbox-rule exports\n- [ ] Audit-log CSVs\n- [ ] Screenshots of the app registration\n- [ ] Final analyst notes\n",
+      "assignee": "analyst@example.com",
+      "order": 9,
+      "due": "+4d"
+    },
+    {
+      "case": "oauth",
+      "title": "Check privileged inbox delegates",
+      "group": "Review",
+      "description": "**Objective:** verify no unauthorised delegates remain on privileged inboxes.\n\nRun `Get-MailboxPermission` and `Get-RecipientPermission` for each VIP mailbox and\nconfirm the delegate list matches the *approved baseline*.\n",
+      "assignee": "analyst@example.com",
+      "order": 10,
+      "due": "+4d4h"
+    },
+    {
+      "case": "ransomware",
+      "title": "Isolate affected hosts from network",
+      "group": "Contain",
+      "description": "Network-contain SRV-APP01 and all workstations with C2 callbacks.",
+      "assignee": "analyst@example.com",
+      "order": 1,
+      "status": "completed",
+      "start": "-3h",
+      "due": "-2h",
+      "logs": [
+        {
+          "message": "Network-contained the hosts showing C2 callbacks. Actions taken:\n\n| Host | Action | Result |\n| --- | --- | --- |\n| `SRV-APP01` | EDR network-contain | Isolated |\n| `WKS-2210` | EDR network-contain | Isolated |\n| Finance VLAN | ACL deny to `45.155.205.233` | Blocked |",
+          "occurred": "-2h50m"
+        },
+        {
+          "message": "Containment **verified** — no further beaconing observed for 10+ minutes. Hosts left powered on for memory capture (see the forensics task).",
+          "occurred": "-2h5m"
+        }
+      ]
+    },
+    {
+      "case": "ransomware",
+      "title": "Acquire forensic images and memory dumps",
+      "group": "Identify",
+      "description": "Capture full disk images and RAM from SRV-APP01 and affected endpoints.",
+      "assignee": "analyst@example.com",
+      "order": 2,
+      "status": "in_progress",
+      "start": "-3h",
+      "due": "+2h"
+    },
+    {
+      "case": "ransomware",
+      "title": "Block C2 infrastructure at perimeter",
+      "group": "Contain",
+      "description": "Add 45.155.205.233 and associated domains to blocklist on perimeter firewalls.",
+      "assignee": "analyst@example.com",
+      "order": 3,
+      "due": "+1h"
+    },
+    {
+      "case": "ransomware",
+      "title": "Identify ransomware family and variant",
+      "group": "Identify",
+      "description": "**Objective:** identify the ransomware family / variant from the staged binaries.\n\n### Indicators to check\n\n| Artefact | Value |\n| --- | --- |\n| Staged binary | `p64.exe` in `C:\\PerfLogs\\` |\n| File marker | `.0rgn` extension |\n| C2 | `45.155.205.233` |\n\n- Submit hashes to the malware sandbox and **MISP**.\n- Match observed TTPs against known families.\n\n> Priority: confirm whether this is a *known* family with a public decryptor\n> **before** recovery planning.\n",
+      "assignee": "analyst@example.com",
+      "order": 4,
+      "status": "in_progress",
+      "due": "+1h",
+      "logs": [
+        {
+          "message": "Submitted the staged binary to the sandbox and **MISP**.\n\n- **SHA-256:** `9b2c…f41a`\n- Sandbox verdict: *Cobalt Strike loader* (stager, not a locker yet)\n- No public decryptor — treat as **no-decrypt** for recovery planning.\n",
+          "occurred": "-47m"
+        }
+      ]
+    },
+    {
+      "case": "ransomware",
+      "title": "Snapshot affected hypervisor cluster",
+      "group": "Contain",
+      "description": "**Objective:** snapshot the affected hypervisor cluster before any remediation.\n\n1. Quiesce and snapshot each guest on the impacted hosts.\n2. Preserve snapshots *read-only* for forensics.\n3. Do **not** power off — capture RAM first.\n",
+      "assignee": "analyst@example.com",
+      "order": 5,
+      "due": "+3h"
+    },
+    {
+      "case": "ransomware",
+      "title": "Pull EDR timeline for initial access",
+      "group": "Forensics",
+      "description": "**Objective:** reconstruct the initial-access → lateral-movement timeline from EDR.\n\n- Pull the process tree on `SRV-APP01` back to patient zero.\n- Map every `PsExec` execution to its target host.\n- Tag each step to MITRE ATT&CK —\n  [T1570](https://attack.mitre.org/techniques/T1570/) /\n  [T1486](https://attack.mitre.org/techniques/T1486/).\n",
+      "assignee": "analyst@example.com",
+      "order": 6,
+      "status": "in_progress",
+      "due": "+1d",
+      "logs": [
+        {
+          "message": "Initial access traced to a phishing attachment opened on `WKS-2210` at **09:14**,\nfollowed by `PsExec` to `SRV-APP01` at **09:22**. Full process tree attached to\nthe case; ATT&CK mapping in progress.\n",
+          "occurred": "-18m"
+        }
+      ]
+    },
+    {
+      "case": "ransomware",
+      "title": "Confirm backups are clean and restorable",
+      "group": "Recover",
+      "description": "**Objective:** confirm backups are clean, offline and restorable.\n\n- [ ] Latest backup predates the first compromise indicator\n- [ ] Backup store is offline / immutable\n- [ ] Test-restore of a sample set succeeds\n",
+      "assignee": "analyst@example.com",
+      "order": 7,
+      "due": "+1d5h"
+    },
+    {
+      "case": "exfil",
+      "title": "Disable user account and revoke sessions",
+      "group": "Contain",
+      "description": "Disable marcus.johnson@example.com and revoke all active tokens/sessions.",
+      "assignee": "analyst@example.com",
+      "order": 1,
+      "status": "completed",
+      "start": "-7h",
+      "due": "-6h",
+      "logs": [
+        {
+          "message": "Disabled `marcus.johnson@example.com` and revoked all tokens/sessions. Also blocked the unmanaged device from Conditional Access.",
+          "occurred": "-6h50m"
+        },
+        {
+          "message": "Confirmed the account can no longer authenticate and OneDrive access is **revoked**. Preserving mailbox and drive for the audit task; *do not delete* pending legal hold.",
+          "occurred": "-6h5m"
+        }
+      ]
+    },
+    {
+      "case": "exfil",
+      "title": "Audit file access and transfer logs",
+      "group": "Identify",
+      "description": "Review OneDrive audit logs, CASB logs, and endpoint DLP events for the affected user.",
+      "assignee": "analyst@example.com",
+      "order": 2,
+      "status": "in_progress",
+      "start": "-6h",
+      "due": "+4h"
+    },
+    {
+      "case": "exfil",
+      "title": "Request takedown of exfil files from SaaS provider",
+      "group": "Contain",
+      "description": "Contact tempfileshare.io to request removal of exfiltrated data and obtain access logs.",
+      "order": 3,
+      "due": "+6h"
+    },
+    {
+      "case": "exfil",
+      "title": "Prepare regulatory notification draft",
+      "group": "Report",
+      "description": "Draft notification for affected data subjects per regulatory requirements. Coordinate with Legal.",
+      "order": 4,
+      "due": "+2d"
+    },
+    {
+      "case": "exfil",
+      "title": "Prepare customer impact statement",
+      "group": "Comms",
+      "description": "**Objective:** draft a customer-facing impact statement (pending Legal sign-off).\n\n| Field | Detail |\n| --- | --- |\n| Data types | PII, Financial |\n| Volume | ~4.2 GB |\n| Affected users | *TBD — pending DLP classification* |\n\nKeep the language factual; **do not** send until Legal and Comms approve.\n",
+      "assignee": "analyst@example.com",
+      "order": 5,
+      "due": "+2d2h"
+    },
+    {
+      "case": "open-1",
+      "title": "Assess blast radius and pick up ownership",
+      "group": "Identify",
+      "description": "Cobalt Strike beacon on SRV-DB03 — awaiting owner",
+      "assignee": "priya.nguyen@example.com",
+      "order": 1,
+      "status": "in_progress"
+    },
+    {
+      "case": "open-1",
+      "title": "Contain and document initial findings",
+      "group": "Contain",
+      "description": "Cobalt Strike beacon on SRV-DB03 — awaiting owner",
+      "assignee": "priya.nguyen@example.com",
+      "order": 2
+    },
+    {
+      "case": "open-2",
+      "title": "Assess blast radius and pick up ownership",
+      "group": "Identify",
+      "description": "QR-code phishing wave — triage pending",
+      "assignee": "sam.iyer@example.com",
+      "order": 1,
+      "status": "in_progress"
+    },
+    {
+      "case": "open-2",
+      "title": "Contain and document initial findings",
+      "group": "Contain",
+      "description": "QR-code phishing wave — triage pending",
+      "assignee": "sam.iyer@example.com",
+      "order": 2
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "id": "catlico-demo",
+  "name": "Catlico Demo SOC",
+  "description": "Local-only demo organisation seeded for development.",
+  "users": [
+    {
+      "email": "analyst@example.com",
+      "first_name": "Alex",
+      "last_name": "Analyst",
+      "primary": true
+    },
+    {
+      "email": "priya.nguyen@example.com",
+      "first_name": "Priya",
+      "last_name": "Nguyen"
+    },
+    {
+      "email": "sam.iyer@example.com",
+      "first_name": "Sam",
+      "last_name": "Iyer"
+    }
+  ],
+  "custom_field_definitions": [
+    {
+      "name": "business_unit",
+      "display_name": "Business unit",
+      "field_type": "string"
+    },
+    {
+      "name": "campaign_id",
+      "display_name": "Campaign ID",
+      "field_type": "string"
+    },
+    {
+      "name": "affected_users",
+      "display_name": "Affected users",
+      "field_type": "integer"
+    }
+  ]
+}

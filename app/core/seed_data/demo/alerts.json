@@ -1,0 +1,403 @@
+{
+  "alerts": [
+    {
+      "ref": "AL-9123",
+      "source": "CrowdStrike",
+      "type": "edr",
+      "title": "Possible ransomware staging — mass file rename on FILESRV-AU02",
+      "description": "**CrowdStrike** detected **>4,000 file renames** with the appended extension `.0rgn` on **FILESRV-AU02** within *90 seconds*, initiated by `svchost.exe` spawned from an *unsigned binary* in `C:\\PerfLogs\\`. Shadow-copy deletion was attempted but **blocked**.",
+      "severity": 4,
+      "tlp": 3,
+      "date": "-14m",
+      "tags": [
+        "ransomware",
+        "T1486",
+        "finance"
+      ]
+    },
+    {
+      "ref": "AL-9119",
+      "source": "Defender XDR",
+      "type": "identity",
+      "title": "OAuth consent grant to unverified app for 3 privileged users",
+      "description": "**Defender XDR** fired after an *unverified* multi-tenant application was granted `Mail.ReadWrite` and `offline_access` by **three privileged users** within *11 minutes*.",
+      "severity": 4,
+      "tlp": 2,
+      "date": "-42m",
+      "tags": [
+        "identity",
+        "oauth",
+        "privileged-access"
+      ]
+    },
+    {
+      "ref": "AL-9111",
+      "source": "Defender XDR",
+      "type": "identity",
+      "title": "Impossible travel: AU → RO sign-in, MFA fatigue pattern",
+      "description": "Microsoft sign-in telemetry shows a successful **AU** login followed by *repeated MFA prompts* and a **Romania** login attempt from a *new device fingerprint* — a classic **MFA-fatigue** pattern.",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-1h7m",
+      "tags": [
+        "identity",
+        "mfa-fatigue",
+        "impossible-travel"
+      ]
+    },
+    {
+      "ref": "AL-9108",
+      "source": "Splunk ES",
+      "type": "network",
+      "title": "Outbound beaconing to rare domain from OT jump host",
+      "description": "**Splunk ES** detected *periodic* outbound TLS traffic from the **OT jump host** to a *rare domain* with **no prior enterprise reputation** — consistent with C2 beaconing.",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-1h28m",
+      "tags": [
+        "ot",
+        "beaconing",
+        "network"
+      ]
+    },
+    {
+      "ref": "AL-9102",
+      "source": "Proofpoint",
+      "type": "phishing",
+      "title": "Credential-phish campaign targeting retail billing team (38 rcpts)",
+      "description": "**Proofpoint** identified a *credential-harvesting* campaign impersonating the **retail billing portal**, delivered to **38 recipients**.",
+      "severity": 3,
+      "tlp": 1,
+      "date": "-2h1m",
+      "tags": [
+        "phishing",
+        "retail",
+        "credential-theft"
+      ]
+    },
+    {
+      "ref": "AL-9097",
+      "source": "Splunk ES",
+      "type": "endpoint",
+      "title": "New local admin created outside change window — WKS-4471",
+      "description": "A *local administrator* account was created on **WKS-4471** **outside** the approved change window and *without* a matching service-desk ticket.",
+      "severity": 2,
+      "tlp": 1,
+      "date": "-2h43m",
+      "tags": [
+        "endpoint",
+        "local-admin",
+        "change-control"
+      ]
+    },
+    {
+      "ref": "AL-9093",
+      "source": "MISP",
+      "type": "intel",
+      "title": "MISP IOC match: known C2 IP touched perimeter (blocked)",
+      "description": "**MISP** matched a *known* command-and-control IP in **blocked** perimeter traffic. *No successful session* was observed.",
+      "severity": 2,
+      "tlp": 2,
+      "date": "-3h21m",
+      "tags": [
+        "misp",
+        "c2",
+        "blocked"
+      ]
+    },
+    {
+      "ref": "AL-9090",
+      "source": "Splunk ES",
+      "type": "dns",
+      "title": "Unusual volume of DNS TXT queries from CI runner pool",
+      "description": "DNS telemetry shows *elevated* **TXT** query volume from **CI runners**, including repeated lookups for *encoded subdomains* — possible **DNS tunnelling**.",
+      "severity": 2,
+      "date": "-4h",
+      "tags": [
+        "dns",
+        "ci-runner",
+        "exfiltration"
+      ]
+    },
+    {
+      "ref": "AL-9084",
+      "source": "CrowdStrike",
+      "type": "hygiene",
+      "title": "EDR sensor offline > 72h on 6 corporate laptops",
+      "description": "**CrowdStrike** reports **six** corporate laptops have not checked in for *more than 72 hours* and are missing current *sensor-health* data.",
+      "severity": 1,
+      "tlp": 1,
+      "date": "-5h55m",
+      "tags": [
+        "endpoint",
+        "sensor-health"
+      ]
+    },
+    {
+      "ref": "AL-9080",
+      "source": "Splunk ES",
+      "type": "hygiene",
+      "title": "TLS certificate for partner API expires in 9 days",
+      "description": "Certificate monitoring reports the **partner API** TLS certificate expires in *9 days* with **no replacement** certificate observed.",
+      "severity": 1,
+      "date": "-6h42m",
+      "tags": [
+        "certificate",
+        "partner-api",
+        "hygiene"
+      ]
+    },
+    {
+      "ref": "AL-9088",
+      "source": "Netskope",
+      "type": "casb",
+      "title": "Bulk OneDrive download to unapproved file-sharing service",
+      "description": "**Netskope CASB** flagged **~4.2 GB** moved from *OneDrive* to `tempfileshare[.]io` over a *45-minute* window by `marcus.johnson@example.com`. Files carried **PII** and **Financial** sensitivity labels; the transfer occurred from an *unmanaged device*.",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-8h15m",
+      "tags": [
+        "casb",
+        "exfiltration",
+        "data-loss",
+        "T1567.002"
+      ]
+    },
+    {
+      "ref": "AL-9201",
+      "source": "Defender XDR",
+      "type": "identity",
+      "title": "Token replay from residential proxy on finance admin",
+      "description": "**Defender XDR** — Token replay from residential proxy on finance admin.",
+      "severity": 4,
+      "tlp": 2,
+      "date": "-35m",
+      "tags": [
+        "identity",
+        "token-theft",
+        "T1550.001"
+      ]
+    },
+    {
+      "ref": "AL-9202",
+      "source": "CrowdStrike",
+      "type": "edr",
+      "title": "LSASS access by non-standard process on WKS-2210",
+      "description": "**CrowdStrike** — LSASS access by non-standard process on WKS-2210.",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-1h12m",
+      "tags": [
+        "endpoint",
+        "credential-access",
+        "T1003.001"
+      ]
+    },
+    {
+      "ref": "AL-9203",
+      "source": "Proofpoint",
+      "type": "phishing",
+      "title": "QR-code phish wave to logistics distro (52 rcpts)",
+      "description": "**Proofpoint** — QR-code phish wave to logistics distro (52 rcpts).",
+      "severity": 3,
+      "tlp": 1,
+      "date": "-1h48m",
+      "tags": [
+        "phishing",
+        "quishing",
+        "T1566.001"
+      ]
+    },
+    {
+      "ref": "AL-9204",
+      "source": "Splunk ES",
+      "type": "network",
+      "title": "Port-scan sweep from contractor VPN pool",
+      "description": "**Splunk ES** — Port-scan sweep from contractor VPN pool.",
+      "severity": 2,
+      "tlp": 2,
+      "date": "-2h21m",
+      "tags": [
+        "network",
+        "recon",
+        "T1046"
+      ]
+    },
+    {
+      "ref": "AL-9205",
+      "source": "MISP",
+      "type": "intel",
+      "title": "IOC match: phishing kit domain seen in proxy logs",
+      "description": "**MISP** — IOC match: phishing kit domain seen in proxy logs.",
+      "severity": 2,
+      "tlp": 2,
+      "date": "-3h10m",
+      "tags": [
+        "misp",
+        "phishing-kit",
+        "ioc-match"
+      ]
+    },
+    {
+      "ref": "AL-9206",
+      "source": "Netskope",
+      "type": "casb",
+      "title": "Sensitive label file shared to personal Gmail",
+      "description": "**Netskope** — Sensitive label file shared to personal Gmail.",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-3h53m",
+      "tags": [
+        "casb",
+        "data-loss",
+        "insider"
+      ]
+    },
+    {
+      "ref": "AL-9207",
+      "source": "Splunk ES",
+      "type": "endpoint",
+      "title": "Scheduled task created under public user profile",
+      "description": "**Splunk ES** — Scheduled task created under public user profile.",
+      "severity": 2,
+      "tlp": 1,
+      "date": "-5h5m",
+      "tags": [
+        "endpoint",
+        "persistence",
+        "T1053.005"
+      ]
+    },
+    {
+      "ref": "AL-9208",
+      "source": "Defender XDR",
+      "type": "identity",
+      "title": "Impossible travel: US → NG on VP mailbox",
+      "description": "**Defender XDR** — Impossible travel: US → NG on VP mailbox.",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-6h12m",
+      "tags": [
+        "identity",
+        "impossible-travel",
+        "bec"
+      ]
+    },
+    {
+      "ref": "AL-9209",
+      "source": "CrowdStrike",
+      "type": "edr",
+      "title": "Cobalt Strike beacon signature on SRV-DB03",
+      "description": "**CrowdStrike** — Cobalt Strike beacon signature on SRV-DB03.",
+      "severity": 4,
+      "tlp": 3,
+      "date": "-7h35m",
+      "tags": [
+        "c2",
+        "cobalt-strike",
+        "T1071.001"
+      ]
+    },
+    {
+      "ref": "AL-9210",
+      "source": "Proofpoint",
+      "type": "phishing",
+      "title": "Callback-phish voicemail lure to HR",
+      "description": "**Proofpoint** — Callback-phish voicemail lure to HR.",
+      "severity": 2,
+      "tlp": 1,
+      "date": "-9h",
+      "tags": [
+        "phishing",
+        "callback",
+        "social-engineering"
+      ]
+    },
+    {
+      "ref": "AL-9211",
+      "source": "Splunk ES",
+      "type": "dns",
+      "title": "DGA-like NXDOMAIN burst from marketing subnet",
+      "description": "**Splunk ES** — DGA-like NXDOMAIN burst from marketing subnet.",
+      "severity": 2,
+      "date": "-10h36m",
+      "tags": [
+        "dns",
+        "dga",
+        "T1568.002"
+      ]
+    },
+    {
+      "ref": "AL-9212",
+      "source": "MISP",
+      "type": "intel",
+      "title": "New threat-actor TTP bundle ingested (no match)",
+      "description": "**MISP** — New threat-actor TTP bundle ingested (no match).",
+      "severity": 1,
+      "tlp": 1,
+      "date": "-12h22m",
+      "tags": [
+        "misp",
+        "threat-intel"
+      ]
+    },
+    {
+      "ref": "AL-9213",
+      "source": "Netskope",
+      "type": "casb",
+      "title": "Unsanctioned AI tool upload of source code",
+      "description": "**Netskope** — Unsanctioned AI tool upload of source code.",
+      "severity": 2,
+      "tlp": 2,
+      "date": "-14h11m",
+      "tags": [
+        "casb",
+        "shadow-it",
+        "data-loss"
+      ]
+    },
+    {
+      "ref": "AL-9214",
+      "source": "Defender XDR",
+      "type": "endpoint",
+      "title": "Suspicious signed-binary proxy exec (rundll32)",
+      "description": "**Defender XDR** — Suspicious signed-binary proxy exec (rundll32).",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-16h8m",
+      "tags": [
+        "endpoint",
+        "defense-evasion",
+        "T1218.011"
+      ]
+    },
+    {
+      "ref": "AL-9215",
+      "source": "Splunk ES",
+      "type": "network",
+      "title": "Expired internal CA certificate still in rotation",
+      "description": "**Splunk ES** — Expired internal CA certificate still in rotation.",
+      "severity": 1,
+      "date": "-18h25m",
+      "tags": [
+        "hygiene",
+        "certificate"
+      ]
+    },
+    {
+      "ref": "AL-9216",
+      "source": "CrowdStrike",
+      "type": "hygiene",
+      "title": "3 endpoints missing latest sensor policy",
+      "description": "**CrowdStrike** — 3 endpoints missing latest sensor policy.",
+      "severity": 1,
+      "tlp": 1,
+      "date": "-21h30m",
+      "tags": [
+        "endpoint",
+        "sensor-health",
+        "hygiene"
+      ]
+    }
+  ]
+}

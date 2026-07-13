@@ -73,12 +73,22 @@ async def test_init_db_seeds_demo_case_once_in_local(session, monkeypatch):
     await init_db(session)
 
     cases = (await session.execute(select(Case))).scalars().all()
-    assert {case.title for case in cases} == {
+    # The three narrative cases are always present; the profile also seeds
+    # dashboard-history cases (resolved/open), so assert a subset, not equality.
+    narrative = {
         "OAuth consent grant — privileged account compromise",
         "Ransomware precursor activity — lateral movement detected",
         "Data exfiltration via unapproved SaaS application",
     }
-    case = cases[0]
+    titles = [case.title for case in cases]
+    assert narrative <= set(titles)
+    # Idempotent: the second init_db above did not duplicate the narrative cases.
+    assert sum(t in narrative for t in titles) == len(narrative)
+
+    # Inspect a known-rich narrative case (has tasks, observables, comments).
+    case = next(
+        c for c in cases if c.title.startswith("OAuth consent grant")
+    )
 
     tasks = (
         await session.execute(select(Task).where(Task.case_id == case.id))
@@ -103,7 +113,7 @@ async def test_init_db_seeds_demo_case_once_in_local(session, monkeypatch):
         )
     ).scalars().all()
 
-    assert len(cases) == 3
+    assert len(cases) >= 3
     assert len(tasks) >= 1
     assert len(observables) >= 1
     assert len(comments) >= 1

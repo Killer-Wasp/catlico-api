@@ -1,0 +1,16 @@
+{
+  "dashboards": [
+    {
+      "name": "Dev overview",
+      "description": "Minimal dashboard for local development.",
+      "shared": true,
+      "owner": "primary",
+      "widgets": [
+        { "type": "kpi.open_cases", "size": "sm" },
+        { "type": "kpi.new_alerts", "size": "sm" },
+        { "type": "chart.cases_by_status", "size": "md" },
+        { "type": "chart.alerts_by_source", "size": "md" }
+      ]
+    }
+  ]
+}

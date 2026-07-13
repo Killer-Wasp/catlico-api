@@ -1,0 +1,13 @@
+{
+  "id": "catlico-demo",
+  "name": "Catlico Demo SOC",
+  "description": "Local-only demo organisation seeded for development.",
+  "users": [
+    {
+      "email": "analyst@example.com",
+      "first_name": "Alex",
+      "last_name": "Analyst",
+      "primary": true
+    }
+  ]
+}

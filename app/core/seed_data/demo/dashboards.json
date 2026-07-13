@@ -1,0 +1,159 @@
+{
+  "dashboards": [
+    {
+      "name": "SOC operations",
+      "description": "Shared operational overview for the whole team.",
+      "shared": true,
+      "widgets": [
+        {
+          "type": "kpi.open_cases",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.new_alerts",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.sla_breaches",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.mttr",
+          "size": "sm"
+        },
+        {
+          "type": "chart.cases_by_status",
+          "size": "md"
+        },
+        {
+          "type": "chart.cases_by_severity",
+          "size": "md"
+        },
+        {
+          "type": "chart.analyst_workload",
+          "size": "md"
+        },
+        {
+          "type": "chart.alerts_by_source",
+          "size": "md"
+        },
+        {
+          "type": "chart.sla_compliance",
+          "size": "md"
+        },
+        {
+          "type": "chart.cases_opened_14d",
+          "size": "md"
+        }
+      ]
+    },
+    {
+      "name": "Alert triage",
+      "description": "Live alert pipeline, severity mix and fresh IOCs.",
+      "shared": true,
+      "widgets": [
+        {
+          "type": "kpi.new_alerts",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.open_alerts",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.sla_breaches",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.iocs_tracked",
+          "size": "sm"
+        },
+        {
+          "type": "chart.alerts_by_severity",
+          "size": "md"
+        },
+        {
+          "type": "chart.alerts_by_source",
+          "size": "md"
+        },
+        {
+          "type": "chart.ingestion_24h",
+          "size": "lg"
+        },
+        {
+          "type": "list.latest_observables",
+          "size": "md"
+        }
+      ]
+    },
+    {
+      "name": "My caseload",
+      "description": "Private view: case pipeline and resolution quality.",
+      "widgets": [
+        {
+          "type": "kpi.open_cases",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.mttr",
+          "size": "sm"
+        },
+        {
+          "type": "chart.cases_by_status",
+          "size": "md"
+        },
+        {
+          "type": "chart.resolutions",
+          "size": "md"
+        },
+        {
+          "type": "chart.case_trend",
+          "size": "lg"
+        },
+        {
+          "type": "chart.sla_compliance",
+          "size": "md"
+        },
+        {
+          "type": "chart.analyst_workload",
+          "size": "md"
+        }
+      ]
+    },
+    {
+      "name": "SOC lead board",
+      "description": "Personal executive view for the SOC lead.",
+      "owner": "superadmin",
+      "widgets": [
+        {
+          "type": "kpi.open_cases",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.sla_breaches",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.mttr",
+          "size": "sm"
+        },
+        {
+          "type": "kpi.iocs_tracked",
+          "size": "sm"
+        },
+        {
+          "type": "chart.sla_compliance",
+          "size": "md"
+        },
+        {
+          "type": "chart.cases_by_status",
+          "size": "md"
+        },
+        {
+          "type": "chart.case_trend",
+          "size": "lg"
+        }
+      ]
+    }
+  ]
+}

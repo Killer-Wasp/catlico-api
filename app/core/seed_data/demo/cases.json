@@ -1,0 +1,303 @@
+{
+  "cases": [
+    {
+      "ref": "oauth",
+      "title": "OAuth consent grant — privileged account compromise",
+      "description": "## Summary\n\n**Defender XDR** raised [`AL-9119`](/alerts?ref=AL-9119) after an unverified\nmulti-tenant application was granted `Mail.ReadWrite` and `offline_access` by\n**three privileged users** inside an 11-minute window. The consent grants\nfollowed a credential-phish lure referencing a fake billing portal, and one\nservice mailbox shows suspicious inbox-rule creation immediately after consent.\n\n> **Working theory:** attacker-in-the-middle phishing harvested a session, then\n> used repeated consent prompts to establish persistent, MFA-independent mailbox\n> access. Treat as an active identity compromise until scoped.\n\n## Affected accounts\n\n| User | Role | Scopes granted | Mailbox rule? |\n| --- | --- | --- | :---: |\n| `priya.nadar@example.com` | Finance Director | `Mail.ReadWrite`, `offline_access` | ✅ |\n| `daniel.okoro@example.com` | AP Manager | `Mail.ReadWrite`, `offline_access` | — |\n| `svc-billing@example.com` | Service (shared) | `Mail.ReadWrite`, `offline_access` | ✅ |\n\n## Indicators\n\n```text\nApp (client) ID   9f4c2a17-8b3e-4d21-a0c9-6e5f1b7d3a44\nApp display name  \"Billing Insights Connector\" (unverified publisher)\nReply URL         https://billing-insights[.]app/oauth/callback\nConsent source IP 45.129.14.62 (AS9009, RO)\n```\n\n## Containment checklist\n\n- [x] Revoke active refresh tokens for all three accounts\n- [x] Force password reset + re-registration of phishing-resistant MFA\n- [ ] Disable / block the app registration tenant-wide\n- [ ] Remove attacker-created inbox rules and audit forwarding\n- [ ] Hunt for the same `client_id` across all connected tenants\n\n## References\n\n- MITRE ATT&CK — [T1528: Steal Application Access Token](https://attack.mitre.org/techniques/T1528/)\n- MITRE ATT&CK — [T1114.002: Remote Email Collection](https://attack.mitre.org/techniques/T1114/002/)\n- Internal runbook — [BEC investigation guide](/knowledge-base)\n",
+      "severity": 3,
+      "assignee": "analyst@example.com",
+      "summary": "Containment is underway; tokens have been revoked for the affected accounts.",
+      "start": "-3h",
+      "tags": [
+        "T1528",
+        "T1566.002",
+        "identity",
+        "bec"
+      ],
+      "custom_fields": {
+        "business_unit": "Corporate IT",
+        "campaign_id": "BILL-2026-Q2",
+        "affected_users": 3
+      },
+      "observables": [
+        {
+          "observable_type": "domain",
+          "data": "login-paylink.support",
+          "message": "Lookalike billing portal domain",
+          "ioc": true,
+          "sighted": true
+        },
+        {
+          "observable_type": "url",
+          "data": "hxxps://cdn-au-billing[.]net/invoice.php",
+          "message": "URLscan complete",
+          "ioc": true
+        },
+        {
+          "observable_type": "mail",
+          "data": "accounts@billing-paylink.co",
+          "message": "Sender observed in phish lure",
+          "ioc": true,
+          "sighted": true
+        },
+        {
+          "observable_type": "ip",
+          "data": "203.0.113.47",
+          "message": "AbuseIPDB 97%",
+          "ioc": true,
+          "sighted": true
+        }
+      ],
+      "comments": [
+        {
+          "message": "@analyst audit logs show consent grants preceded by the billing lure for 2 of 3 users."
+        },
+        {
+          "message": "Tokens revoked and credentials reset. Escalating severity to High while app block is pending."
+        }
+      ],
+      "link_alert": "AL-9119"
+    },
+    {
+      "ref": "ransomware",
+      "title": "Ransomware precursor activity — lateral movement detected",
+      "description": "## Summary\n\n**CrowdStrike** detected suspicious `PsExec` usage from **SRV-APP01** to multiple\nworkstations in the Finance VLAN, with command-and-control callbacks to\n`45.155.205.233`. Based on the observed TTPs and dwell-time analysis, ransomware\ndeployment appears **imminent**.\n\n> ⚠️ **Escalation:** IR retainer activated. Affected VLANs isolated. Do **not**\n> power off hosts — capture volatile memory before imaging.\n\n## Affected assets\n\n| Host | Role | VLAN / Subnet | State |\n| --- | --- | --- | --- |\n| `SRV-APP01` | Application server (patient zero) | `10.23.1.0/24` | Contained |\n| `WKS-2210` | Finance workstation | `10.23.4.0/24` | Contained |\n| `WKS-2214` | Finance workstation | `10.23.4.0/24` | Monitoring |\n| `FILESRV-AU02` | File server | `10.23.1.0/24` | At risk |\n\n## Indicators of compromise\n\n| Type | Value | Notes |\n| --- | --- | --- |\n| IPv4 (C2) | `45.155.205.233` | Blocklisted at perimeter |\n| Domain | `update-svc[.]cloud` | Resolves to C2 |\n| Tool | `PsExec.exe` | Renamed `p64.exe` in `C:\\PerfLogs\\` |\n| File ext | `.0rgn` | Appended on mass-rename attempts |\n\n## ATT&CK coverage\n\n1. **Initial Access** — T1566 Phishing\n2. **Lateral Movement** — [T1570 Lateral Tool Transfer](https://attack.mitre.org/techniques/T1570/)\n3. **Impact** — [T1486 Data Encrypted for Impact](https://attack.mitre.org/techniques/T1486/)\n\n## Response tasks\n\n- [x] Network-contain SRV-APP01 and callback endpoints\n- [x] Block `45.155.205.233` + associated domains at the firewall\n- [ ] Capture RAM + full-disk images from SRV-APP01\n- [ ] Confirm backups are clean, offline, and restorable\n- [ ] Identify ransomware family from staged binaries\n",
+      "severity": 4,
+      "assignee": "analyst@example.com",
+      "summary": "Isolated affected VLANs. IR retainers activated. Awaiting disk images from SRV-APP01.",
+      "start": "-4h",
+      "tags": [
+        "T1486",
+        "T1021.002",
+        "T1071.001",
+        "ransomware",
+        "cobalt-strike"
+      ],
+      "observables": [
+        {
+          "observable_type": "ip",
+          "data": "45.155.205.233",
+          "message": "Cobalt Strike C2 server — active beaconing",
+          "ioc": true,
+          "sighted": true
+        },
+        {
+          "observable_type": "hash",
+          "data": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
+          "message": "SHA256 of PsExec binary dropped on SRV-APP01",
+          "ioc": true
+        },
+        {
+          "observable_type": "domain",
+          "data": "update-winsec[.]top",
+          "message": "C2 domain resolving to 45.155.205.233",
+          "ioc": true,
+          "sighted": true
+        }
+      ],
+      "comments": [
+        {
+          "message": "Containment initiated — Finance VLAN isolated. IR team engaged."
+        }
+      ],
+      "link_alert": "AL-9123"
+    },
+    {
+      "ref": "exfil",
+      "title": "Data exfiltration via unapproved SaaS application",
+      "description": "## Summary\n\nThe **Netskope CASB** alerted on an unusually large data transfer from OneDrive\nto an unapproved third-party file-sharing service, `tempfileshare[.]io`.\nApproximately **4.2 GB** of files carrying `PII` and `Financial` sensitivity\nlabels were moved over a 45-minute window from an **unmanaged device**.\n\n| Field | Value |\n| --- | --- |\n| User | `marcus.johnson@example.com` |\n| Source | OneDrive for Business |\n| Destination | `tempfileshare[.]io` (unmanaged) |\n| Volume | ~4.2 GB (≈ 1,180 files) |\n| Window | 45 minutes |\n| Device | Unmanaged / non-compliant |\n\n## Data at risk\n\n- **PII** — employee records, contact details\n- **Financial** — draft quarterly statements, vendor banking details\n- Unknown quantity of documents pending DLP classification\n\n## Regulatory considerations\n\n> Legal has been notified. If personal data of EU/UK data subjects is confirmed,\n> a **72-hour GDPR breach-notification clock** may apply from the point of\n> awareness — track the decision in the case timeline.\n\n## Response tasks\n\n- [x] Disable `marcus.johnson@example.com` and revoke all sessions/tokens\n- [ ] Review OneDrive audit, CASB, and endpoint DLP events for full scope\n- [ ] Request takedown + access logs from `tempfileshare[.]io`\n- [ ] Draft data-subject notification with Legal (if in scope)\n\n## References\n\n- MITRE ATT&CK — [T1567.002: Exfiltration to Cloud Storage](https://attack.mitre.org/techniques/T1567/002/)\n",
+      "severity": 3,
+      "assignee": "analyst@example.com",
+      "summary": "User account disabled pending investigation. Legal notified for potential regulatory reporting.",
+      "start": "-8h",
+      "tags": [
+        "T1048.002",
+        "T1567",
+        "exfiltration",
+        "insider",
+        "data-loss"
+      ],
+      "observables": [
+        {
+          "observable_type": "domain",
+          "data": "tempfileshare[.]io",
+          "message": "Unapproved file-sharing service used for exfiltration",
+          "ioc": true,
+          "sighted": true
+        },
+        {
+          "observable_type": "mail",
+          "data": "marcus.johnson@example.com",
+          "message": "User account associated with data exfiltration",
+          "ioc": true,
+          "sighted": true
+        },
+        {
+          "observable_type": "url",
+          "data": "hxxps://tempfileshare[.]io/d/4f8a2c91b3d6",
+          "message": "Exfiltration download link identified in CASB logs",
+          "ioc": true
+        }
+      ],
+      "comments": [
+        {
+          "message": "User account disabled. Confirmed 4.2 GB of data transferred. Legal team notified."
+        }
+      ],
+      "link_alert": "AL-9088"
+    },
+    {
+      "ref": "resolved-phishing",
+      "title": "Phishing — payroll credential harvest (contained)",
+      "description": "Proofpoint-detected payroll lure; 2 credential submissions reset, sessions revoked. No mailbox rule abuse found.",
+      "severity": 3,
+      "assignee": "analyst@example.com",
+      "summary": "Closed — see resolution disposition.",
+      "status": "resolved",
+      "resolution": "true_positive",
+      "created": "-6d",
+      "resolved": "-5d",
+      "tags": [
+        "phishing",
+        "credential-theft",
+        "T1566.002"
+      ],
+      "observables": [
+        {
+          "observable_type": "domain",
+          "data": "payroll-login-verify.help",
+          "message": "Recorded during investigation",
+          "ioc": true,
+          "sighted": true
+        }
+      ]
+    },
+    {
+      "ref": "resolved-suspected",
+      "title": "Suspected malware on WKS-3389 — false alarm",
+      "description": "EDR heuristic flagged a signed IT packaging tool. Confirmed legitimate via software inventory and vendor signature.",
+      "severity": 2,
+      "assignee": "analyst@example.com",
+      "summary": "Closed — see resolution disposition.",
+      "status": "resolved",
+      "resolution": "false_positive",
+      "created": "-4d",
+      "resolved": "-4d",
+      "tags": [
+        "endpoint",
+        "false-positive"
+      ]
+    },
+    {
+      "ref": "resolved-brute-force",
+      "title": "Brute-force against VPN portal (blocked)",
+      "description": "Splunk detected a distributed password-spray against the SSL-VPN. Source ASNs blocked; no successful auth. Conditional access held.",
+      "severity": 3,
+      "assignee": "analyst@example.com",
+      "summary": "Closed — see resolution disposition.",
+      "status": "resolved",
+      "resolution": "true_positive",
+      "created": "-9d",
+      "resolved": "-6d",
+      "tags": [
+        "identity",
+        "brute-force",
+        "T1110.003"
+      ],
+      "observables": [
+        {
+          "observable_type": "ip",
+          "data": "185.220.101.44",
+          "message": "Recorded during investigation",
+          "ioc": true,
+          "sighted": true
+        }
+      ]
+    },
+    {
+      "ref": "resolved-anomalous",
+      "title": "Anomalous S3 access — determined benign",
+      "description": "GuardDuty flagged cross-region S3 GetObject from a new role. Traced to an approved data-migration job.",
+      "severity": 2,
+      "assignee": "analyst@example.com",
+      "summary": "Closed — see resolution disposition.",
+      "status": "resolved",
+      "resolution": "indeterminate",
+      "created": "-11d",
+      "resolved": "-9d",
+      "tags": [
+        "cloud",
+        "aws",
+        "data-access"
+      ]
+    },
+    {
+      "ref": "resolved-duplicate",
+      "title": "Duplicate of ransomware precursor triage",
+      "description": "Second CrowdStrike detection for the same host/session already tracked under the active ransomware case. Merged and closed.",
+      "severity": 4,
+      "assignee": "analyst@example.com",
+      "summary": "Closed — see resolution disposition.",
+      "status": "resolved",
+      "resolution": "duplicated",
+      "created": "-3d",
+      "resolved": "-3d",
+      "tags": [
+        "ransomware",
+        "duplicate"
+      ]
+    },
+    {
+      "ref": "resolved-malvertising",
+      "title": "Malvertising redirect chain reported by user",
+      "description": "User-reported browser redirects to a fake update page. URL categorised and blocked at proxy; endpoint scanned clean.",
+      "severity": 2,
+      "assignee": "analyst@example.com",
+      "summary": "Closed — see resolution disposition.",
+      "status": "resolved",
+      "resolution": "true_positive",
+      "created": "-13d",
+      "resolved": "-11d",
+      "tags": [
+        "web",
+        "malvertising",
+        "T1189"
+      ],
+      "observables": [
+        {
+          "observable_type": "url",
+          "data": "hxxps://secure-update-cdn[.]live/patch",
+          "message": "Recorded during investigation",
+          "ioc": true,
+          "sighted": true
+        }
+      ]
+    },
+    {
+      "ref": "open-1",
+      "title": "Cobalt Strike beacon on SRV-DB03 — awaiting owner",
+      "description": "CrowdStrike beacon signature (AL-9209) on a production DB host. Unassigned in the queue; needs immediate pickup.",
+      "severity": 4,
+      "created": "-5d",
+      "tags": [
+        "c2",
+        "cobalt-strike",
+        "unassigned"
+      ],
+      "link_alert": "AL-9209"
+    },
+    {
+      "ref": "open-2",
+      "title": "QR-code phishing wave — triage pending",
+      "description": "Proofpoint quishing campaign (AL-9203) to the logistics team. Awaiting analyst assignment.",
+      "severity": 3,
+      "created": "-2h24m",
+      "tags": [
+        "phishing",
+        "quishing",
+        "unassigned"
+      ],
+      "link_alert": "AL-9203"
+    }
+  ]
+}

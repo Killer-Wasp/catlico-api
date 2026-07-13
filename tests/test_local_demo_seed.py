@@ -3,17 +3,19 @@ that its originating alert is linked (promoted) to it."""
 
 from sqlmodel import select
 
-from app.core.demo_seed_data import (
-    EXFILTRATION_CASE_ALERT_REF,
-    OAUTH_CASE_ALERT_REF,
-    RANSOMWARE_CASE_ALERT_REF,
-)
-from app.core.local_demo_seed import seed_local_demo_data
+from app.core.seed import seed_local_demo_data
 from app.models.alert import Alert, AlertStatus
 from app.models.case_ import Case, CaseStatus
 from app.models.dashboard import Dashboard
+from app.models.log import Log
 from app.models.sla import SlaPolicy
+from app.models.task import Task
 from app.models.user import User
+
+# Originating alert refs promoted into the three narrative cases (demo profile).
+OAUTH_CASE_ALERT_REF = "AL-9119"
+RANSOMWARE_CASE_ALERT_REF = "AL-9123"
+EXFILTRATION_CASE_ALERT_REF = "AL-9088"
 
 
 async def test_seed_links_alerts_to_cases(session, builtin_roles):
@@ -39,6 +41,35 @@ async def test_seed_links_alerts_to_cases(session, builtin_roles):
     # Idempotent: a second run must not double-seed or break the links.
     await seed_local_demo_data(session)
     assert len((await session.execute(select(Case))).scalars().all()) == len(cases)
+
+
+async def test_seed_creates_rich_tasks_and_work_logs(session, builtin_roles):
+    """Demo tasks carry rich Markdown descriptions (not the case-title repeat of
+    old), and the in-progress tasks get Markdown work logs seeded."""
+    await seed_local_demo_data(session)
+
+    tasks = (await session.execute(select(Task))).scalars().all()
+    by_title = {t.title: t for t in tasks}
+
+    # Task descriptions are real Markdown, not the old title-repeat placeholder.
+    remove_rules = by_title["Remove mailbox rules and check forwarding"]
+    assert "**Objective:**" in remove_rules.description
+    # No longer the old placeholder (the case title repeated verbatim).
+    assert (
+        remove_rules.description
+        != "OAuth consent grant — privileged account compromise"
+    )
+
+    # Work logs landed on the in-progress tasks and are Markdown.
+    logs = (await session.execute(select(Log))).scalars().all()
+    assert len(logs) >= 4
+    assert any(log.message.startswith("Pulled inbox rules") for log in logs)
+    assert all("case_title" not in log.message for log in logs)
+
+    # Idempotent: re-running does not duplicate work logs.
+    log_count = len(logs)
+    await seed_local_demo_data(session)
+    assert len((await session.execute(select(Log))).scalars().all()) == log_count
 
 
 async def test_seed_populates_dashboard_data(session, builtin_roles):

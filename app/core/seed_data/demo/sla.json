@@ -1,0 +1,28 @@
+{
+  "policies": [
+    {
+      "severity": 4,
+      "ack_seconds": 900,
+      "resolve_seconds": 14400,
+      "escalation_target": "On-call incident lead"
+    },
+    {
+      "severity": 3,
+      "ack_seconds": 1800,
+      "resolve_seconds": 28800,
+      "escalation_target": "Shift lead"
+    },
+    {
+      "severity": 2,
+      "ack_seconds": 7200,
+      "resolve_seconds": 86400,
+      "escalation_target": ""
+    },
+    {
+      "severity": 1,
+      "ack_seconds": 28800,
+      "resolve_seconds": 259200,
+      "escalation_target": ""
+    }
+  ]
+}

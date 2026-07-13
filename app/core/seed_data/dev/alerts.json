@@ -1,0 +1,26 @@
+{
+  "alerts": [
+    {
+      "ref": "DV-1001",
+      "source": "Defender XDR",
+      "type": "identity",
+      "title": "Suspicious sign-in from a new location",
+      "description": "**Defender XDR** flagged a sign-in from an *unfamiliar* location for a dev account.",
+      "severity": 3,
+      "tlp": 2,
+      "date": "-25m",
+      "tags": ["identity", "dev"]
+    },
+    {
+      "ref": "DV-1002",
+      "source": "CrowdStrike",
+      "type": "edr",
+      "title": "Unusual process spawned on WKS-DEV-01",
+      "description": "EDR observed an *unusual* child process on a developer workstation.",
+      "severity": 2,
+      "tlp": 1,
+      "date": "-90m",
+      "tags": ["endpoint", "dev"]
+    }
+  ]
+}

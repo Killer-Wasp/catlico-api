@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "ref": "dev-1",
+      "title": "Dev sandbox — suspicious login triage",
+      "description": "## Summary\n\nMinimal seed case for local development.\n\n- Review the originating sign-in alert\n- Confirm scope and containment\n",
+      "severity": 3,
+      "assignee": "analyst@example.com",
+      "summary": "Under triage.",
+      "start": "-2h",
+      "tags": ["dev", "identity"],
+      "link_alert": "DV-1001"
+    }
+  ]
+}
