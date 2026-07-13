@@ -14,6 +14,7 @@ from app.crud import audit as audit_crud
 from app.models.audit import AuditOutbox
 from app.models.case_ import Case
 from app.models.notification import UserNotification
+from app.services import outbox_events
 from app.services.outbox_events import notify_feed_consumer
 
 
@@ -197,14 +198,21 @@ async def test_consumer_rerun_does_not_duplicate_notifications(
     session, org_a, analyst_a, monkeypatch
 ):
     """Re-running the feed consumer on the same outbox row (drain retry after a
-    later consumer failed) must not create duplicate org-wide or targeted rows."""
+    later consumer failed) must not create duplicate org-wide or targeted rows,
+    and must not re-run the WS push."""
     row = await _outbox_row_for_update(
         session,
         org_id=org_a.id,
         details={"assignee_id": [None, str(analyst_a.id)]},
     )
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
+    # Spy on the module logger's `exception`: the WS-push block swallows and logs
+    # any error. `caplog` cannot see logs emitted inside async tests under this
+    # project's pytest-asyncio setup, so we assert on the logger call directly.
+    logged_errors: list[tuple] = []
     monkeypatch.setattr(
-        "app.services.websocket_hub.get_hub", lambda: AsyncMock()
+        outbox_events.logger, "exception", lambda *a, **k: logged_errors.append(a)
     )
 
     await notify_feed_consumer(session, row)
@@ -215,3 +223,9 @@ async def test_consumer_rerun_does_not_duplicate_notifications(
     targeted = [n for n in notifs if n.user_id == analyst_a.id]
     assert len(org_wide) == 1
     assert len(targeted) == 1
+    # The retry must skip the WS push: the `if notif is None` guard returns early.
+    # Without the guard the retry falls into the push block, `model_validate(None)`
+    # raises, and the swallowing `except` logs it — so this pins the guard.
+    # (send_to_user alone can't: model_validate throws before it is ever reached.)
+    mock_hub.send_to_user.assert_awaited_once()
+    assert logged_errors == []

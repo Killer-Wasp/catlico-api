@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from sqlalchemy import JSON, Column, UniqueConstraint
+from sqlalchemy import JSON, Column, Index, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 from app.models.common import TimestampMixin
@@ -118,6 +118,21 @@ class UserNotification(SQLModel, table=True):
     when a matching event fires. `user_id` is null for org-wide notifications."""
 
     __tablename__ = "user_notification"
+    __table_args__ = (
+        Index(
+            "uq_user_notification_outbox_orgwide",
+            "outbox_id",
+            unique=True,
+            postgresql_where=text("user_id IS NULL AND outbox_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_user_notification_outbox_user",
+            "outbox_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL AND outbox_id IS NOT NULL"),
+        ),
+    )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     organisation_id: str = Field(

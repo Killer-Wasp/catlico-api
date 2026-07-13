@@ -87,6 +87,9 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
         # org-scoped, so there is nothing to notify. Mirrors the guard in
         # notifier_delivery_consumer and ws_broadcast_consumer.
         return
+    # Return intentionally discarded: the org-wide row has no live push, so a
+    # retry that returns None (dedup) is a harmless no-op. Only the targeted
+    # path below needs the return value, to skip re-pushing over the WS hub.
     await notif_crud.create_notification(
         session,
         organisation_id=org_id,
