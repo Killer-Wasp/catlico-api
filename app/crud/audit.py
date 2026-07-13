@@ -71,8 +71,10 @@ def _redact(details: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 # Outbox consumers: receive the session + the outbox row so they can write
-# notification/stream/connector rows in the same drain transaction. Empty in v1 —
-# registering a consumer is the seam for real stream/notification/connector fan-out.
+# notification/stream/connector rows in the same drain transaction. Registered at
+# startup (`app.main.lifespan`): the in-app feed, external notifier delivery, the
+# WebSocket broadcast, and plugin-event dispatch. Each runs in its own SAVEPOINT so
+# one consumer's failure can't poison the others or the batch.
 OutboxConsumer = Callable[[AsyncSession, AuditOutbox], Awaitable[None]]
 _consumers: list[OutboxConsumer] = []
 

@@ -36,8 +36,9 @@ def validate_runtime_settings() -> None:
 
 
 async def _outbox_poller() -> None:
-    """Post-commit fan-out: drain the audit outbox on its own session, marking rows
-    delivered. With no consumers registered (v1) this is a no-op + mark-delivered."""
+    """Post-commit fan-out: drain the audit outbox on its own session, handing each
+    undelivered row to every registered consumer (in-app feed, notifier delivery, WS
+    broadcast, plugin dispatch) and marking it delivered once they all succeed."""
     while True:
         try:
             async with AsyncSessionLocal() as session:
