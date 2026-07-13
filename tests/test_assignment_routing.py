@@ -191,3 +191,27 @@ async def test_malformed_assignee_uuid_is_skipped(session, org_a, monkeypatch):
     assert len(notifs) == 1
     assert notifs[0].user_id is None
     mock_hub.send_to_user.assert_not_called()
+
+
+async def test_consumer_rerun_does_not_duplicate_notifications(
+    session, org_a, analyst_a, monkeypatch
+):
+    """Re-running the feed consumer on the same outbox row (drain retry after a
+    later consumer failed) must not create duplicate org-wide or targeted rows."""
+    row = await _outbox_row_for_update(
+        session,
+        org_id=org_a.id,
+        details={"assignee_id": [None, str(analyst_a.id)]},
+    )
+    monkeypatch.setattr(
+        "app.services.websocket_hub.get_hub", lambda: AsyncMock()
+    )
+
+    await notify_feed_consumer(session, row)
+    await notify_feed_consumer(session, row)  # retry
+
+    notifs = await _user_notifs(session, org_a.id)
+    org_wide = [n for n in notifs if n.user_id is None]
+    targeted = [n for n in notifs if n.user_id == analyst_a.id]
+    assert len(org_wide) == 1
+    assert len(targeted) == 1

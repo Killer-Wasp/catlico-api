@@ -95,6 +95,7 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
         title=title,
         body=body,
         payload=envelope,
+        outbox_id=row.id,
     )
 
     # Per-user routing: a (re)assignment of a case/task also gets a targeted
@@ -111,6 +112,7 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
                 envelope=envelope,
                 obj_type=obj_type,
                 object_id=object_id,
+                outbox_id=row.id,
             )
 
 
@@ -140,6 +142,7 @@ async def _notify_assignee(
     envelope: dict[str, Any],
     obj_type: str,
     object_id: str,
+    outbox_id: int | None = None,
 ) -> None:
     """Create the assignee's targeted notification (source of truth) and best-effort
     push it over the WS hub. A DB error propagates (drain retries); a WS send error
@@ -160,7 +163,10 @@ async def _notify_assignee(
         title=f"You were assigned {obj_type} {object_id}",
         body=envelope.get("details", {}).get("summary", ""),
         payload=envelope,
+        outbox_id=outbox_id,
     )
+    if notif is None:
+        return  # drain retry — the row (and its original push) already happened
 
     # Best-effort live push. Local import to avoid an import cycle (matches
     # ws_broadcast_consumer). A hub/send failure must not raise: the notification

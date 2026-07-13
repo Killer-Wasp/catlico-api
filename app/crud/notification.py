@@ -175,18 +175,30 @@ async def create_notification(
     title: str,
     body: str = "",
     payload: dict | None = None,
-) -> UserNotification:
-    notif = UserNotification(
-        organisation_id=organisation_id,
-        user_id=user_id,
-        event_type=event_type,
-        title=title,
-        body=body,
-        payload=payload or {},
+    outbox_id: int | None = None,
+) -> UserNotification | None:
+    """Insert a feed notification. When `outbox_id` is set the insert is
+    idempotent per (outbox event[, user]) via the partial unique indexes —
+    a drain retry returns None instead of duplicating the row."""
+    stmt = (
+        pg_insert(UserNotification)
+        .values(
+            id=uuid.uuid4(),
+            organisation_id=organisation_id,
+            user_id=user_id,
+            outbox_id=outbox_id,
+            event_type=event_type,
+            title=title,
+            body=body,
+            payload=payload or {},
+            created_at=datetime.now(UTC),
+        )
+        .on_conflict_do_nothing()
+        .returning(UserNotification)
     )
-    session.add(notif)
+    result = await session.execute(stmt)
     await session.flush()
-    return notif
+    return result.scalars().one_or_none()
 
 
 async def list_user_notifications(

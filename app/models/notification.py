@@ -126,6 +126,12 @@ class UserNotification(SQLModel, table=True):
     user_id: uuid.UUID | None = Field(
         default=None, foreign_key="user.id", index=True, ondelete="CASCADE"
     )
+    #: The audit_outbox row this notification was fanned out from. Part of the
+    #: idempotency key so drain retries can't duplicate rows; None for rows
+    #: created outside the outbox pipeline.
+    outbox_id: int | None = Field(
+        default=None, foreign_key="audit_outbox.id", index=True, ondelete="CASCADE"
+    )
     event_type: str = Field(index=True)
     title: str
     body: str = ""
