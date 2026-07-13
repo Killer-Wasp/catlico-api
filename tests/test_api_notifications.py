@@ -10,7 +10,7 @@ from app.crud import notification as notif_crud
 from app.crud.audit import register_consumer, _consumers
 from app.models.audit import AuditOutbox
 from app.models.case_ import Case
-from app.models.notification import UserNotification
+from app.models.notification import UserNotification, UserNotificationRead
 from app.services.notification_catalog import catalog_event_types
 from app.services.outbox_events import notify_feed_consumer
 
@@ -61,7 +61,7 @@ async def test_mark_read_updates_notification(org_a, analyst_a_token, client, se
     assert data["read_at"] is not None
 
 
-async def test_read_all_marks_visible_unread(org_a, analyst_a_token, client, session):
+async def test_read_all_marks_visible_unread(org_a, analyst_a, analyst_a_token, client, session):
     for _ in range(2):
         n = UserNotification(
             organisation_id=org_a.id, user_id=None,
@@ -71,9 +71,10 @@ async def test_read_all_marks_visible_unread(org_a, analyst_a_token, client, ses
     n_read = UserNotification(
         organisation_id=org_a.id, user_id=None,
         event_type="case.create", title="read", body="", payload={},
-        read_at=datetime.now(UTC),
     )
     session.add(n_read)
+    await session.flush()
+    await notif_crud.set_read_state(session, n_read.id, analyst_a.id, datetime.now(UTC))
     await session.commit()
 
     resp = await client.post(
@@ -220,7 +221,7 @@ async def test_disabled_event_type_hidden_from_feed(org_a, analyst_a_token, clie
     assert data["total"] == 1
 
 
-async def test_read_all_skips_muted_notification(org_a, analyst_a_token, client, session):
+async def test_read_all_skips_muted_notification(org_a, analyst_a, analyst_a_token, client, session):
     muted = await notif_crud.create_notification(
         session, organisation_id=org_a.id, user_id=None,
         event_type="task.updated", title="Task updated",
@@ -243,8 +244,13 @@ async def test_read_all_skips_muted_notification(org_a, analyst_a_token, client,
     assert resp.status_code == 200
     assert resp.json()["marked_read"] == 1
 
-    await session.refresh(muted)
-    assert muted.read_at is None
+    result = await session.execute(
+        select(UserNotificationRead).where(
+            UserNotificationRead.notification_id == muted.id,
+            UserNotificationRead.user_id == analyst_a.id,
+        )
+    )
+    assert result.scalar_one_or_none() is None
 
 
 async def test_mute_is_per_user(org_a, analyst_a_token, readonly_a_token, client, session):
@@ -298,3 +304,35 @@ async def test_reenabling_event_makes_it_visible(org_a, analyst_a_token, client,
     )
     resp = await client.get("/api/v1/notifications/", headers=_auth(analyst_a_token, org_a))
     assert resp.json()["total"] == 1
+
+
+async def test_org_wide_read_state_is_per_user(
+    session, client, org_a, analyst_a_token, readonly_a_token
+):
+    """User A marking an org-wide notification read must NOT mark it read for
+    user B. (Regression: read_at used to live on the shared row.)"""
+    notif = await notif_crud.create_notification(
+        session,
+        organisation_id=org_a.id,
+        user_id=None,
+        event_type="case.created",
+        title="Case created",
+    )
+    await session.commit()
+
+    resp = await client.patch(
+        f"/api/v1/notifications/{notif.id}",
+        json={"read_at": "2026-07-13T00:00:00Z"},
+        headers=_auth(analyst_a_token, org_a),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["read_at"] is not None
+
+    resp = await client.get(
+        "/api/v1/notifications/",
+        params={"unread": True},
+        headers=_auth(readonly_a_token, org_a),
+    )
+    assert resp.status_code == 200
+    ids = [item["id"] for item in resp.json()["items"]]
+    assert str(notif.id) in ids, "must still be unread for the other user"

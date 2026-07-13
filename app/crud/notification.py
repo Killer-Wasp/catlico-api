@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import or_
+from sqlalchemy import delete, func, literal as sa_literal, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -18,7 +18,7 @@ from app.models.notification import (
     NotificationRuleUpdate,
     UserNotification,
     UserNotificationPreference,
-    UserNotificationUpdate,
+    UserNotificationRead,
 )
 
 
@@ -209,8 +209,18 @@ async def list_user_notifications(
     skip: int = 0,
     limit: int = 100,
     unread_only: bool = False,
-) -> tuple[list[UserNotification], int]:
-    """Visible rows: same org AND (null user_id OR matching user_id)."""
+) -> tuple[list[UserNotification], int, dict[uuid.UUID, datetime]]:
+    """Visible rows: same org AND (null user_id OR matching user_id). Returns
+    (rows, total, read_receipts) where read_receipts maps notification id →
+    this user's read_at."""
+    read_exists = (
+        select(UserNotificationRead.id)
+        .where(
+            UserNotificationRead.notification_id == UserNotification.id,
+            UserNotificationRead.user_id == user_id,
+        )
+        .exists()
+    )
     base = select(UserNotification).where(
         UserNotification.organisation_id == organisation_id,
         or_(
@@ -219,13 +229,26 @@ async def list_user_notifications(
         ),
     )
     if unread_only:
-        base = base.where(UserNotification.read_at.is_(None))
+        base = base.where(~read_exists)
     disabled = await disabled_event_types(session, organisation_id, user_id)
     if disabled:
         base = base.where(UserNotification.event_type.notin_(disabled))
-    return await paginate(
+    rows, total = await paginate(
         session, base, UserNotification.created_at.desc(), skip=skip, limit=limit
     )
+    receipts: dict[uuid.UUID, datetime] = {}
+    ids = [n.id for n in rows]
+    if ids:
+        result = await session.execute(
+            select(
+                UserNotificationRead.notification_id, UserNotificationRead.read_at
+            ).where(
+                UserNotificationRead.user_id == user_id,
+                UserNotificationRead.notification_id.in_(ids),
+            )
+        )
+        receipts = {nid: read_at for nid, read_at in result.all()}
+    return rows, total, receipts
 
 
 async def get_user_notification(
@@ -240,45 +263,71 @@ async def get_user_notification(
     return result.scalar_one_or_none()
 
 
-async def update_user_notification(
+async def set_read_state(
     session: AsyncSession,
-    notif: UserNotification,
-    notif_in: UserNotificationUpdate,
-) -> UserNotification:
-    update_data = notif_in.model_dump(exclude_unset=True)
-    for k, v in update_data.items():
-        setattr(notif, k, v)
-    session.add(notif)
+    notification_id: uuid.UUID,
+    user_id: uuid.UUID,
+    read_at: datetime | None,
+) -> None:
+    """Upsert (read) or delete (unread) this user's receipt for one notification."""
+    if read_at is None:
+        await session.execute(
+            delete(UserNotificationRead).where(
+                UserNotificationRead.notification_id == notification_id,
+                UserNotificationRead.user_id == user_id,
+            )
+        )
+    else:
+        stmt = pg_insert(UserNotificationRead).values(
+            id=uuid.uuid4(),
+            notification_id=notification_id,
+            user_id=user_id,
+            read_at=read_at,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["notification_id", "user_id"],
+            set_={"read_at": read_at},
+        )
+        await session.execute(stmt)
     await session.flush()
-    return notif
 
 
 async def mark_all_read(
     session: AsyncSession, organisation_id: str, user_id: uuid.UUID
 ) -> int:
-    """Mark all visible unread notifications as read. Returns count updated."""
-    result = await session.execute(
-        select(UserNotification).where(
-            UserNotification.organisation_id == organisation_id,
-            or_(
-                UserNotification.user_id.is_(None),
-                UserNotification.user_id == user_id,
-            ),
-            UserNotification.read_at.is_(None),
-        )
-    )
-    rows = result.scalars().all()
+    """Insert receipts for every visible, unmuted, unread notification.
+    Returns the number of notifications newly marked read."""
     disabled = await disabled_event_types(session, organisation_id, user_id)
+    read_exists = (
+        select(UserNotificationRead.id)
+        .where(
+            UserNotificationRead.notification_id == UserNotification.id,
+            UserNotificationRead.user_id == user_id,
+        )
+        .exists()
+    )
     now = datetime.now(UTC)
-    marked = 0
-    for r in rows:
-        if r.event_type in disabled:
-            continue
-        r.read_at = now
-        session.add(r)
-        marked += 1
+    sel = select(
+        func.gen_random_uuid(),
+        UserNotification.id,
+        sa_literal(user_id),
+        sa_literal(now),
+    ).where(
+        UserNotification.organisation_id == organisation_id,
+        or_(
+            UserNotification.user_id.is_(None),
+            UserNotification.user_id == user_id,
+        ),
+        ~read_exists,
+    )
+    if disabled:
+        sel = sel.where(UserNotification.event_type.notin_(disabled))
+    stmt = pg_insert(UserNotificationRead).from_select(
+        ["id", "notification_id", "user_id", "read_at"], sel
+    )
+    result = await session.execute(stmt)
     await session.flush()
-    return marked
+    return result.rowcount
 
 
 # --- UserNotificationPreference (A2) ---

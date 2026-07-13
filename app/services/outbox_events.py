@@ -179,9 +179,15 @@ async def _notify_assignee(
 
         message = {
             "type": "notification",
-            "notification": UserNotificationPublic.model_validate(notif).model_dump(
-                mode="json"
-            ),
+            "notification": UserNotificationPublic(
+                id=notif.id,
+                event_type=notif.event_type,
+                title=notif.title,
+                body=notif.body,
+                payload=notif.payload,
+                read_at=None,
+                created_at=notif.created_at,
+            ).model_dump(mode="json"),
         }
         await get_hub().send_to_user(org_id, target_user_id, message)
     except Exception:

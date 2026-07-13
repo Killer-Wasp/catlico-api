@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -206,14 +207,16 @@ async def delete_rule(
 feed_router = APIRouter(prefix="", tags=["notifications"])
 
 
-def _notification_public(n: UserNotification) -> UserNotificationPublic:
+def _notification_public(
+    n: UserNotification, read_at: datetime | None
+) -> UserNotificationPublic:
     return UserNotificationPublic(
         id=n.id,
         event_type=n.event_type,
         title=n.title,
         body=n.body,
         payload=n.payload,
-        read_at=n.read_at,
+        read_at=read_at,
         created_at=n.created_at,
     )
 
@@ -226,7 +229,7 @@ async def list_feed(
     limit: int = 100,
     unread: bool = False,
 ) -> Page[UserNotificationPublic]:
-    items, total = await notif_crud.list_user_notifications(
+    items, total, receipts = await notif_crud.list_user_notifications(
         session,
         ctx.organisation_id,
         ctx.user.id,
@@ -235,7 +238,7 @@ async def list_feed(
         unread_only=unread,
     )
     return Page(
-        items=[_notification_public(n) for n in items],
+        items=[_notification_public(n, receipts.get(n.id)) for n in items],
         total=total,
         skip=skip,
         limit=limit,
@@ -301,11 +304,13 @@ async def update_feed_item(
     )
     if not notif:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    # Cross-user visibility: only the target user (or org-wide) can mark read
+    # Targeted notifications are only actionable by their target user.
     if notif.user_id is not None and notif.user_id != ctx.user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your notification")
-    notif = await notif_crud.update_user_notification(session, notif, notif_in)
-    return _notification_public(notif)
+    await notif_crud.set_read_state(
+        session, notif.id, ctx.user.id, notif_in.read_at
+    )
+    return _notification_public(notif, notif_in.read_at)
 
 
 @feed_router.post("/read-all", status_code=status.HTTP_200_OK)
