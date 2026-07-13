@@ -5,14 +5,19 @@ The web editor (@tiptap/markdown) serialises a mention node as the inline token
 against the packages in catlico-web). These tests pin that contract.
 """
 
+from unittest.mock import AsyncMock
+
 from sqlmodel import select
 
+from app.crud import audit as audit_crud
 from app.crud import comment as comment_crud
 from app.crud import case_ as case_crud
 from app.models.audit import AuditOutbox
 from app.models.case_ import Case, CaseUpdate
-from app.models.comment import CommentCreate, CommentEntityType, CommentUpdate
+from app.models.comment import Comment, CommentCreate, CommentEntityType, CommentUpdate
+from app.models.notification import UserNotification
 from app.services.mentions import extract_mention_ids
+from app.services.outbox_events import notify_feed_consumer
 
 UID1 = "4b6e0f0a-1111-2222-3333-444455556666"
 UID2 = "9f8e7d6c-aaaa-bbbb-cccc-ddddeeeeffff"
@@ -132,3 +137,132 @@ async def test_case_description_update_stamps_new_mentions(session, org_a, analy
     )
     row = await _latest_outbox(session)
     assert row.payload["details"]["mentioned_user_ids"] == [str(analyst_a.id)]
+
+
+async def test_comment_mention_creates_targeted_notification(
+    session, org_a, analyst_a, monkeypatch
+):
+    comment = Comment(
+        entity_type=CommentEntityType.case,
+        entity_id="1",
+        message="hello",
+        organisation_id=org_a.id,
+        created_by="00000000-0000-0000-0000-00000000aaaa",
+    )
+    session.add(comment)
+    await session.flush()
+    await audit_crud.record_audit(
+        session,
+        action="create",
+        obj=comment,
+        context_type="case",
+        context_id="1",
+        actor="00000000-0000-0000-0000-00000000aaaa",
+        details={"mentioned_user_ids": [str(analyst_a.id)]},
+        organisation_id=org_a.id,
+    )
+    await session.flush()
+    row = await _latest_outbox(session)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
+
+    await notify_feed_consumer(session, row)
+
+    result = await session.execute(
+        select(UserNotification).where(UserNotification.user_id == analyst_a.id)
+    )
+    targeted = result.scalars().all()
+    assert len(targeted) == 1
+    assert targeted[0].event_type == "comment.mentioned"
+    assert "mentioned" in targeted[0].title
+    mock_hub.send_to_user.assert_awaited_once()
+
+
+async def test_case_description_mention_notifies(session, org_a, analyst_a, monkeypatch):
+    case = Case(title="c", created_by="system")
+    session.add(case)
+    await session.flush()
+    await audit_crud.record_audit(
+        session,
+        action="update",
+        obj=case,
+        context=case,
+        actor="system",
+        details={
+            "description": ["old", "new"],
+            "mentioned_user_ids": [str(analyst_a.id)],
+        },
+        organisation_id=org_a.id,
+    )
+    await session.flush()
+    row = await _latest_outbox(session)
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)
+
+    result = await session.execute(
+        select(UserNotification).where(UserNotification.user_id == analyst_a.id)
+    )
+    targeted = result.scalars().all()
+    assert len(targeted) == 1
+    assert targeted[0].event_type == "case.mentioned"
+
+
+async def test_assign_and_mention_same_user_yields_one_row_assignment_wins(
+    session, org_a, analyst_a, monkeypatch
+):
+    """When one event both assigns AND mentions the same user, the (outbox_id,
+    user_id) unique key keeps exactly one targeted row — the assignment (created
+    first) wins, the mention dedups away. Pins this intentional trade-off."""
+    case = Case(title="c", created_by="system")
+    session.add(case)
+    await session.flush()
+    await audit_crud.record_audit(
+        session,
+        action="update",
+        obj=case,
+        context=case,
+        actor="system",
+        details={
+            "assignee_id": [None, str(analyst_a.id)],
+            "mentioned_user_ids": [str(analyst_a.id)],
+        },
+        organisation_id=org_a.id,
+    )
+    await session.flush()
+    row = await _latest_outbox(session)
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)
+
+    result = await session.execute(
+        select(UserNotification).where(UserNotification.user_id == analyst_a.id)
+    )
+    targeted = result.scalars().all()
+    assert len(targeted) == 1
+    assert targeted[0].event_type == "case.assigned"  # assignment ran first
+
+
+async def test_comment_mention_end_to_end(session, org_a, analyst_a, monkeypatch):
+    """Full path: real mention text through create_comment stamps the id, then the
+    feed consumer routes a targeted `comment.mentioned` notification for it."""
+    author = "00000000-0000-0000-0000-00000000aaaa"
+    await comment_crud.create_comment(
+        session,
+        CommentCreate(message=f"hey {_mention(str(analyst_a.id))} take a look"),
+        entity_type=CommentEntityType.case,
+        entity_id="1",
+        organisation_id=org_a.id,
+        created_by=author,
+    )
+    row = await _latest_outbox(session)
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)
+
+    result = await session.execute(
+        select(UserNotification).where(UserNotification.user_id == analyst_a.id)
+    )
+    targeted = result.scalars().all()
+    assert len(targeted) == 1
+    assert targeted[0].event_type == "comment.mentioned"

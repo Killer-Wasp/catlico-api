@@ -120,6 +120,25 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
                 outbox_id=row.id,
             )
 
+    # Mention routing: the write sites (comment/case-description) stamp NEW mention
+    # ids into audit details (see app/services/mentions.py for the token format).
+    # One targeted notification per mentioned user, deduped on retry — and against
+    # an assignment of the same user in the same event — by the (outbox_id, user_id)
+    # unique index.
+    mentioned = (envelope.get("details") or {}).get("mentioned_user_ids") or []
+    if isinstance(mentioned, list):
+        surface = "a comment" if obj_type == "comment" else f"a {obj_type} description"
+        for target in mentioned:
+            await _notify_user(
+                session,
+                org_id=org_id,
+                target_user_id=str(target),
+                envelope=envelope,
+                event_type=f"{obj_type}.mentioned",
+                title=f"You were mentioned in {surface}",
+                outbox_id=row.id,
+            )
+
 
 def _assignee_target(details: dict[str, Any]) -> str | None:
     """Return the newly-assigned user id from an audit `details` dict, or None.
