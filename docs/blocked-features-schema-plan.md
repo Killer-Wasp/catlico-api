@@ -1,5 +1,9 @@
 # Blocked-feature backends — schema layer (models + migrations)
 
+> **Note (2026-07):** the Functions feature described below was removed — superseded by
+> the plugin system. Its tables were dropped by a later migration; this doc is kept as a
+> historical record of the original schema pass.
+
 Schema-layer plan for the five web features blocked on missing tables: **SLA
 Policies, API Keys, Notification Rules/Notifiers, Knowledge Base, Functions**.
 This pass delivers SQLModel tables + I/O schemas + Alembic migrations only — the

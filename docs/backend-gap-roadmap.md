@@ -32,7 +32,7 @@ Workstream A models are written; see [blocked-features-schema-plan.md](blocked-f
 - **Observable types** — `observable_types.py` route (GET/POST/DELETE) mounted; `ObservableType` model + `BUILTIN_OBSERVABLE_TYPES` seed in `app/models/observable.py`.
 - **Organisation links** — `GET/POST/PATCH/DELETE organisations/{org_id}/links` live inside `app/api/v1/routes/organisations.py`; model + crud in `organisation_link.py`.
 - **Global admin audit search** — `GET /audit/` (SuperAdmin-only, paginated, filterable by action/object_type/context) in `app/api/v1/routes/audit.py`.
-- **Models + CRUD/routes**: Function, KnowledgeBasePage, ApiKey, SlaPolicy, Notifier, NotificationRule models + CRUD + routes + mounts are DONE (Workstream A). See [blocked-features-schema-plan.md](blocked-features-schema-plan.md) for migration history.
+- **Models + CRUD/routes**: KnowledgeBasePage, ApiKey, SlaPolicy, Notifier, NotificationRule models + CRUD + routes + mounts are DONE (Workstream A). See [blocked-features-schema-plan.md](blocked-features-schema-plan.md) for migration history. (Function was also built here but removed 2026-07 — superseded by the plugin system.)
 
 ---
 
@@ -43,7 +43,7 @@ and API endpoints are live:
 
 | Feature | Endpoints | Powers web stub | Status |
 |---|---|---|---|
-| Functions / automation | `GET/POST/PATCH/DELETE functions/`, `POST functions/{id}/toggle`, `POST functions/{id}/run` | FunctionsPage | ✅ CRUD done; execution runtime is test-stub (needs sandbox gating) |
+| Functions / automation | ~~`functions/` CRUD + toggle + run~~ | ~~FunctionsPage~~ | ❌ REMOVED 2026-07 — superseded by the plugin system (never executed real code) |
 | Knowledge Base | `GET/POST/PATCH/DELETE knowledge-base/` (pages w/ block content) | KnowledgeBase | ✅ DONE |
 | API keys | `GET/POST api-keys/`, `DELETE api-keys/{id}` | Settings → ApiKeysPanel | ✅ CRUD + request auth done (P0.1 remediated 2026-06-28) |
 | SLA policies | `GET sla-policies/`, `PUT sla-policies/` (bulk upsert) | Settings → SlaPanel | ✅ DONE |
@@ -51,7 +51,7 @@ and API endpoints are live:
 | User Notifications feed | `GET notifications/`, `PATCH notifications/{id}`, `POST notifications/read-all` | Header notifications bell | ✅ DONE (outbox consumers operational) |
 
 > Workstream A CRUD is complete. Remaining sub-items are **execution/delivery**
-> behavior (function sandbox, notifier dispatch, API-key auth, notification feed),
+> behavior (notifier dispatch, API-key auth, notification feed),
 > not CRUD scaffolding. These are tracked in the current milestone plan below.
 
 ---
@@ -111,7 +111,7 @@ Items marked ✅ are done; ❌ are remaining.
 1. ✅ Operational Spine — outbox consumers, notification feed, notifier delivery, WebSocket stream
 2. ✅ Enrichment Automation — auto-enrich, verdict rollup, artifact provenance, konnect periodic register
 3. ✅ API-Key Auth — request authentication with API keys (wired to 14 programmatic routes)
-4. ❌ Functions Runtime — test-stub needs sandbox gating (P1.3)
+4. ~~Functions Runtime~~ — DROPPED 2026-07: feature removed, plugins are the extensibility mechanism
 5. ❌ Responders — action connectors, operation schema, konnect responder SDK (P1.2)
 6. ❌ File/Blob Analyzer Leases — file_ref in work items (P1.1)
 7. ❌ Threat Intel Depth — MISP import/export stubs (P1.4), local-tool worker mode (P2.3)

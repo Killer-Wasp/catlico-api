@@ -125,12 +125,6 @@ See [plugin-system.md](plugin-system.md) for what these govern.
 | `ANALYZER_MAX_ATTEMPTS` | `3` | |
 | `CONNECTOR_CACHE_TTL_SECONDS` | `86400` | |
 
-## Functions
-
-| Variable | Default | Notes |
-|---|---|---|
-| `FUNCTION_RUNNER_MODE` | `disabled` | `disabled` \| `stub`. **There is no real sandbox.** Both modes refuse to execute untrusted user code; a subprocess/jail sandbox is a later milestone. |
-
 ## Production checklist
 
 - [ ] `ENVIRONMENT=production` (disables interactive API docs)

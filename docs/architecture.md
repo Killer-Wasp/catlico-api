@@ -128,12 +128,11 @@ audit via `GET /audit/` (superadmin only).
 
 ## Background loops
 
-Four `asyncio` tasks, started and cancelled by the `lifespan` in `app/main.py`:
+Three `asyncio` tasks, started and cancelled by the `lifespan` in `app/main.py`:
 
 | Loop | Interval | Purpose |
 |---|---|---|
 | `_outbox_poller` | 5s | Drains the audit outbox to registered consumers |
-| `run_function_poller` | — | Processes queued function runs |
 | `_plugin_maintenance_poller` | 30s | Reaper, offline detection, rollups, retention, cron |
 | `_plugin_push_poller` | 5s | Pushes queued event deliveries to runners |
 
@@ -142,8 +141,6 @@ transient error.** Only `asyncio.CancelledError` propagates.
 
 ## Known gaps
 
-- **Functions have no sandbox.** `FUNCTION_RUNNER_MODE` defaults to `disabled`; the poller and
-  run records are real, the execution path is a stub. It cannot safely run untrusted code.
 - **API keys authenticate but responders don't fully execute.** Responder job queueing and real
   responder connectors are incomplete.
 - **`websocket_hub` is in-memory** and does not survive multiple processes. It needs a shared

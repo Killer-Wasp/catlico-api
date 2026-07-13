@@ -24,7 +24,7 @@ async def test_permission_catalog_lists_all_groups(client: AsyncClient, admin_to
     assert keys == {
         "read:investigation", "write:investigation", "delete:investigation",
         "read:intel", "write:intel", "delete:intel",
-        "run:enrichment", "run:function",
+        "run:enrichment",
         "read:org", "write:org", "delete:org",
         "read:access", "write:access", "delete:access",
     }

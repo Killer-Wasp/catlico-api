@@ -129,11 +129,6 @@ class Settings(BaseSettings):
         "enterprise-attack/enterprise-attack.json"
     )
 
-    # Function runner mode.
-    # - "stub": test stub marks every run successful (no sandbox). Local/test only.
-    # - "disabled": reject queued runs with a clear status. Production default.
-    FUNCTION_RUNNER_MODE: Literal["disabled", "stub"] = "disabled"
-
     # Blob storage for file attachments / file observables.
     # Backed by fsspec, so the same code targets local FS, S3 (incl. SeaweedFS/MinIO),
     # GCS, or Azure — just install the matching fsspec adapter and set STORAGE_PROTOCOL.

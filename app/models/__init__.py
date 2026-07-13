@@ -14,7 +14,6 @@ from app.models.case_template import CaseTemplate, CaseTemplateTask  # noqa: F40
 from app.models.comment import Comment  # noqa: F401
 from app.models.custom_field import CustomField, CustomFieldValue  # noqa: F401
 from app.models.flag import Flag  # noqa: F401
-from app.models.function import Function, FunctionRun  # noqa: F401
 from app.models.knowledge_base import KnowledgeBasePage, KnowledgeBasePageVersion  # noqa: F401
 from app.models.log import Log  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401

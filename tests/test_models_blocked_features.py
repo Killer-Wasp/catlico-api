@@ -1,6 +1,6 @@
-"""Verify the five blocked-feature tables (sla_policy, api_key, notifier,
-notification_rule, knowledge_base_page, function, function_run) created by
-migrations a1d3f5b7c9e2 through e6b8d1f3a5c7."""
+"""Verify the blocked-feature tables (sla_policy, api_key, notifier,
+notification_rule, knowledge_base_page) created by migrations
+a1d3f5b7c9e2 onward."""
 
 import uuid
 from datetime import UTC, datetime
@@ -11,7 +11,6 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.db import init_db
 from app.models.api_key import ApiKey
-from app.models.function import Function, FunctionRun, FunctionRunStatus, FunctionRuntime, FunctionTrigger
 from app.models.knowledge_base import KnowledgeBasePage
 from app.models.notification import NotificationRule, Notifier, NotifierType
 from app.models.sla import SlaPolicy
@@ -380,172 +379,16 @@ async def test_knowledge_base_page_title_index(session):
     assert any("title" in n for n in names)
 
 
-# ── function ─────────────────────────────────────────────────────────────────
-
-async def test_function_insert(session, org):
-    f = Function(
-        organisation_id=org,
-        name="Auto-tag alerts",
-        description="Tag incoming alerts by source",
-        runtime=FunctionRuntime.python,
-        trigger=FunctionTrigger.event,
-        trigger_config={"event_types": ["alert.created"]},
-        profile="analyst",
-        enabled=False,
-        timeout_ms=30000,
-        egress="",
-        approval=False,
-        code="def run(event):\n    pass\n",
-        secrets=["vault/slack_token"],
-        run_count=0,
-        error_count=0,
-        created_by="system",
-    )
-    session.add(f)
-    await session.commit()
-
-    row = (await session.execute(select(Function).where(Function.id == f.id))).scalar_one()
-    assert row.name == "Auto-tag alerts"
-    assert row.runtime == FunctionRuntime.python
-    assert row.trigger == FunctionTrigger.event
-    assert row.trigger_config == {"event_types": ["alert.created"]}
-    assert row.profile == "analyst"
-    assert row.enabled is False
-    assert row.timeout_ms == 30000
-    assert row.egress == ""
-    assert row.approval is False
-    assert row.code == "def run(event):\n    pass\n"
-    assert row.secrets == ["vault/slack_token"]
-    assert row.run_count == 0
-    assert row.error_count == 0
-    assert row.deleted_at is None
-
-
-async def test_function_defaults(session, org):
-    f = Function(
-        organisation_id=org,
-        name="Minimal function",
-        created_by="system",
-    )
-    session.add(f)
-    await session.commit()
-
-    row = (await session.execute(select(Function).where(Function.id == f.id))).scalar_one()
-    assert row.description == ""
-    assert row.runtime == FunctionRuntime.javascript
-    assert row.trigger == FunctionTrigger.event
-    assert row.trigger_config == {}
-    assert row.profile == "analyst"
-    assert row.enabled is False
-    assert row.timeout_ms == 15000
-    assert row.egress == ""
-    assert row.approval is False
-    assert row.code == ""
-    assert row.secrets == []
-    assert row.run_count == 0
-    assert row.error_count == 0
-
-
-async def test_function_soft_delete(session, org):
-    f = Function(
-        organisation_id=org,
-        name="Old function",
-        created_by="system",
-    )
-    session.add(f)
-    await session.commit()
-
-    f.deleted_at = datetime.now(UTC)
-    f.deleted_by = "system"
-    await session.commit()
-
-    row = (await session.execute(select(Function).where(Function.id == f.id))).scalar_one()
-    assert row.deleted_at is not None
-
-
-# ── function_run ─────────────────────────────────────────────────────────────
-
-async def test_function_run_insert(session, org):
-    f = Function(
-        organisation_id=org,
-        name="Runner",
-        created_by="system",
-    )
-    session.add(f)
-    await session.commit()
-
-    run = FunctionRun(
-        id=uuid.uuid4(),
-        function_id=f.id,
-        status=FunctionRunStatus.success,
-        trigger="manual",
-        started_at=datetime(2026, 6, 24, 12, 0, 0, tzinfo=UTC),
-        duration_ms=1234,
-        attempts=1,
-        error=None,
-        created_by="system",
-    )
-    session.add(run)
-    await session.commit()
-
-    row = (await session.execute(select(FunctionRun).where(FunctionRun.id == run.id))).scalar_one()
-    assert row.function_id == f.id
-    assert row.status == FunctionRunStatus.success
-    assert row.trigger == "manual"
-    assert row.duration_ms == 1234
-    assert row.attempts == 1
-    assert row.error is None
-    assert row.created_at is not None
-
-
-async def test_function_run_cascade_delete(session, org):
-    f = Function(
-        organisation_id=org,
-        name="Cascade test",
-        created_by="system",
-    )
-    session.add(f)
-    await session.commit()
-
-    run = FunctionRun(
-        id=uuid.uuid4(),
-        function_id=f.id,
-        status=FunctionRunStatus.failure,
-        trigger="event",
-        started_at=datetime.now(UTC),
-        duration_ms=500,
-        attempts=2,
-        error="timeout",
-        created_by="system",
-    )
-    session.add(run)
-    await session.commit()
-
-    await session.delete(f)
-    await session.commit()
-
-    result = await session.execute(select(FunctionRun).where(FunctionRun.function_id == f.id))
-    assert result.scalar_one_or_none() is None
-
-
 # ── permission backfill (from migrations 4 & 5) ──────────────────────────────
 
 async def test_intel_permissions_present(session, org):
-    """init_db seeds roles carrying the intel group (custom fields, knowledge base
-    and function definitions all fold into read/write:intel)."""
+    """init_db seeds roles carrying the intel group (custom fields and knowledge
+    base fold into read/write:intel)."""
     for perm in ("read:intel", "write:intel"):
         result = await session.execute(
             text(f"SELECT 1 FROM role_permission WHERE permission = '{perm}'")
         )
         assert result.all(), f"Missing {perm}"
-
-
-async def test_function_run_permission_present(session, org):
-    """Function execution keeps its own run:function group."""
-    result = await session.execute(
-        text("SELECT 1 FROM role_permission WHERE permission = 'run:function'")
-    )
-    assert result.all(), "Missing run:function"
 
 
 # ── role permission backfill ─────────────────────────────────────────────────

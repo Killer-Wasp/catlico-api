@@ -269,7 +269,7 @@ def test_delete_grants_are_split_from_write_groups():
         "delete:case", "delete:task", "delete:observable", "delete:alert",
     }
     assert expand_permissions({"delete:intel"}) == {
-        "delete:custom_field", "delete:knowledge_base", "delete:function",
+        "delete:custom_field", "delete:knowledge_base",
     }
     assert expand_permissions({"delete:access"}) == {"delete:user", "delete:role"}
     assert expand_permissions({"delete:org"}) == {"delete:organisation"}

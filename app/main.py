@@ -12,7 +12,6 @@ from app.core.configs import settings
 from app.core.context import RequestIdMiddleware
 from app.core.db import AsyncSessionLocal, init_db, run_migrations
 from app.crud.audit import dispatch_pending_outbox, register_consumer
-from app.services.function_runner import run_function_poller
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
 from app.services.plugin_dispatch import plugin_event_consumer, push_pending_deliveries
@@ -91,20 +90,16 @@ async def lifespan(app: FastAPI):
     register_consumer(ws_broadcast_consumer)
     register_consumer(plugin_event_consumer)
     poller = asyncio.create_task(_outbox_poller())
-    func_poller = asyncio.create_task(run_function_poller())
     maintenance_poller = asyncio.create_task(_plugin_maintenance_poller())
     push_poller = asyncio.create_task(_plugin_push_poller())
     try:
         yield
     finally:
         poller.cancel()
-        func_poller.cancel()
         maintenance_poller.cancel()
         push_poller.cancel()
         with suppress(asyncio.CancelledError):
             await poller
-        with suppress(asyncio.CancelledError):
-            await func_poller
         with suppress(asyncio.CancelledError):
             await maintenance_poller
         with suppress(asyncio.CancelledError):

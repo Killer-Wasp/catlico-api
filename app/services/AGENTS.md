@@ -30,10 +30,9 @@ the row is retried and **every consumer runs again**. Consumers must therefore b
 
 ### 2. Background pollers
 
-Four `asyncio` tasks, all started and cancelled by the `lifespan` in `app/main.py`:
+Three `asyncio` tasks, all started and cancelled by the `lifespan` in `app/main.py`:
 
 - **`_outbox_poller`** — drains the audit outbox every `OUTBOX_POLL_INTERVAL` (5s).
-- **`run_function_poller`** (`function_runner.py`) — processes queued function runs.
 - **`_plugin_maintenance_poller`** (`plugin_maintenance.run_maintenance_sweep`) — reaps
   stuck runs, marks silent runners offline, rolls finished runs into `PluginRunDaily`.
 - **`_plugin_push_poller`** (`plugin_dispatch.push_pending_deliveries`) — pushes queued
@@ -56,16 +55,10 @@ per (plugin, org, fire slot), which is what makes scheduling idempotent across r
 
 ## Known state — check before you trust
 
-- **`function_runner.py` has no real sandbox.** `FUNCTION_RUNNER_MODE=disabled` is the
-  default and returns `"Function sandbox not available"`. The poller and run records are
-  real; the execution path is a test stub (`sandbox_policy: "test-stub"` /
-  `"stub-disallowed"`). A subprocess/jail sandbox is a later milestone. **Do not treat
-  this as capable of running untrusted user code.**
 - **`connector_operations.py`** validates and applies responder operations transactionally
   with audit rows, but responder job queueing and real responder connectors are incomplete.
 - `plugin_audit.py` records admin actions (config changes, approvals) into `Audit`.
   **Secret values are never recorded** — only the key name and whether it was set. Preserve that.
-- `function_tokens.py` mints short-lived, narrowly-scoped callback tokens.
 - `websocket_hub.py` is an **in-memory** hub — it does not survive multiple processes.
   It needs a shared backend before horizontal scaling.
 

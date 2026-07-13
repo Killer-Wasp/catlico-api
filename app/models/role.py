@@ -24,7 +24,6 @@ class Permission(str, Enum):
     write_intel = "write:intel"
     delete_intel = "delete:intel"
     run_enrichment = "run:enrichment"
-    run_function = "run:function"
     read_org = "read:org"
     write_org = "write:org"
     delete_org = "delete:org"
@@ -52,16 +51,15 @@ PERMISSION_GROUPS: dict[str, set[str]] = {
         "delete:case", "delete:task", "delete:observable", "delete:alert",
     },
     Permission.read_intel.value: {
-        "read:custom_field", "read:knowledge_base", "read:function",
+        "read:custom_field", "read:knowledge_base",
     },
     Permission.write_intel.value: {
-        "write:custom_field", "write:knowledge_base", "write:function",
+        "write:custom_field", "write:knowledge_base",
     },
     Permission.delete_intel.value: {
-        "delete:custom_field", "delete:knowledge_base", "delete:function",
+        "delete:custom_field", "delete:knowledge_base",
     },
     Permission.run_enrichment.value: {"run:enrichment"},
-    Permission.run_function.value: {"run:function"},
     Permission.read_org.value: {"read:organisation", "read:connector"},
     Permission.write_org.value: {"write:organisation", "write:connector"},
     Permission.delete_org.value: {"delete:organisation"},
@@ -94,7 +92,7 @@ BUILTIN_ROLES: dict[str, set[Permission]] = {
         Permission.read_investigation, Permission.write_investigation,
         Permission.delete_investigation,
         Permission.read_intel,
-        Permission.run_enrichment, Permission.run_function,
+        Permission.run_enrichment,
         Permission.read_org,
         Permission.read_access,
     },
