@@ -24,6 +24,7 @@ from app.models.comment import Comment, CommentEntityType
 from app.models.log import Log
 from app.models.observable import Observable
 from app.models.task import Task
+from app.services.mentions import extract_mention_ids
 
 
 async def get_case(session: AsyncSession, case_id: int) -> Case | None:
@@ -100,6 +101,17 @@ async def update_case(
         for field, new in update_data.items()
         if getattr(case, field, None) != new
     }
+    if "description" in changes:
+        old_desc, new_desc = changes["description"]
+        new_mentions = sorted(
+            extract_mention_ids(new_desc)
+            - extract_mention_ids(old_desc)
+            - {updated_by}
+        )
+        if new_mentions:
+            # Not an [old, new] diff entry — a bare id list the feed consumer
+            # reads directly (same heterogeneity as `assignee_id` in create_case).
+            changes["mentioned_user_ids"] = new_mentions
     update_data["updated_at"] = datetime.now(UTC)
     update_data["updated_by"] = updated_by
     case.sqlmodel_update(update_data)

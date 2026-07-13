@@ -7,6 +7,7 @@ from sqlmodel import desc, select
 from app.crud.audit import record_audit
 from app.crud.pagination import paginate
 from app.models.comment import Comment, CommentCreate, CommentEntityType, CommentUpdate
+from app.services.mentions import extract_mention_ids
 
 
 def _comment_context(comment: Comment) -> tuple[str | None, str | None]:
@@ -57,6 +58,7 @@ async def create_comment(
     )
     session.add(comment)
     await session.flush()
+    mentioned = sorted(extract_mention_ids(comment.message) - {created_by})
     ctx_type, ctx_id = _comment_context(comment)
     await record_audit(
         session,
@@ -65,6 +67,7 @@ async def create_comment(
         context_type=ctx_type,
         context_id=ctx_id,
         actor=created_by,
+        details={"mentioned_user_ids": mentioned} if mentioned else None,
         organisation_id=comment.organisation_id,
     )
     return comment
@@ -73,11 +76,17 @@ async def create_comment(
 async def update_comment(
     session: AsyncSession, comment: Comment, comment_in: CommentUpdate, updated_by: str
 ) -> Comment:
+    old_message = comment.message
     comment.message = comment_in.message
     comment.updated_at = datetime.now(UTC)
     comment.updated_by = updated_by
     session.add(comment)
     await session.flush()
+    mentioned = sorted(
+        extract_mention_ids(comment.message)
+        - extract_mention_ids(old_message)
+        - {updated_by}
+    )
     ctx_type, ctx_id = _comment_context(comment)
     await record_audit(
         session,
@@ -86,6 +95,7 @@ async def update_comment(
         context_type=ctx_type,
         context_id=ctx_id,
         actor=updated_by,
+        details={"mentioned_user_ids": mentioned} if mentioned else None,
         organisation_id=comment.organisation_id,
     )
     return comment
