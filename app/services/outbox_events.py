@@ -101,20 +101,22 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
         outbox_id=row.id,
     )
 
-    # Per-user routing: a (re)assignment of a case/task also gets a targeted
-    # notification for the assignee, pushed live over the WS hub. The org-wide
-    # row above is unchanged; this is additive.
-    if obj_type in {"case", "task"}:
+    # Per-user routing: a (re)assignment of a case/task/alert also gets a targeted
+    # notification for the assignee, pushed live over the WS hub. The org-wide row
+    # above is unchanged; this is additive. Targeted rows use a distinct
+    # `<obj>.assigned` event type so muting the noisy `<obj>.updated` type does not
+    # silently mute assignments.
+    if obj_type in {"case", "task", "alert"}:
         target_user_id = _assignee_target(envelope.get("details") or {})
         if target_user_id:
             object_id = envelope["object"]["id"]
-            await _notify_assignee(
+            await _notify_user(
                 session,
                 org_id=org_id,
                 target_user_id=target_user_id,
                 envelope=envelope,
-                obj_type=obj_type,
-                object_id=object_id,
+                event_type=f"{obj_type}.assigned",
+                title=f"You were assigned {obj_type} {object_id}",
                 outbox_id=row.id,
             )
 
@@ -137,33 +139,40 @@ def _assignee_target(details: dict[str, Any]) -> str | None:
     return None
 
 
-async def _notify_assignee(
+async def _notify_user(
     session: AsyncSession,
     *,
     org_id: str,
     target_user_id: str,
     envelope: dict[str, Any],
-    obj_type: str,
-    object_id: str,
+    event_type: str,
+    title: str,
     outbox_id: int | None = None,
 ) -> None:
-    """Create the assignee's targeted notification (source of truth) and best-effort
-    push it over the WS hub. A DB error propagates (drain retries); a WS send error
-    is swallowed so a transient hub failure can't undo the notification."""
+    """Create a targeted notification (source of truth) and best-effort push it
+    over the WS hub. A DB error propagates (drain retries); a WS send error is
+    swallowed so a transient hub failure can't undo the notification.
+
+    `event_type` is the notification's *synthesized* type (e.g. `case.assigned`,
+    `comment.mentioned`) and intentionally differs from `envelope["event_type"]`,
+    which stays the underlying audit action (e.g. `case.updated`). The stored
+    `payload` (the envelope) therefore reflects the source event, not this type —
+    read the row's `event_type` column, not `payload["event_type"]`, for the
+    notification kind."""
     try:
         user_uuid = uuid.UUID(target_user_id)
     except (ValueError, AttributeError, TypeError):
         # Malformed details value — skip the targeted notification rather than 500
         # the drain. The org-wide notification already landed.
-        logger.warning("assignment routing: invalid assignee id %r", target_user_id)
+        logger.warning("targeted routing: invalid user id %r", target_user_id)
         return
 
     notif = await notif_crud.create_notification(
         session,
         organisation_id=org_id,
         user_id=user_uuid,
-        event_type=envelope["event_type"],
-        title=f"You were assigned {obj_type} {object_id}",
+        event_type=event_type,
+        title=title,
         body=envelope.get("details", {}).get("summary", ""),
         payload=envelope,
         outbox_id=outbox_id,
@@ -191,4 +200,4 @@ async def _notify_assignee(
         }
         await get_hub().send_to_user(org_id, target_user_id, message)
     except Exception:
-        logger.exception("assignment routing: WS push failed (notification persisted)")
+        logger.exception("targeted routing: WS push failed (notification persisted)")

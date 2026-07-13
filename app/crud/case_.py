@@ -64,18 +64,23 @@ async def create_case(
     )
     session.add(share)
     await session.flush()
+    details = {
+        "title": case.title,
+        "severity": case.severity,
+        "tlp": case.tlp,
+        "pap": case.pap,
+    }
+    if case.assignee_id:
+        # Stamp the create-time assignee so the feed consumer routes a targeted
+        # `case.assigned` notification (matches the reassignment diff path).
+        details["assignee_id"] = str(case.assignee_id)
     await record_audit(
         session,
         action="create",
         obj=case,
         context=case,
         actor=created_by,
-        details={
-            "title": case.title,
-            "severity": case.severity,
-            "tlp": case.tlp,
-            "pap": case.pap,
-        },
+        details=details,
         organisation_id=owner_org_id,
     )
     return case

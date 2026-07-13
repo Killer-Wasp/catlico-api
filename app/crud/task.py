@@ -309,6 +309,11 @@ async def create_task(
         )
 
     await session.flush()
+    details = {"title": task.title, "group": task.group}
+    if task.assignee_id:
+        # Stamp the create-time assignee so the feed consumer routes a targeted
+        # `task.assigned` notification (matches the reassignment diff path).
+        details["assignee_id"] = str(task.assignee_id)
     await record_audit(
         session,
         action="create",
@@ -316,7 +321,7 @@ async def create_task(
         context_type="case",
         context_id=str(case_id),
         actor=created_by,
-        details={"title": task.title, "group": task.group},
+        details=details,
         organisation_id=task.organisation_id,
     )
     return task

@@ -68,7 +68,7 @@ async def test_assignment_creates_targeted_notification_and_pushes(
 
     assert len(org_wide) == 1  # unchanged behaviour
     assert len(targeted) == 1
-    assert targeted[0].event_type == "case.updated"
+    assert targeted[0].event_type == "case.assigned"
     assert targeted[0].title.startswith("You were assigned case")
 
     mock_hub.send_to_user.assert_awaited_once()
@@ -77,7 +77,7 @@ async def test_assignment_creates_targeted_notification_and_pushes(
     assert args[1] == str(analyst_a.id)
     assert args[2]["type"] == "notification"
     assert args[2]["notification"]["id"] == str(targeted[0].id)
-    assert args[2]["notification"]["event_type"] == "case.updated"
+    assert args[2]["notification"]["event_type"] == "case.assigned"
 
 
 async def test_create_with_bare_assignee_string_is_routed(
@@ -229,3 +229,123 @@ async def test_consumer_rerun_does_not_duplicate_notifications(
     # (send_to_user alone can't: model_validate throws before it is ever reached.)
     mock_hub.send_to_user.assert_awaited_once()
     assert logged_errors == []
+
+
+async def test_alert_assignment_creates_targeted_notification(
+    session, org_a, analyst_a, monkeypatch
+):
+    """Alert (re)assignment routes a targeted `alert.assigned` notification —
+    alerts were previously excluded from per-user routing."""
+    from app.models.alert import Alert
+
+    alert = Alert(
+        type="siem",
+        source="test",
+        source_ref="ref-1",
+        title="alert",
+        description="",
+        severity=2,
+        tlp=2,
+        pap=2,
+        organisation_id=org_a.id,
+        created_by="system",
+    )
+    session.add(alert)
+    await session.flush()
+    await audit_crud.record_audit(
+        session,
+        action="update",
+        obj=alert,
+        actor="system",
+        details={"assignee_id": [None, str(analyst_a.id)]},
+        organisation_id=org_a.id,
+    )
+    await session.flush()
+    result = await session.execute(
+        select(AuditOutbox).order_by(AuditOutbox.id.desc()).limit(1)
+    )
+    row = result.scalars().one()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)
+
+    notifs = await _user_notifs(session, org_a.id)
+    targeted = [n for n in notifs if n.user_id == analyst_a.id]
+    assert len(targeted) == 1
+    assert targeted[0].event_type == "alert.assigned"
+
+
+async def test_assignment_event_type_is_distinct_from_updated(
+    session, org_a, analyst_a, monkeypatch
+):
+    """The targeted row carries `<obj>.assigned`, distinct from the org-wide
+    `<obj>.updated`, so muting `case.updated` does not mute assignments."""
+    row = await _outbox_row_for_update(
+        session,
+        org_id=org_a.id,
+        details={"assignee_id": [None, str(analyst_a.id)]},
+    )
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)
+
+    notifs = await _user_notifs(session, org_a.id)
+    targeted = [n for n in notifs if n.user_id == analyst_a.id]
+    assert targeted[0].event_type == "case.assigned"
+    org_wide = [n for n in notifs if n.user_id is None]
+    assert org_wide[0].event_type == "case.updated"  # org-wide row unchanged
+
+
+async def test_create_with_assignee_notifies(session, org_a, analyst_a, monkeypatch):
+    """A `create` audit carrying a bare-string assignee_id (create-with-assignee)
+    produces a targeted `case.assigned` notification."""
+    row = await _outbox_row_for_update(
+        session,
+        org_id=org_a.id,
+        details={"title": "pre-assigned", "assignee_id": str(analyst_a.id)},
+    )
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)
+
+    notifs = await _user_notifs(session, org_a.id)
+    targeted = [n for n in notifs if n.user_id == analyst_a.id]
+    assert len(targeted) == 1
+    assert targeted[0].event_type == "case.assigned"
+
+
+async def test_case_and_task_create_stamp_assignee_into_audit(
+    session, org_a, builtin_roles, analyst_a
+):
+    """create_case / create_task with an assignee stamp `assignee_id` into the
+    audit details so the feed consumer can route a create-time assignment."""
+    from app.crud import case_ as case_crud
+    from app.crud import task as task_crud
+    from app.models.case_ import CaseCreate
+    from app.models.task import TaskCreate
+
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="c", assignee_id=analyst_a.id),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    result = await session.execute(
+        select(AuditOutbox).order_by(AuditOutbox.id.desc()).limit(1)
+    )
+    case_row = result.scalars().one()
+    assert case_row.payload["details"].get("assignee_id") == str(analyst_a.id)
+
+    await task_crud.create_task(
+        session,
+        TaskCreate(title="t", assignee_id=analyst_a.id),
+        case_id=case.id,
+        organisation_id=org_a.id,
+        created_by=str(analyst_a.id),
+    )
+    result = await session.execute(
+        select(AuditOutbox).order_by(AuditOutbox.id.desc()).limit(1)
+    )
+    task_row = result.scalars().one()
+    assert task_row.payload["details"].get("assignee_id") == str(analyst_a.id)

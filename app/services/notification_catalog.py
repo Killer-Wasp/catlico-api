@@ -5,7 +5,10 @@ the emitted ``<object_type>.<normalized_action>`` format produced by
 ``app.services.outbox_events`` (e.g. ``case.created``, ``case.merged``) — where
 ``object_type`` is the model ``__tablename__`` with a trailing ``_`` stripped.
 Every entry here is verified to correspond to an audit event that the codebase
-actually emits, so no mute toggle is silently dead.
+actually emits, so no mute toggle is silently dead. Entries under "Assignments"
+are the exception: their ``<obj>.assigned`` event types are *synthesised* by the
+feed consumer (`app.services.outbox_events`) for the targeted assignee row, not
+raw ``<object_type>.<action>`` audit actions.
 """
 
 from __future__ import annotations
@@ -33,6 +36,10 @@ NOTIFICATION_EVENT_CATALOG: list[tuple[str, str, str]] = [
     ("comment.created", "Comment added", "Comments"),
     # Case log entries
     ("log.created", "Case log entry added", "Case log"),
+    # Assignments (targeted; synthetic event types emitted by the feed consumer)
+    ("case.assigned", "Case assigned to you", "Assignments"),
+    ("task.assigned", "Task assigned to you", "Assignments"),
+    ("alert.assigned", "Alert assigned to you", "Assignments"),
 ]
 
 
