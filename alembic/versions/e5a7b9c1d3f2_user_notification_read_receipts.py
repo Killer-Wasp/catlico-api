@@ -36,12 +36,6 @@ def upgrade() -> None:
         ),
     )
     op.create_index(
-        op.f("ix_user_notification_read_notification_id"),
-        "user_notification_read",
-        ["notification_id"],
-        unique=False,
-    )
-    op.create_index(
         op.f("ix_user_notification_read_user_id"),
         "user_notification_read",
         ["user_id"],
@@ -73,10 +67,6 @@ def downgrade() -> None:
     )
     op.drop_index(
         op.f("ix_user_notification_read_user_id"),
-        table_name="user_notification_read",
-    )
-    op.drop_index(
-        op.f("ix_user_notification_read_notification_id"),
         table_name="user_notification_read",
     )
     op.drop_table("user_notification_read")

@@ -324,7 +324,7 @@ async def mark_all_read(
         sel = sel.where(UserNotification.event_type.notin_(disabled))
     stmt = pg_insert(UserNotificationRead).from_select(
         ["id", "notification_id", "user_id", "read_at"], sel
-    )
+    ).on_conflict_do_nothing(index_elements=["notification_id", "user_id"])
     result = await session.execute(stmt)
     await session.flush()
     return result.rowcount

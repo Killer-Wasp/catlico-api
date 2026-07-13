@@ -1,8 +1,10 @@
 """A2: User notification feed tests."""
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import select
 
 from app.crud import audit as audit_crud
@@ -304,6 +306,92 @@ async def test_reenabling_event_makes_it_visible(org_a, analyst_a_token, client,
     )
     resp = await client.get("/api/v1/notifications/", headers=_auth(analyst_a_token, org_a))
     assert resp.json()["total"] == 1
+
+
+async def test_read_all_is_idempotent_under_existing_receipts(
+    session, client, org_a, analyst_a, analyst_a_token
+):
+    """read-all must not 500 when a receipt already exists for a notification
+    (concurrent/repeat calls); it inserts only the still-unread ones."""
+    n1 = await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="case.created", title="one",
+    )
+    n2 = await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="case.created", title="two",
+    )
+    # Pre-seed a read receipt for n1 (simulates a prior/concurrent mark).
+    await notif_crud.set_read_state(session, n1.id, analyst_a.id, datetime.now(UTC))
+    await session.commit()
+
+    # First real read-all: only n2 remains unread.
+    resp = await client.post(
+        "/api/v1/notifications/read-all", headers=_auth(analyst_a_token, org_a)
+    )
+    assert resp.status_code == 200
+    assert resp.json()["marked_read"] == 1
+
+    # Second read-all: nothing left unread, must not error.
+    resp = await client.post(
+        "/api/v1/notifications/read-all", headers=_auth(analyst_a_token, org_a)
+    )
+    assert resp.status_code == 200
+    assert resp.json()["marked_read"] == 0
+
+
+async def test_mark_all_read_insert_survives_conflicting_receipt(
+    session, org_a, analyst_a
+):
+    """Unit-level reproduction of the two-writer race `on_conflict_do_nothing`
+    guards against: two overlapping transactions (two `read-all` tabs, or
+    `read-all` racing a `PATCH /{id}`) can both snapshot a notification as
+    unread via the anti-join before either writes a receipt, then collide on
+    `uq_user_notification_read` when both try to insert one. We simulate that
+    stale snapshot directly: capture both notifications as "unread" up front,
+    let a competing writer commit a receipt for one of them, then attempt the
+    insert built from the stale snapshot. Without
+    `.on_conflict_do_nothing(...)` this raises `UniqueViolationError`; with it
+    (Fix 1), the pre-existing receipt is skipped and only the genuinely new
+    row is counted."""
+    n1 = await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="case.created", title="one",
+    )
+    n2 = await notif_crud.create_notification(
+        session, organisation_id=org_a.id, user_id=None,
+        event_type="case.created", title="two",
+    )
+    await session.commit()
+
+    # Snapshot taken while both are still unread (mirrors mark_all_read's
+    # anti-join SELECT before any receipt exists).
+    stale_unread_ids = [n1.id, n2.id]
+
+    # A concurrent writer (another read-all tab, or PATCH /{id}) marks n1 read
+    # and commits before the snapshot's INSERT runs.
+    await notif_crud.set_read_state(session, n1.id, analyst_a.id, datetime.now(UTC))
+    await session.commit()
+
+    now = datetime.now(UTC)
+    stmt = pg_insert(UserNotificationRead).values(
+        [
+            {
+                "id": uuid.uuid4(),
+                "notification_id": nid,
+                "user_id": analyst_a.id,
+                "read_at": now,
+            }
+            for nid in stale_unread_ids
+        ]
+    ).on_conflict_do_nothing(index_elements=["notification_id", "user_id"])
+    result = await session.execute(stmt)
+    await session.flush()
+    await session.commit()
+
+    # Only n2 was actually inserted; n1's pre-existing receipt was skipped
+    # (not errored, and not overwritten by the stale insert).
+    assert result.rowcount == 1
 
 
 async def test_org_wide_read_state_is_per_user(

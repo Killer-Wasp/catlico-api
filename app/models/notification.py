@@ -168,7 +168,7 @@ class UserNotificationRead(SQLModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     notification_id: uuid.UUID = Field(
-        foreign_key="user_notification.id", index=True, ondelete="CASCADE"
+        foreign_key="user_notification.id", ondelete="CASCADE"
     )
     user_id: uuid.UUID = Field(
         foreign_key="user.id", index=True, ondelete="CASCADE"
