@@ -11,6 +11,7 @@ import logging
 import uuid
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import notification as notif_crud
@@ -186,16 +187,28 @@ async def _notify_user(
         logger.warning("targeted routing: invalid user id %r", target_user_id)
         return
 
-    notif = await notif_crud.create_notification(
-        session,
-        organisation_id=org_id,
-        user_id=user_uuid,
-        event_type=event_type,
-        title=title,
-        body=envelope.get("details", {}).get("summary", ""),
-        payload=envelope,
-        outbox_id=outbox_id,
-    )
+    # Isolate the insert in its own savepoint: a mention id is unvalidated user
+    # input (extracted from markdown), and an assignee could be deleted between the
+    # write and the drain — either yields a user_id FK violation. Contained here, a
+    # bad target is skipped; uncontained, it would abort the whole event's fan-out
+    # and poison the outbox row into an infinite retry.
+    try:
+        async with session.begin_nested():
+            notif = await notif_crud.create_notification(
+                session,
+                organisation_id=org_id,
+                user_id=user_uuid,
+                event_type=event_type,
+                title=title,
+                body=envelope.get("details", {}).get("summary", ""),
+                payload=envelope,
+                outbox_id=outbox_id,
+            )
+    except IntegrityError:
+        logger.warning(
+            "targeted routing: no such user %s — skipping notification", target_user_id
+        )
+        return
     if notif is None:
         return  # drain retry — the row (and its original push) already happened
 

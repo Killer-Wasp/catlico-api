@@ -243,6 +243,86 @@ async def test_assign_and_mention_same_user_yields_one_row_assignment_wins(
     assert targeted[0].event_type == "case.assigned"  # assignment ran first
 
 
+async def test_mention_of_nonexistent_user_does_not_poison_fanout(
+    session, org_a, monkeypatch
+):
+    """A mention of a syntactically-valid but NONEXISTENT user id must be skipped
+    (its FK violation caught in an isolated savepoint), not abort the whole
+    event's fan-out — otherwise the outbox row poisons and retries forever.
+    Mentions come from user-controlled markdown and are NOT validated at write
+    time, so a bad/typo'd/since-deleted id is reachable."""
+    ghost = "deadbeef-dead-dead-dead-deaddeaddead"
+    author = "00000000-0000-0000-0000-00000000aaaa"
+    comment = Comment(
+        entity_type=CommentEntityType.case,
+        entity_id="1",
+        message="hi",
+        organisation_id=org_a.id,
+        created_by=author,
+    )
+    session.add(comment)
+    await session.flush()
+    await audit_crud.record_audit(
+        session,
+        action="create",
+        obj=comment,
+        context_type="case",
+        context_id="1",
+        actor=author,
+        details={"mentioned_user_ids": [ghost]},
+        organisation_id=org_a.id,
+    )
+    await session.flush()
+    row = await _latest_outbox(session)
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)  # must NOT raise an FK violation
+
+    result = await session.execute(
+        select(UserNotification).where(UserNotification.organisation_id == org_a.id)
+    )
+    notifs = result.scalars().all()
+    # Org-wide row landed; the ghost mention was skipped (no targeted row).
+    assert len(notifs) == 1
+    assert notifs[0].user_id is None
+
+
+async def test_bad_mention_does_not_lose_valid_assignment_same_event(
+    session, org_a, analyst_a, monkeypatch
+):
+    """One event assigning a REAL user and mentioning a NONEXISTENT one: the
+    valid assignment notification must still land; only the bad mention is
+    skipped. (The exact cross-cutting scenario the final review flagged.)"""
+    ghost = "deadbeef-dead-dead-dead-deaddeaddead"
+    case = Case(title="c", created_by="system")
+    session.add(case)
+    await session.flush()
+    await audit_crud.record_audit(
+        session,
+        action="update",
+        obj=case,
+        context=case,
+        actor="system",
+        details={
+            "assignee_id": [None, str(analyst_a.id)],
+            "mentioned_user_ids": [ghost],
+        },
+        organisation_id=org_a.id,
+    )
+    await session.flush()
+    row = await _latest_outbox(session)
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: AsyncMock())
+
+    await notify_feed_consumer(session, row)  # must NOT raise
+
+    result = await session.execute(
+        select(UserNotification).where(UserNotification.user_id == analyst_a.id)
+    )
+    targeted = result.scalars().all()
+    assert len(targeted) == 1
+    assert targeted[0].event_type == "case.assigned"
+
+
 async def test_comment_mention_end_to_end(session, org_a, analyst_a, monkeypatch):
     """Full path: real mention text through create_comment stamps the id, then the
     feed consumer routes a targeted `comment.mentioned` notification for it."""
