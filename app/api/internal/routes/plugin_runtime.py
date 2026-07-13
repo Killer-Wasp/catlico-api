@@ -658,6 +658,12 @@ async def add_comment(
     principal: PluginRuntime,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
+    """Add a plugin comment to a case. Deliberately a *direct* low-risk write (200,
+    not a 202 proposed action): a comment is an append-only annotation attributed to
+    the plugin actor, not a mutation of analyst-owned canonical state — the same
+    category as ``append_task_log``, which the mutation model also keeps direct.
+    It has no ``PluginProposedAction`` action type by design; the gated canonical
+    edits are case/task/tag/observable patches."""
     _require(principal, "write:case")
     await _case_for_runtime(session, principal, case_id)
 
@@ -723,20 +729,30 @@ async def add_tag(
     return _proposed(action)
 
 
-@router.patch("/observables/{observable_id}")
+@router.patch("/observables/{observable_id}", status_code=status.HTTP_202_ACCEPTED)
 async def patch_observable(
     observable_id: uuid.UUID,
     body: dict,
     principal: PluginRuntime,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
+    """Propose an observable field patch (message/ioc/sighted). Like a case patch,
+    changing an observable's IOC/sighted flags is an analyst-owned canonical edit,
+    so it is not applied directly — an analyst approves the proposed action (or org
+    policy auto-applies, though patch_observable is not low-risk and stays gated)."""
     _require(principal, "write:observable")
-    obs = await _observable_for_runtime(session, principal, observable_id)
-
-    from app.models.observable import ObservableUpdate
-
-    update = ObservableUpdate(
-        **{k: v for k, v in body.items() if k in ("message", "ioc", "sighted")}
+    await _observable_for_runtime(session, principal, observable_id)
+    run = await _run_or_409(session, principal)
+    payload = {k: v for k, v in body.items() if k in ("message", "ioc", "sighted")}
+    action = await ppa_crud.create(
+        session,
+        run=run,
+        action_type="patch_observable",
+        entity_type="observable",
+        entity_id=str(observable_id),
+        payload=payload,
+        fingerprint=_proposal_fingerprint(
+            "patch_observable", "observable", str(observable_id), payload
+        ),
     )
-    await obs_crud.update_observable(session, obs, update, updated_by=principal.actor)
-    return {"ok": True}
+    return _proposed(action)

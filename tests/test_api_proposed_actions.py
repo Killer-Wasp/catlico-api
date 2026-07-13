@@ -243,6 +243,90 @@ async def test_add_related_observable_propose_then_approve_applies(
     assert audit_row["actor"].endswith(f"approved-by user:{analyst_a.id}")
 
 
+async def _propose_observable_patch(client, token, obs_id, body):
+    r = await client.patch(
+        f"{_RUNTIME_PREFIX}/observables/{obs_id}",
+        json=body,
+        headers=_runtime_h(token),
+    )
+    assert r.status_code == 202, r.text
+    return r.json()["proposed_action_id"]
+
+
+async def test_patch_observable_propose_then_approve_applies(
+    client: AsyncClient, org_a, analyst_a, analyst_a_token, runner_secret, admin_token,
+):
+    case_id, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id),
+    )
+    action_id = await _propose_observable_patch(
+        client, token, obs_id, {"ioc": True, "sighted": True, "message": "malicious"}
+    )
+
+    h = _user_h(analyst_a_token, org_a.id)
+    listed = await client.get(
+        f"{_ACTIONS}?entity_type=observable&entity_id={obs_id}", headers=h
+    )
+    assert listed.status_code == 200, listed.text
+    assert any(a["id"] == action_id and a["status"] == "proposed" for a in listed.json())
+
+    approved = await client.post(f"{_ACTIONS}/{action_id}/approve", headers=h)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "applied"
+
+    obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    linked = next(o for o in obs.json()["items"] if o["id"] == str(obs_id))
+    assert linked["ioc"] is True
+    assert linked["sighted"] is True
+    assert linked["message"] == "malicious"
+
+    # Applied under the combined plugin + approving-analyst actor.
+    activity = await client.get(f"/api/v1/cases/{case_id}/activity?limit=50", headers=h)
+    audit_row = next(
+        (a for a in activity.json()["items"] if a["object_id"] == str(obs_id)), None
+    )
+    assert audit_row is not None
+    assert audit_row["actor"].endswith(f"approved-by user:{analyst_a.id}")
+
+
+async def test_patch_observable_requires_write_observable_to_approve(
+    client: AsyncClient, org_a, analyst_a_token, readonly_a_token, runner_secret, admin_token,
+):
+    _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id),
+    )
+    action_id = await _propose_observable_patch(client, token, obs_id, {"ioc": True})
+
+    # A read-only member (no write:observable) cannot approve the patch.
+    denied = await client.post(
+        f"{_ACTIONS}/{action_id}/approve", headers=_user_h(readonly_a_token, org_a.id)
+    )
+    assert denied.status_code == 403, denied.text
+
+
+async def test_patch_observable_never_auto_applies_even_when_opted_in(
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    """patch_observable is not in LOW_RISK_ACTIONS, so it is analyst-gated even if
+    the org (mistakenly) lists it in auto_apply_actions — it stays 'proposed'."""
+    case_id, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
+    await _enable_auto_apply(session, org_a.id, RUNTIME_MANIFEST["id"], ["patch_observable"])
+    run = await session.get(PluginRun, uuid.UUID(run_id))
+
+    action = await ppa_crud.create(
+        session,
+        run=run,
+        action_type="patch_observable",
+        entity_type="observable",
+        entity_id=str(obs_id),
+        payload={"ioc": True},
+    )
+    assert action.status == "proposed"  # not auto-applied
+
+
 async def test_add_related_observable_already_on_case_is_idempotent(
     client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
 ):

@@ -38,6 +38,7 @@ ACTION_TYPES = {
     "add_related_observable",
     "change_severity_status",
     "patch_case_description",
+    "patch_observable",
     "execute_responder_action",
 }
 
@@ -58,6 +59,7 @@ _APPLICABLE = {
     "add_related_observable",
     "change_severity_status",
     "patch_case_description",
+    "patch_observable",
 }
 
 # Low-risk actions an org may opt into auto-applying (no analyst approval). The
@@ -81,6 +83,7 @@ def approve_permission(action_type: str, entity_type: str) -> str:
         "add_related_observable": "write:observable",
         "change_severity_status": "write:case",
         "patch_case_description": "write:case",
+        "patch_observable": "write:observable",
         "execute_responder_action": "write:case",
     }[action_type]
 
@@ -260,6 +263,36 @@ async def _case_in_org_or_404(session: AsyncSession, organisation_id: str, case_
     return case
 
 
+async def _observable_in_org_or_404(
+    session: AsyncSession, organisation_id: str, observable_id: uuid.UUID
+):
+    """Fetch a live observable the org is entitled to *mutate*, else 404.
+
+    Reuses the canonical org-visibility predicate (``_visible_observable_condition``:
+    case the org owns, an observable shared to it, or an alert it owns) — the same
+    rule the org observable list/facets use. This is intentionally the write
+    boundary: a non-owner collaborator on a shared case may *propose* a patch (the
+    runtime read check is looser) but its approval fails here, which is the correct
+    authorization outcome for a mutation of another org's observable.
+    """
+    from app.models.observable import Observable
+
+    obs = await obs_crud.get_observable(session, observable_id)
+    if obs is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Observable not found")
+    visible = (
+        await session.execute(
+            select(Observable.id).where(
+                Observable.id == observable_id,
+                obs_crud._visible_observable_condition(organisation_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if visible is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Observable not found")
+    return obs
+
+
 async def apply(
     session: AsyncSession,
     action: PluginProposedAction,
@@ -311,6 +344,20 @@ async def apply(
             updated_by=actor,
             organisation_id=action.organisation_id,
         )
+        return
+
+    if action_type == "patch_observable":
+        from app.models.observable import ObservableUpdate
+
+        obs = await _observable_in_org_or_404(
+            session, action.organisation_id, uuid.UUID(action.entity_id)
+        )
+        # Only the analyst-meaningful fields a plugin may propose; anything else
+        # in the payload is ignored (the endpoint already filters, this is the
+        # apply-side backstop so a hand-crafted proposal can't reach other columns).
+        allowed = {"message", "ioc", "sighted"}
+        update = ObservableUpdate(**{k: v for k, v in payload.items() if k in allowed})
+        await obs_crud.update_observable(session, obs, update, updated_by=actor)
         return
 
     if action_type == "create_task":

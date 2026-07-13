@@ -919,7 +919,9 @@ async def test_add_tag(
 async def test_patch_observable(
     client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
 ):
-    """Plugin can patch observable metadata."""
+    """A plugin's observable patch is a proposed canonical edit (202), not a
+    direct write — an analyst approves it before the IOC/message change lands.
+    (Full propose->approve->applies coverage lives in test_api_proposed_actions.)"""
     # Create case + observable
     h = {"Authorization": f"Bearer {analyst_a_token}", "X-Organisation-Id": org_a.id}
     r = await client.post(
@@ -943,4 +945,5 @@ async def test_patch_observable(
         json={"ioc": True, "message": "Flagged by plugin"},
         headers=_runtime_h(runtime_token),
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code == 202, r.text
+    assert r.json()["status"] == "proposed"

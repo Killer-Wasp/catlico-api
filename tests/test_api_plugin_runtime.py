@@ -639,7 +639,52 @@ async def test_add_comment(
         json={"message": "Auto-comment from plugin"},
         headers=_runtime_h(runtime_token),
     )
+    # A comment is a direct low-risk annotation (200), not a proposed action.
     assert r.status_code == 200, r.text
+
+
+async def test_patch_observable_is_proposed_not_applied(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    case_id, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    runtime_token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id),
+    )
+
+    r = await client.patch(
+        f"{_RUNTIME_PREFIX}/observables/{obs_id}",
+        json={"ioc": True, "sighted": True, "message": "flagged by plugin"},
+        headers=_runtime_h(runtime_token),
+    )
+    # Observable IOC/sighted/message edits are proposed, not applied directly.
+    assert r.status_code == 202, r.text
+    assert r.json()["status"] == "proposed"
+    assert r.json()["proposed_action_id"]
+
+    # The observable is unchanged until an analyst approves the proposal.
+    h = {"Authorization": f"Bearer {analyst_a_token}", "X-Organisation-Id": org_a.id}
+    obs = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    linked = next(o for o in obs.json()["items"] if o["id"] == str(obs_id))
+    assert linked["ioc"] is False
+    assert linked["sighted"] is False
+
+
+async def test_runtime_permission_required_for_observable_patch(
+    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token,
+):
+    _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
+    manifest = {**RUNTIME_MANIFEST, "permissions": ["read:observable"]}
+    runtime_token = await _runtime_token_for(
+        client, runner_secret, admin_token, org_a.id,
+        manifest=manifest, event_object_id=str(obs_id),
+    )
+
+    r = await client.patch(
+        f"{_RUNTIME_PREFIX}/observables/{obs_id}",
+        json={"ioc": True},
+        headers=_runtime_h(runtime_token),
+    )
+    assert r.status_code == 403
 
 
 async def test_runtime_token_cannot_read_another_org_case(
