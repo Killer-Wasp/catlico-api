@@ -2,7 +2,9 @@
 
 One query per entity type, each reusing that type's existing visibility
 predicate — search must never return a row the corresponding list view would
-hide. Spec: docs/global-search-design.md (catlico workspace root).
+hide. Covers cases, alerts, observables, tasks, comments, knowledge-base pages,
+and attachment filenames. Spec: docs/global-search-design.md (catlico workspace
+root).
 """
 
 import ipaddress
@@ -19,11 +21,22 @@ from app.crud import user as user_crud
 from app.crud.observable import _visible_observable_condition
 from app.crud.task import _visible_task_condition
 from app.models.alert import Alert
+from app.models.attachment import AttachmentLink
 from app.models.case_ import Case
 from app.models.case_share import CaseShare
 from app.models.comment import Comment, CommentEntityType, _display_name_from_email
+from app.models.knowledge_base import KnowledgeBasePage
 from app.models.observable import Observable
-from app.models.search import AlertHit, CaseHit, CommentHit, ObservableGroupHit, ObservableHit, TaskHit
+from app.models.search import (
+    AlertHit,
+    AttachmentHit,
+    CaseHit,
+    CommentHit,
+    KnowledgeBaseHit,
+    ObservableGroupHit,
+    ObservableHit,
+    TaskHit,
+)
 from app.models.task import Task
 from app.util.ids import format_task_id
 
@@ -407,3 +420,98 @@ async def search_observables(
         for o in rows
     ]
     return hits, [], total
+
+
+async def search_knowledge_base(
+    session: AsyncSession, organisation_id: str, q: str, *, skip: int = 0, limit: int = 10
+) -> tuple[list[KnowledgeBaseHit], int]:
+    """KB pages the org owns, matched on title + summary + body. Pages have no
+    stored tsvector (unlike cases/alerts), so the document is assembled and
+    tokenised inline — same FTS semantics (prefix-while-typing, word matching)
+    as the other text buckets, without a migration. Caller gates on
+    read:knowledge_base before invoking."""
+    tsq = prefix_tsquery(q)
+    doc = (
+        KnowledgeBasePage.title
+        + " "
+        + func.coalesce(KnowledgeBasePage.summary, "")
+        + " "
+        + func.coalesce(KnowledgeBasePage.content, "")
+    )
+    tsv = func.to_tsvector("simple", doc)
+    base = select(KnowledgeBasePage).where(
+        KnowledgeBasePage.organisation_id == organisation_id,
+        KnowledgeBasePage.deleted_at.is_(None),
+        tsv.op("@@")(tsq),
+    )
+    total = (
+        await session.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    rows = (
+        await session.execute(
+            base.add_columns(_headline(doc, tsq))
+            .order_by(
+                func.ts_rank(tsv, tsq).desc(),
+                func.coalesce(
+                    KnowledgeBasePage.updated_at, KnowledgeBasePage.created_at
+                ).desc(),
+                KnowledgeBasePage.id.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+    ).all()
+    hits = [
+        KnowledgeBaseHit(id=page.id, title=page.title, snippet=snippet)
+        for page, snippet in rows
+    ]
+    return hits, total
+
+
+async def search_attachments(
+    session: AsyncSession, organisation_id: str, q: str, *, skip: int = 0, limit: int = 10
+) -> tuple[list[AttachmentHit], int]:
+    """Case-bound attachments whose filename matches, scoped to cases the org can
+    see. Filenames aren't natural language, so match is a substring ILIKE (not
+    FTS). Visibility reuses the case bucket's ANY-share predicate: if the org can
+    see the parent case, it can see the file — so a soft-deleted case, or one the
+    org holds no CaseShare on, drops out."""
+    pattern = like_pattern(q)
+    visible_case_ids = select(CaseShare.case_id).where(
+        CaseShare.organisation_id == organisation_id
+    )
+    base = (
+        select(AttachmentLink)
+        .join(Case, Case.id == AttachmentLink.case_id)
+        .where(
+            AttachmentLink.deleted_at.is_(None),
+            Case.deleted_at.is_(None),
+            AttachmentLink.case_id.in_(visible_case_ids),
+            AttachmentLink.name.ilike(pattern, escape="\\"),
+        )
+    )
+    total = (
+        await session.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    rows = (
+        await session.execute(
+            base.order_by(
+                AttachmentLink.created_at.desc(),
+                AttachmentLink.case_id.desc(),
+                AttachmentLink.id.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+    ).scalars()
+    hits = [
+        AttachmentHit(
+            id=link.id,
+            public_id=link.public_id,
+            case_id=link.case_id,
+            attachment_id=link.attachment_id,
+            name=link.name,
+        )
+        for link in rows
+    ]
+    return hits, total

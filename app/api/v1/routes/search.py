@@ -1,8 +1,9 @@
 """Global search: GET /api/v1/search.
 
-Federated Postgres search across cases, alerts, observables, tasks, comments —
-one query per entity type, each reusing that type's existing visibility
-predicate. Spec: docs/global-search-design.md (catlico workspace root).
+Federated Postgres search across cases, alerts, observables, tasks, comments,
+knowledge-base pages, and attachment filenames — one query per entity type,
+each reusing that type's existing visibility predicate. Spec:
+docs/global-search-design.md (catlico workspace root).
 """
 
 from typing import Annotated, Literal
@@ -17,7 +18,9 @@ from app.models.search import SearchCounts, SearchResponse, SearchResults
 
 router = APIRouter(tags=["search"])
 
-SearchType = Literal["case", "alert", "observable", "task", "comment"]
+SearchType = Literal[
+    "case", "alert", "observable", "task", "comment", "knowledge_base", "attachment"
+]
 
 
 @router.get("/search", response_model=SearchResponse)
@@ -41,7 +44,18 @@ async def global_search(
     if len(query) < 2:
         return SearchResponse(counts=counts, results=results)
 
-    wanted = set(types or ["case", "alert", "observable", "task", "comment"])
+    wanted = set(
+        types
+        or [
+            "case",
+            "alert",
+            "observable",
+            "task",
+            "comment",
+            "knowledge_base",
+            "attachment",
+        ]
+    )
     org = ctx.organisation_id
 
     if "case" in wanted:
@@ -67,5 +81,18 @@ async def global_search(
             counts.observable,
         ) = await search_crud.search_observables(
             session, org, query, skip=offset, limit=limit, group=group_observables
+        )
+    # KB pages are permission-gated (mirrors the KB routes' read:knowledge_base
+    # guard). Rather than 403 the whole federated search, a caller lacking the
+    # permission just gets an empty KB bucket.
+    if "knowledge_base" in wanted and "read:knowledge_base" in ctx.permissions:
+        results.knowledge_base, counts.knowledge_base = (
+            await search_crud.search_knowledge_base(
+                session, org, query, skip=offset, limit=limit
+            )
+        )
+    if "attachment" in wanted:
+        results.attachment, counts.attachment = await search_crud.search_attachments(
+            session, org, query, skip=offset, limit=limit
         )
     return SearchResponse(counts=counts, results=results)

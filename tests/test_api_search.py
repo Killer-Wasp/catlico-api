@@ -4,19 +4,30 @@ Federated Postgres search across cases, alerts, observables, tasks, comments.
 Spec: docs/global-search-design.md (catlico workspace root)."""
 
 import uuid
+from datetime import UTC, datetime
 
 from httpx import AsyncClient
 
+from app.core.security import TokenPayload, create_access_token
 from app.crud import alert as alert_crud
+from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
 from app.crud import comment as comment_crud
+from app.crud import knowledge_base as kb_crud
 from app.crud import observable as obs_crud
 from app.crud import task as task_crud
+from app.crud.organisation_member import add_member
+from app.crud.role import create_role
+from app.crud.user import create_user
 from app.models.alert import AlertCreate
 from app.models.case_ import CaseCreate
 from app.models.comment import CommentCreate, CommentEntityType
+from app.models.knowledge_base import KnowledgeBasePageCreate
 from app.models.observable import ObservableCreate
+from app.models.organisation_member import OrganisationMemberCreate
+from app.models.role import Permission, RoleCreate
 from app.models.task import TaskCreate
+from app.models.user import UserCreate
 
 
 def _headers(token, org):
@@ -171,7 +182,10 @@ class TestSearchCases:
     async def test_short_query_returns_empty_shape(self, client: AsyncClient, org_a, admin_token, admin_user):
         r = await client.get("/api/v1/search", params={"q": "a"}, headers=_headers(admin_token, org_a))
         assert r.status_code == 200
-        assert r.json()["counts"] == {"case": 0, "alert": 0, "observable": 0, "task": 0, "comment": 0}
+        assert r.json()["counts"] == {
+            "case": 0, "alert": 0, "observable": 0, "task": 0, "comment": 0,
+            "knowledge_base": 0, "attachment": 0,
+        }
 
     async def test_long_query_422(self, client: AsyncClient, org_a, admin_token, admin_user):
         r = await client.get("/api/v1/search", params={"q": "x" * 201}, headers=_headers(admin_token, org_a))
@@ -353,6 +367,7 @@ class TestSearchVisibility:
             # tells org_b that org_a has a matching row.
             assert body["counts"] == {
                 "case": 0, "alert": 0, "observable": 0, "task": 0, "comment": 0,
+                "knowledge_base": 0, "attachment": 0,
             }, f"leak for query {q!r}: {body['counts']}"
             assert body["results"]["observable_groups"] == [], f"group leak for {q!r}"
 
@@ -543,3 +558,165 @@ class TestSearchVisibility:
         assert body["counts"]["comment"] == 0
         r = await client.get("/api/v1/search", params={"q": "10.4.4.4"}, headers=_headers(admin_token, org_a))
         assert r.json()["counts"]["observable"] == 0
+
+
+async def _seed_kb_page(session, org, actor, *, title, content="", summary=""):
+    return await kb_crud.create_page(
+        session,
+        KnowledgeBasePageCreate(title=title, content=content, summary=summary),
+        organisation_id=org.id,
+        actor=actor,
+    )
+
+
+async def _seed_attachment(session, case, org, created_by, *, name):
+    blob = await attachment_crud.get_or_create_blob(
+        session,
+        sha256=uuid.uuid4().hex,
+        size=1,
+        content_type="application/octet-stream",
+        created_by=str(created_by),
+    )
+    return await attachment_crud.create_link(
+        session,
+        attachment_id=blob.id,
+        case_id=case.id,
+        name=name,
+        organisation_id=org.id,
+        created_by=str(created_by),
+    )
+
+
+class TestSearchKnowledgeBase:
+    async def test_title_match_and_shape(self, client: AsyncClient, session, org_a, admin_user, admin_token):
+        page = await _seed_kb_page(session, org_a, admin_user, title="Phishing triage runbook")
+        await _seed_kb_page(session, org_a, admin_user, title="Malware handling guide")
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_a))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["counts"]["knowledge_base"] == 1
+        [hit] = body["results"]["knowledge_base"]
+        assert hit["id"] == page.id
+        assert hit["title"] == "Phishing triage runbook"
+
+    async def test_body_match(self, client: AsyncClient, session, org_a, admin_user, admin_token):
+        await _seed_kb_page(
+            session, org_a, admin_user,
+            title="Generic runbook", content="Step one: isolate the beaconing host.",
+        )
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "beaconing"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["knowledge_base"] == 1
+
+    async def test_other_org_page_not_visible(self, client: AsyncClient, session, org_a, org_b, admin_user, admin_token):
+        await _seed_kb_page(session, org_a, admin_user, title="secret phishing runbook")
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_b))
+        assert r.json()["counts"]["knowledge_base"] == 0
+
+    async def test_soft_deleted_page_excluded(self, client: AsyncClient, session, org_a, admin_user, admin_token):
+        page = await _seed_kb_page(session, org_a, admin_user, title="doomed phishing runbook")
+        await session.commit()
+        await kb_crud.delete_page(session, page, deleted_by=str(admin_user.id))
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["knowledge_base"] == 0
+
+    async def test_permission_gated(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        """A user lacking read:knowledge_base gets no KB results (the bucket is
+        silently omitted, not a 403 for the whole search)."""
+        await _seed_kb_page(session, org_a, admin_user, title="phishing runbook")
+        # A member whose role holds only the investigation group — no read_intel,
+        # so no read:knowledge_base.
+        role = await create_role(
+            session,
+            RoleCreate(name="no-kb", permissions=[Permission.read_investigation]),
+            organisation_id=org_a.id,
+            created_by=str(admin_user.id),
+        )
+        user = await create_user(
+            session,
+            UserCreate(first_name="No", last_name="KB", email="no-kb@test.com", password="password123"),
+        )
+        await add_member(
+            session, org_a.id,
+            OrganisationMemberCreate(user_id=user.id, role_id=role.id),
+            created_by=str(admin_user.id),
+        )
+        await session.commit()
+        token = create_access_token(
+            TokenPayload(user_id=user.id, is_superadmin=False, organisations=[org_a.id])
+        )
+
+        # Sanity: the superadmin (who holds every capability) does see it.
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["knowledge_base"] == 1
+
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(token, org_a))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["counts"]["knowledge_base"] == 0
+        assert body["results"]["knowledge_base"] == []
+
+
+class TestSearchAttachments:
+    async def test_filename_match_and_shape(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="infra case")
+        link = await _seed_attachment(session, case, org_a, admin_user.id, name="phishing-email.eml")
+        await _seed_attachment(session, case, org_a, admin_user.id, name="unrelated.pdf")
+        await session.commit()
+
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_a))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["counts"]["attachment"] == 1
+        [hit] = body["results"]["attachment"]
+        assert hit["name"] == "phishing-email.eml"
+        assert hit["case_id"] == case.id
+        assert hit["id"] == link.id
+        assert hit["public_id"] == f"A-{case.id}-{link.id}"
+
+    async def test_substring_filename_match(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="c")
+        await _seed_attachment(session, case, org_a, admin_user.id, name="report_zebra_final.docx")
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "zebra"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["attachment"] == 1
+
+    async def test_attachment_on_invisible_case_hidden(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token):
+        # org_a owns the case; org_b has no share, so it must not see the file.
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="private case")
+        await _seed_attachment(session, case, org_a, admin_user.id, name="phishing-secret.eml")
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_b))
+        assert r.json()["counts"]["attachment"] == 0
+
+    async def test_attachment_on_shared_case_visible_to_recipient(self, client: AsyncClient, session, org_a, org_b, builtin_roles, admin_user, admin_token):
+        # Attachments ride the case's ANY-share visibility (same predicate as the
+        # case bucket): a non-owner share exposes the case's files.
+        from app.models.case_share import CaseShare
+
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="jointly worked case")
+        await _seed_attachment(session, case, org_a, admin_user.id, name="phishing-shared.eml")
+        session.add(CaseShare(
+            case_id=case.id,
+            organisation_id=org_b.id,
+            is_owner=False,
+            role_id=builtin_roles["analyst"].id,
+            created_by=str(admin_user.id),
+        ))
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_b))
+        assert r.json()["counts"]["attachment"] == 1
+
+    async def test_soft_deleted_attachment_excluded(self, client: AsyncClient, session, org_a, builtin_roles, admin_user, admin_token):
+        case = await _seed_case(session, org_a, builtin_roles, admin_user.id, title="c")
+        link = await _seed_attachment(session, case, org_a, admin_user.id, name="phishing-doomed.eml")
+        await session.commit()
+        link.deleted_at = datetime.now(UTC)
+        session.add(link)
+        await session.commit()
+        r = await client.get("/api/v1/search", params={"q": "phishing"}, headers=_headers(admin_token, org_a))
+        assert r.json()["counts"]["attachment"] == 0
