@@ -38,6 +38,10 @@ class ReportTemplatePublic(SQLModel):
     id: uuid.UUID
     name: str
     description: str
+    # Templates aren't secret and this list is admin-adjacent, so the body rides
+    # the public shape — a management UI needs it to load a template for editing.
+    content_md: str
+    config: dict
     organisation_id: str
     created_at: datetime
     updated_at: datetime | None
