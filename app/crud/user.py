@@ -1,13 +1,21 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.configs import settings
 from app.core.security import get_password_hash, verify_password
 from app.models.organisation_member import OrganisationMember
 from app.models.user import User, UserCreate, UserUpdate
+
+
+# Precomputed hash used to equalize timing on the login failure paths: every
+# failure mode (unknown email, passwordless/SSO account, locked account, wrong
+# password) runs one bcrypt verify, so an unknown email cannot be distinguished
+# from a known one by response time (no enumeration oracle).
+_DUMMY_PASSWORD_HASH = get_password_hash("catlico-dummy-password")
 
 
 def _normalize_email(email: str) -> str:
@@ -134,15 +142,80 @@ async def delete_user(session: AsyncSession, db_user: User) -> None:
     await session.commit()
 
 
+async def clear_lockout(session: AsyncSession, db_user: User) -> User:
+    """Reset a user's failed-login counter and unlock them. Used by the superadmin
+    user-admin path (re-activating / setting a password unlocks the account)."""
+    db_user.failed_login_count = 0
+    db_user.locked_until = None
+    session.add(db_user)
+    await session.flush()
+    return db_user
+
+
 async def authenticate_user(
     session: AsyncSession, email: str, password: str
 ) -> User | None:
+    """Verify local-password credentials, applying account lockout.
+
+    Returns the user on success (resetting any accumulated failures) and None on
+    every failure mode — unknown email, passwordless/SSO account, wrong password,
+    or a currently-locked account. All failure modes return None so the caller's
+    401 is identical and cannot be used to enumerate accounts or detect a lock;
+    the real reason is only recorded in the audit log.
+
+    Side effects on failure are committed here (not left to the request's
+    unit-of-work) because the login route raises a 401, which would otherwise roll
+    the failed-attempt increment back.
+    """
+    from app.crud.audit import record_audit
+
     user = await get_user_by_email(session, email)
+    # Anti-enumeration: an unknown email or an account with no local password
+    # (SSO/passwordless) is never tracked, locked, or created — just a generic fail.
+    # Run one bcrypt verify against a dummy hash so this path costs the same as a
+    # wrong-password path: an unknown email is not distinguishable by timing.
     if not user or not user.hashed_password:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
         return None
+
+    now = datetime.now(UTC)
+    # A currently-locked account is rejected BEFORE the real password is evaluated,
+    # and indistinguishably from a wrong password — in body AND timing (the dummy
+    # verify keeps the bcrypt cost identical to the wrong-password branch).
+    locked_until = user.locked_until
+    if locked_until is not None:
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=UTC)
+        if locked_until > now:
+            verify_password(password, _DUMMY_PASSWORD_HASH)
+            return None
+
     if not verify_password(password, user.hashed_password):
+        user.failed_login_count += 1
+        if user.failed_login_count >= settings.LOGIN_MAX_ATTEMPTS:
+            # Lock the account and reset the counter so the next window (after the
+            # lock expires) starts fresh.
+            user.locked_until = now + timedelta(minutes=settings.LOGIN_LOCKOUT_MINUTES)
+            user.failed_login_count = 0
+            await record_audit(
+                session,
+                action="user.locked",
+                obj=user,
+                actor="system",
+                details={
+                    "event": "account_locked",
+                    "locked_until": user.locked_until.isoformat(),
+                    "lockout_minutes": settings.LOGIN_LOCKOUT_MINUTES,
+                },
+            )
+        session.add(user)
+        await session.commit()
         return None
-    user.last_login_at = datetime.now(UTC)
+
+    # Success: clear any accumulated failures / lock and stamp the login.
+    user.failed_login_count = 0
+    user.locked_until = None
+    user.last_login_at = now
     session.add(user)
     await session.commit()
     await session.refresh(user)

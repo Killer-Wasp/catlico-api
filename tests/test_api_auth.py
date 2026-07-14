@@ -1,11 +1,14 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
 from app.core.security import decode_refresh_token
-from app.crud.user import create_user, update_user
+from app.crud.user import create_user, get_user_by_email, update_user
+from app.models.audit import Audit
 from app.models.auth import RefreshToken
-from app.models.user import UserCreate, UserUpdate
+from app.models.user import User, UserCreate, UserUpdate
 
 CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
 
@@ -493,3 +496,226 @@ async def test_sessions_isolated_per_user(
     assert len(cross) == 1
     assert cross[0]["user_agent"] == "Admin-Browser"
     assert cross[0]["is_current"] is False
+
+
+# --- Account lockout after repeated failed logins (phase-3 §3.2) ---
+
+
+async def _wrong_login(client: AsyncClient, email: str = "admin@test.com"):
+    return await client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "definitely-wrong"},
+    )
+
+
+async def _correct_login(client: AsyncClient, email: str = "admin@test.com"):
+    return await client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "password123"},
+    )
+
+
+async def test_login_locks_after_max_attempts(
+    client: AsyncClient, session, admin_user, monkeypatch
+):
+    """The Nth consecutive failed attempt locks the account: locked_until is set
+    and the counter resets to 0 so the next window starts fresh."""
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "LOGIN_MAX_ATTEMPTS", 3)
+
+    # First (MAX - 1) failures increment but do not lock.
+    for expected in (1, 2):
+        r = await _wrong_login(client)
+        assert r.status_code == 401
+        await session.refresh(admin_user)
+        assert admin_user.failed_login_count == expected
+        assert admin_user.locked_until is None
+
+    # The 3rd failure locks the account and resets the counter.
+    r = await _wrong_login(client)
+    assert r.status_code == 401
+    await session.refresh(admin_user)
+    assert admin_user.failed_login_count == 0
+    assert admin_user.locked_until is not None
+    assert admin_user.locked_until > datetime.now(UTC)
+
+    # Even the correct password is now rejected while locked.
+    r = await _correct_login(client)
+    assert r.status_code == 401
+
+
+async def test_locked_account_response_identical_to_bad_password(
+    client: AsyncClient, session, admin_user, viewer_user, monkeypatch
+):
+    """A locked account's rejection must be byte-identical to an ordinary
+    wrong-password rejection (no account-locked oracle)."""
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "LOGIN_MAX_ATTEMPTS", 3)
+
+    # Baseline: an ordinary wrong password on an unlocked account.
+    bad = await _wrong_login(client, email="viewer@test.com")
+    assert bad.status_code == 401
+
+    # Lock the admin, then present the CORRECT password -> still rejected.
+    for _ in range(3):
+        await _wrong_login(client)
+    locked = await _correct_login(client)
+
+    assert locked.status_code == bad.status_code == 401
+    assert locked.json() == bad.json()
+    assert locked.content == bad.content
+
+
+async def test_successful_login_resets_counter(
+    client: AsyncClient, session, admin_user, monkeypatch
+):
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "LOGIN_MAX_ATTEMPTS", 5)
+
+    for _ in range(2):
+        await _wrong_login(client)
+    await session.refresh(admin_user)
+    assert admin_user.failed_login_count == 2
+
+    r = await _correct_login(client)
+    assert r.status_code == 200
+    await session.refresh(admin_user)
+    assert admin_user.failed_login_count == 0
+    assert admin_user.locked_until is None
+
+
+async def test_nonexistent_email_generic_401_and_no_row(
+    client: AsyncClient, session, admin_user
+):
+    """An unknown email 401s with the same body as a wrong password and never
+    creates a user row (no enumeration / no accidental tracking)."""
+    bad = await _wrong_login(client)
+    assert bad.status_code == 401
+
+    unknown = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "ghost@test.com", "password": "definitely-wrong"},
+    )
+    assert unknown.status_code == 401
+    assert unknown.json() == bad.json()
+    assert unknown.content == bad.content
+
+    # No row was created for the unknown email.
+    assert await get_user_by_email(session, "ghost@test.com") is None
+
+
+async def test_lock_expires_allows_login(
+    client: AsyncClient, session, admin_user
+):
+    """Once locked_until is in the past, login works again."""
+    admin_user.locked_until = datetime.now(UTC) - timedelta(minutes=1)
+    admin_user.failed_login_count = 0
+    session.add(admin_user)
+    await session.commit()
+
+    r = await _correct_login(client)
+    assert r.status_code == 200
+
+
+async def test_superadmin_unlock_clears_lock(
+    client: AsyncClient, session, admin_user, admin_token, viewer_user, monkeypatch
+):
+    """A superadmin re-activating the user via PATCH /users/{id} clears the
+    lockout state, and the user can log in again."""
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "LOGIN_MAX_ATTEMPTS", 3)
+
+    for _ in range(3):
+        await _wrong_login(client, email="viewer@test.com")
+    await session.refresh(viewer_user)
+    assert viewer_user.locked_until is not None
+
+    r = await client.patch(
+        f"/api/v1/users/{viewer_user.id}",
+        json={"is_active": True},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 200, r.text
+
+    await session.refresh(viewer_user)
+    assert viewer_user.failed_login_count == 0
+    assert viewer_user.locked_until is None
+
+    ok = await _correct_login(client, email="viewer@test.com")
+    assert ok.status_code == 200
+
+
+async def test_user_locked_audit_event_recorded(
+    client: AsyncClient, session, admin_user, monkeypatch
+):
+    from app.core.configs import settings
+
+    monkeypatch.setattr(settings, "LOGIN_MAX_ATTEMPTS", 3)
+
+    for _ in range(3):
+        await _wrong_login(client)
+
+    rows = (
+        (
+            await session.execute(
+                select(Audit).where(
+                    Audit.object_type == "user",
+                    Audit.object_id == str(admin_user.id),
+                    Audit.action == "user.locked",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+
+
+async def test_unknown_email_pays_bcrypt_cost(session, monkeypatch):
+    """Anti-enumeration (timing): the no-user path runs one bcrypt verify against
+    the dummy hash, so an unknown email costs the same as a wrong password."""
+    import app.crud.user as user_crud
+
+    calls = []
+    real_verify = user_crud.verify_password
+
+    def spy(password, hashed):
+        calls.append((password, hashed))
+        return real_verify(password, hashed)
+
+    monkeypatch.setattr(user_crud, "verify_password", spy)
+
+    result = await user_crud.authenticate_user(session, "ghost@test.com", "whatever")
+    assert result is None
+    assert len(calls) == 1
+    assert calls[0] == ("whatever", user_crud._DUMMY_PASSWORD_HASH)
+
+
+async def test_locked_account_pays_bcrypt_cost(session, admin_user, monkeypatch):
+    """The locked-account path also runs one dummy-hash verify (never the user's
+    real hash), equalizing timing with the wrong-password path."""
+    import app.crud.user as user_crud
+
+    admin_user.locked_until = datetime.now(UTC) + timedelta(minutes=15)
+    session.add(admin_user)
+    await session.commit()
+
+    calls = []
+    real_verify = user_crud.verify_password
+
+    def spy(password, hashed):
+        calls.append((password, hashed))
+        return real_verify(password, hashed)
+
+    monkeypatch.setattr(user_crud, "verify_password", spy)
+
+    result = await user_crud.authenticate_user(session, "admin@test.com", "password123")
+    assert result is None
+    assert len(calls) == 1
+    # The real (correct) password must NOT be checked against the real hash while
+    # locked — only the dummy hash is verified.
+    assert calls[0] == ("password123", user_crud._DUMMY_PASSWORD_HASH)

@@ -260,6 +260,11 @@ async def update_user(
         # An admin-set password revokes the user's sessions just like a
         # self-service change or reset would.
         await delete_all_refresh_tokens(session, user.id)
+    # Unlock affordance: re-activating the user or setting a new password clears
+    # any local-login lockout (failed_login_count + locked_until). This is the
+    # superadmin "unlock" — it rides the existing user-admin PATCH.
+    if user_in.is_active is True or user_in.password is not None:
+        await user_crud.clear_lockout(session, user)
     await record_audit(
         session,
         action="update",

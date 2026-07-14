@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     PASSWORD_RESET_PATH: str = "/reset-password"
     PASSWORD_RESET_THROTTLE_SECONDS: int = 300
 
+    # Local-password account lockout: after LOGIN_MAX_ATTEMPTS consecutive failed
+    # password attempts the account is locked for LOGIN_LOCKOUT_MINUTES.
+    LOGIN_MAX_ATTEMPTS: int = 10
+    LOGIN_LOCKOUT_MINUTES: int = 15
+
     # Plugin runner engine.
     # Legacy shared secret kept only as a deprecated config knob while the
     # enrollment flow rolls out. Internal plugin-runner endpoints authenticate

@@ -26,6 +26,12 @@ class User(UserBase, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = Field(default=None)
     last_login_at: datetime | None = Field(default=None)
+    # Local-password brute-force throttle (OSS-core account lockout). Counts
+    # consecutive failed password attempts; when it reaches LOGIN_MAX_ATTEMPTS the
+    # account is locked until `locked_until` and the counter resets. Both are
+    # cleared on a successful login (and by a superadmin re-activating the user).
+    failed_login_count: int = Field(default=0, nullable=False)
+    locked_until: datetime | None = Field(default=None)
 
     @property
     def has_avatar(self) -> bool:
