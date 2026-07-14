@@ -6,7 +6,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.crypto import encrypt_secrets
+from app.core.crypto import decrypt_secrets, encrypt_secrets
 from app.crud.pagination import paginate
 from app.models.common import utcnow
 from app.models.notification import (
@@ -47,6 +47,19 @@ async def list_notifiers(
     return await paginate(session, base, Notifier.created_at.desc(), skip=skip, limit=limit)
 
 
+def _merge_secrets(existing_blob: str | None, incoming: dict) -> str | None:
+    """Apply the secret-write contract onto the stored set (mirrors plugin config
+    secrets): absent key keeps, string replaces, ``None`` deletes. Merging rather
+    than overwriting means a single-field update can't silently drop the others."""
+    merged = decrypt_secrets(existing_blob)
+    for key, value in incoming.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return encrypt_secrets(merged)
+
+
 async def create_notifier(
     session: AsyncSession,
     notifier_in: NotifierCreate,
@@ -54,13 +67,22 @@ async def create_notifier(
     organisation_id: str,
     created_by: str,
 ) -> Notifier:
+    from app.services.net_guard import derive_label
+
+    secrets = dict(notifier_in.secrets)
+    # `target` is a display label; if the client didn't supply one, derive it from
+    # the (secret) destination URL so it never carries the secret path tail.
+    target = notifier_in.target
+    url = secrets.get("url")
+    if not target and url:
+        target = derive_label(url)
     notifier = Notifier(
         id=uuid.uuid4(),
         organisation_id=organisation_id,
         type=notifier_in.type,
-        target=notifier_in.target,
+        target=target,
         config=notifier_in.config,
-        secrets_encrypted=encrypt_secrets(notifier_in.secrets),
+        secrets_encrypted=encrypt_secrets(secrets),
         enabled=notifier_in.enabled,
         created_by=created_by,
     )
@@ -75,10 +97,18 @@ async def update_notifier(
     notifier_in: NotifierUpdate,
     updated_by: str,
 ) -> Notifier:
+    from app.services.net_guard import derive_label
+
     update_data = notifier_in.model_dump(exclude_unset=True)
-    # ponytail: encrypt secrets on update; settings-only updates preserve existing encrypted blob
     if "secrets" in update_data:
-        update_data["secrets_encrypted"] = encrypt_secrets(update_data.pop("secrets"))
+        incoming = update_data.pop("secrets") or {}
+        update_data["secrets_encrypted"] = _merge_secrets(
+            notifier.secrets_encrypted, incoming
+        )
+        # Re-derive the display label when the destination URL changes, unless the
+        # caller explicitly set a target of their own in the same request.
+        if "url" in incoming and incoming["url"] and "target" not in update_data:
+            update_data["target"] = derive_label(incoming["url"])
     for k, v in update_data.items():
         setattr(notifier, k, v)
     notifier.updated_by = updated_by

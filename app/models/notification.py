@@ -16,10 +16,13 @@ class NotifierType(str, Enum):
 
 
 class Notifier(TimestampMixin, table=True):
-    """An org-scoped delivery channel. `target` is the channel/address/url/topic
-    (e.g. `#soc-alerts`); channel-specific extras live in `config`. Any secret
-    (bot token, webhook signing secret) is encrypted into `secrets_encrypted`
-    and never returned — mirrors `ConnectorSecret`."""
+    """An org-scoped delivery channel. `target` is a non-sensitive DISPLAY LABEL
+    (e.g. `#soc-alerts`, or `hooks.slack.com/services/…` derived from the URL);
+    channel-specific extras live in `config`. The real destination URL and any
+    secret (bot token, webhook signing secret) are encrypted into
+    `secrets_encrypted` under keys `url` / `signing_secret` and never returned —
+    mirrors `ConnectorSecret`. Webhook/Slack senders read the URL from
+    `secrets_encrypted["url"]`, not `target`."""
 
     __tablename__ = "notifier"
 
@@ -57,9 +60,11 @@ class NotificationRule(TimestampMixin, table=True):
 
 class NotifierCreate(SQLModel):
     type: NotifierType
-    target: str = ""
+    target: str = ""  # display label; auto-derived from secrets["url"] if omitted
     config: dict = {}
-    secrets: dict = {}  # write-only; encrypted at rest, never returned
+    # write-only, encrypted at rest, never returned. For webhook/slack the
+    # destination goes here as `url`; optional webhook `signing_secret`.
+    secrets: dict = {}
     enabled: bool = True
 
 

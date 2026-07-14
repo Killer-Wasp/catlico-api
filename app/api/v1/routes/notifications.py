@@ -24,6 +24,7 @@ from app.models.notification import (
     UserNotificationPublic,
     UserNotificationUpdate,
 )
+from app.services.net_guard import SsrfError, validate_url_shallow
 from app.services.notification_catalog import (
     NOTIFICATION_EVENT_CATALOG,
     catalog_event_types,
@@ -37,6 +38,22 @@ def _ensure_org_admin(ctx: ActiveOrgContext) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Organisation admin required"
         )
+
+
+def _validate_secret_url(secrets: dict | None) -> None:
+    """Early, DNS-free feedback on a destination URL at create/update time. The
+    authoritative resolve-and-deny still runs at send time (DNS can change)."""
+    if not secrets:
+        return
+    url = secrets.get("url")
+    if not url:
+        return
+    try:
+        validate_url_shallow(url)
+    except SsrfError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
 
 # --- Notifiers ---
@@ -84,6 +101,7 @@ async def create_notifier(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> NotifierPublic:
     _ensure_org_admin(ctx)
+    _validate_secret_url(notifier_in.secrets)
     notifier = await notif_crud.create_notifier(
         session,
         notifier_in,
@@ -101,6 +119,7 @@ async def update_notifier(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> NotifierPublic:
     _ensure_org_admin(ctx)
+    _validate_secret_url(notifier_in.secrets)
     notifier = await notif_crud.get_notifier(session, notifier_id, ctx.organisation_id)
     if not notifier:
         raise HTTPException(

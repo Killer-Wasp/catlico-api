@@ -6,6 +6,9 @@ enabled notification rules, and matching notifiers fire exactly once per event.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -14,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crypto import decrypt_secrets
 from app.models.audit import AuditOutbox
 from app.models.notification import (
     Notifier,
@@ -21,6 +25,7 @@ from app.models.notification import (
     NotifierType,
     NotificationRule,
 )
+from app.services.net_guard import guarded_post
 from app.services.outbox_events import build_event_envelope
 
 logger = logging.getLogger(__name__)
@@ -50,32 +55,45 @@ async def _get_or_create_delivery(
     return result.scalar_one()
 
 
+def _destination_url(notifier: Notifier) -> str:
+    """The real delivery URL, read from the encrypted secrets blob (not the
+    plaintext `target`, which is now only a display label)."""
+    url = (decrypt_secrets(notifier.secrets_encrypted).get("url") or "").strip()
+    if not url:
+        raise ValueError(f"notifier {notifier.id} has no destination URL in secrets")
+    return url
+
+
 async def _send_webhook(notifier: Notifier, payload: dict) -> None:
-    """POST JSON payload to the webhook URL."""
-    target = notifier.target.strip()
-    if not target:
-        logger.warning("webhook notifier %s has no target URL", notifier.id)
-        raise ValueError("Empty webhook target")
-    resp = await _client.post(target, json=payload)
+    """POST the event envelope to the webhook URL (from encrypted secrets), through
+    the SSRF guard. If a `signing_secret` is stored, add an
+    `X-Catlico-Signature: sha256=<hex>` header — an HMAC-SHA256 over the exact raw
+    request body (receivers verify by recomputing it over the bytes they receive).
+    """
+    url = _destination_url(notifier)
+    secrets = decrypt_secrets(notifier.secrets_encrypted)
+    body = json.dumps(payload).encode()
+    headers = {"content-type": "application/json"}
+    signing_secret = secrets.get("signing_secret")
+    if signing_secret:
+        sig = hmac.new(signing_secret.encode(), body, hashlib.sha256).hexdigest()
+        headers["X-Catlico-Signature"] = f"sha256={sig}"
+    resp = await guarded_post(_client, url, content=body, headers=headers)
     resp.raise_for_status()
 
 
 async def _send_slack(notifier: Notifier, payload: dict) -> None:
-    """Send a Slack incoming-webhook message.
-
-    The `target` is the Slack webhook URL (kept in config/secrets, not plaintext
-    in the public API). Build a simple formatted message from the event.
-    """
-    target = notifier.target.strip()
-    if not target:
-        raise ValueError("Empty Slack webhook target")
+    """Send a Slack incoming-webhook message. The webhook URL is a secret (read
+    from the encrypted secrets blob, never `target`), so the POST goes through the
+    SSRF guard like any other outbound delivery."""
+    url = _destination_url(notifier)
     envelope = payload
     event_type = envelope.get("event_type", "unknown")
     actor = envelope.get("actor", "system")
     obj = envelope.get("object", {})
     text = f"*{event_type}* by {actor}\n{obj.get('type', '?')}: {obj.get('id', '?')}"
     message = {"text": text}
-    resp = await _client.post(target, json=message)
+    resp = await guarded_post(_client, url, json=message)
     resp.raise_for_status()
 
 
