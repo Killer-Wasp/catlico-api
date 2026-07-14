@@ -312,6 +312,30 @@ async def test_html_has_print_css_wrapper(
     assert "Printable" in html.text
 
 
+async def test_render_html_escapes_observable_data_xss(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """Stored-XSS regression: user-controlled observable data served as text/html
+    must be HTML-escaped, not passed through raw where it would execute."""
+    h = _headers(analyst_a_token, org_a.id)
+    case = await _make_case(session, org_a, builtin_roles, analyst_a, title="XSS")
+    await _add_observable(
+        session, case, org_a, analyst_a, obs_type="other", data="<script>x</script>"
+    )
+    t = await _make_template(
+        client, h, name="xss", content_md="{{#observables}}{{value}}\n{{/observables}}"
+    )
+    html_resp = await client.get(
+        f"/api/v1/report-templates/{t['id']}/render",
+        params={"case_id": case.id, "fmt": "html"},
+        headers=h,
+    )
+    assert html_resp.status_code == 200
+    body = html_resp.text
+    assert "&lt;script&gt;" in body  # escaped
+    assert "<script>x</script>" not in body  # not executable raw
+
+
 async def test_markdown_json_shape_unchanged(
     client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
 ):

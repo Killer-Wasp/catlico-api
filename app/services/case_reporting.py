@@ -18,10 +18,20 @@ Sections (loops over the case's children):
 
 An empty collection renders its section zero times. A section open tag with no
 matching close tag is left untouched (the regex requires both), so a malformed
-template can never eat the rest of the document. Tables should be authored as
-raw HTML in the template — the md→html converter below is intentionally minimal.
+template can never eat the rest of the document. Sections do NOT nest: a
+``{{#...}}`` inside another section's block is emitted as a literal tag (not
+corruption — nesting is simply unsupported). Tables should be authored as raw
+HTML in the template — the md→html converter below is intentionally minimal.
+
+Security: for HTML output, user-controlled values (observable data/type, task
+title, case title/description/severity) are HTML-escaped as they're substituted
+in, so injected markup like ``<script>`` renders as inert text rather than
+executing. The template author's own markup is NOT escaped (the md→html step runs
+on the finished string), so intentional raw-HTML tables still work. Escaping is
+skipped entirely for markdown output.
 """
 
+import html
 import re
 from datetime import UTC, datetime
 
@@ -47,18 +57,38 @@ def _sub_scalars(text: str, ctx: dict[str, str]) -> str:
     return text
 
 
-def _expand_sections(content: str, sections: dict[str, list[dict[str, str]]]) -> str:
-    """Expand ``{{#name}}...{{/name}}`` blocks. Unknown section names are left as
-    written (a later scalar pass may handle them); known names repeat the inner
-    block once per item, substituting that item's fields."""
+def _render_template(
+    content: str,
+    sections: dict[str, list[dict[str, str]]],
+    scalars: dict[str, str],
+) -> str:
+    """Expand ``{{#name}}...{{/name}}`` blocks and substitute scalars.
 
-    def _repl(match: re.Match[str]) -> str:
+    Scalars are substituted per-region — into each section's inner block during
+    expansion, and into the text between/around sections — rather than by a
+    single global pass over the already-expanded output. That ordering matters:
+    it means item data injected by section expansion is never itself scanned for
+    ``{{ scalar }}`` tags, closing a template-injection where an observable value
+    of ``{{ description }}`` would otherwise be expanded to the case description.
+
+    Within a section, item fields win over scalars (a task's ``{{title}}`` beats
+    the case title). Unknown section names are left verbatim.
+    """
+    out: list[str] = []
+    pos = 0
+    for match in _SECTION_RE.finditer(content):
+        # Text before this section: only case scalars apply here.
+        out.append(_sub_scalars(content[pos : match.start()], scalars))
         name, inner = match.group(1), match.group(2)
         if name not in sections:
-            return match.group(0)
-        return "".join(_sub_scalars(inner, item) for item in sections[name])
-
-    return _SECTION_RE.sub(_repl, content)
+            out.append(match.group(0))
+        else:
+            for item in sections[name]:
+                block = _sub_scalars(inner, item)  # per-item fields first
+                out.append(_sub_scalars(block, scalars))  # then case scalars
+        pos = match.end()
+    out.append(_sub_scalars(content[pos:], scalars))
+    return "".join(out)
 
 
 async def render_report(
@@ -121,12 +151,21 @@ async def render_report(
         + f"{comment_count} comment{'s' if comment_count != 1 else ''}"
     )
 
+    # HTML output is served as text/html, so user-controlled values must be
+    # HTML-escaped at substitution time or a value like "<script>…</script>"
+    # executes in the analyst's browser. Escape the DATA, never the template
+    # (the md→html step handles the author's intentional markup). Markdown output
+    # isn't rendered as HTML, so it's passed through verbatim.
+    esc = (lambda v: html.escape(str(v))) if fmt == "html" else (lambda v: str(v))
+
     # Scalar context (existing placeholders, unchanged behaviour) + timeline summary.
+    # Server-generated values (ids, dates, counts, tlp/pap, timeline_summary) are
+    # not user-controlled and need no escaping.
     scalars = {
         "case_id": str(case.id),
-        "title": case.title or "",
-        "description": case.description or "",
-        "severity": case.severity or "",
+        "title": esc(case.title or ""),
+        "description": esc(case.description or ""),
+        "severity": esc(case.severity or ""),
         "status": case.status.value if case.status else "",
         "tlp": str(case.tlp),
         "pap": str(case.pap),
@@ -140,8 +179,8 @@ async def render_report(
     sections = {
         "observables": [
             {
-                "type": o.observable_type,
-                "value": o.data,
+                "type": esc(o.observable_type),
+                "value": esc(o.data),
                 "tlp": str(o.tlp),
                 "ioc": str(o.ioc).lower(),
                 "sighted": str(o.sighted).lower(),
@@ -150,7 +189,7 @@ async def render_report(
         ],
         "tasks": [
             {
-                "title": t.title,
+                "title": esc(t.title),
                 "status": t.status.value if t.status else "",
                 "assignee": str(t.assignee_id) if t.assignee_id else "",
             }
@@ -167,10 +206,7 @@ async def render_report(
         ],
     }
 
-    # Expand sections first (per-item fields win inside their block), then apply
-    # the case-level scalar substitution over whatever remains.
-    content = _expand_sections(template.content_md, sections)
-    content = _sub_scalars(content, scalars)
+    content = _render_template(template.content_md, sections, scalars)
 
     if fmt == "markdown":
         return content
