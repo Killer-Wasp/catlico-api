@@ -4,6 +4,7 @@ approve/reject, approval applies through normal CRUD with a combined actor.
 import uuid
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,10 +75,9 @@ async def _case_runtime_token(client, runner_secret, admin_token, org_a, case_id
 
 async def _runtime_run_id(client, runner_secret, admin_token, org_id, case_id) -> str:
     """Register a runner + plugin and start a run scoped to `case_id`, returning
-    the `PluginRun.id`. `add_related_observable`/`execute_responder_action` have
-    no runtime HTTP endpoint yet, so tests build the PluginProposedAction row
-    directly via `ppa_crud.create`, which needs a real `PluginRun` to attribute
-    the proposal to."""
+    the `PluginRun.id`. `add_related_observable` has no runtime HTTP endpoint yet,
+    so tests build the PluginProposedAction row directly via `ppa_crud.create`,
+    which needs a real `PluginRun` to attribute the proposal to."""
     manifest = RUNTIME_MANIFEST
     _, credential = await _register_runner(client, admin_token, RUNNER1, plugins=[manifest])
     h = _runner_h(credential)
@@ -604,37 +604,32 @@ async def test_auto_apply_add_related_observable_dedup_race_resolves_as_applied_
     assert len(matches) == 1
 
 
-async def test_execute_responder_action_rejected_on_apply(
+async def test_execute_responder_action_is_not_a_known_action(
     client: AsyncClient, session: AsyncSession, org_a, analyst_a_token, runner_secret, admin_token,
 ):
-    """execute_responder_action has no post-approval execution path. Approval
-    must fail explicitly (status=failed with a clear reason) rather than
-    crash or silently fall through to the add_tag branch."""
+    """`execute_responder_action` was dropped: it had no producer and no executor
+    (dead enum member). Proposing it is now an unknown action_type — a 422 at
+    create time — rather than a proposal that fails on approval. (Re-add if a
+    plugin-native responder proposal-chaining path is ever designed.)"""
+    from app.crud import plugin_proposed_action as ppa
+
+    assert "execute_responder_action" not in ppa.ACTION_TYPES
+
     case_id, _ = await _create_case_with_observable(client, org_a, analyst_a_token)
     run_id = await _runtime_run_id(client, runner_secret, admin_token, org_a.id, case_id)
     run = await session.get(PluginRun, uuid.UUID(run_id))
 
-    action = await ppa_crud.create(
-        session,
-        run=run,
-        action_type="execute_responder_action",
-        entity_type="case",
-        entity_id=str(case_id),
-        payload={"responder": "block-ip", "tag": "should-not-be-used-as-a-tag"},
-    )
-    assert action.status == "proposed"
-
-    h = _user_h(analyst_a_token, org_a.id)
-    approved = await client.post(f"{_ACTIONS}/{action.id}/approve", headers=h)
-    assert approved.status_code == 200, approved.text
-    body = approved.json()
-    assert body["status"] == "failed"
-    assert "execute_responder_action" in body["decision_reason"]
-
-    # No tag was added to the case (proof it didn't fall through to add_tag).
-    tags = await client.get(f"/api/v1/cases/{case_id}/tags", headers=h)
-    assert tags.status_code == 200, tags.text
-    assert "should-not-be-used-as-a-tag" not in tags.json()
+    with pytest.raises(HTTPException) as exc_info:
+        await ppa_crud.create(
+            session,
+            run=run,
+            action_type="execute_responder_action",
+            entity_type="case",
+            entity_id=str(case_id),
+            payload={"responder": "block-ip"},
+        )
+    assert exc_info.value.status_code == 422
+    assert "execute_responder_action" in str(exc_info.value.detail)
 
 
 # --- Reject / guards ---

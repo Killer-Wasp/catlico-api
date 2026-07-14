@@ -1,5 +1,6 @@
 """Public API: plugin catalog and config (org-scoped)."""
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from tests.test_api_plugin_runners import (
     RUNNER1,
@@ -580,7 +581,250 @@ async def test_manual_plugin_run_cannot_target_another_orgs_observable(
     assert r.status_code == 200, r.text
 
 
+# --- Manual run: case + alert entities (responders) ---
+
+
+async def _make_alert(client, h, source_ref="evt-manual"):
+    r = await client.post(
+        "/api/v1/alerts/",
+        json={
+            "type": "phishing",
+            "source": "mail-gw",
+            "source_ref": source_ref,
+            "title": "Manual run alert",
+            "description": "",
+            "severity": 2,
+        },
+        headers=h,
+    )
+    assert r.status_code in (200, 201), r.text
+    return r.json()["id"]
+
+
+async def test_manual_plugin_run_for_case(
+    client: AsyncClient, session, runner_secret, admin_token, analyst_a_token, org_a,
+):
+    """A manual run against a CASE dispatches a targeted, case-shaped envelope so a
+    responder (mailer) parses it: object.type=='case', object.id==<case id>, the
+    manual flag + target_plugin_id are set. The 422 that once rejected non-observable
+    entities is gone."""
+    from app.models.plugin_runner import PluginEventDelivery
+
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _h(analyst_a_token, org_a.id)
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "Responder", "description": ""}, headers=h
+    )
+    case_id = case.json()["id"]
+
+    r = await client.post(
+        f"/api/v1/cases/{case_id}/plugin-runs",
+        json={"plugin_id": plugin_id},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["plugin_id"] == plugin_id
+    assert data["event_type"] == "case.manual"
+    assert data["event_object_type"] == "case"
+    assert data["event_object_id"] == str(case_id)
+    assert data["status"] == "queued"
+
+    # The delivery the runner will claim is targeted + shaped like a case.created
+    # envelope so mailer's `event.object_type == "case"` / `int(event.object_id)`
+    # parse succeeds.
+    delivery = (
+        await session.execute(
+            select(PluginEventDelivery).where(
+                PluginEventDelivery.event_id == data["event_id"]
+            )
+        )
+    ).scalars().first()
+    assert delivery is not None
+    env = delivery.envelope
+    assert env["target_plugin_id"] == plugin_id
+    assert env["manual"] is True
+    assert env["object"] == {"type": "case", "id": str(case_id)}
+
+    # Deterministic id: a duplicate submit resolves to the same run identity.
+    again = await client.post(
+        f"/api/v1/cases/{case_id}/plugin-runs",
+        json={"plugin_id": plugin_id},
+        headers=h,
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["event_id"] == data["event_id"]
+
+
+async def test_manual_plugin_run_for_alert(
+    client: AsyncClient, session, runner_secret, admin_token, analyst_a_token, org_a,
+):
+    """A manual run against an ALERT dispatches a targeted alert-shaped envelope."""
+    from app.models.plugin_runner import PluginEventDelivery
+
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _h(analyst_a_token, org_a.id)
+    alert_id = await _make_alert(client, h)
+
+    r = await client.post(
+        f"/api/v1/alerts/{alert_id}/plugin-runs",
+        json={"plugin_id": plugin_id},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["event_type"] == "alert.manual"
+    assert data["event_object_type"] == "alert"
+    assert data["event_object_id"] == str(alert_id)
+    assert data["status"] == "queued"
+
+    delivery = (
+        await session.execute(
+            select(PluginEventDelivery).where(
+                PluginEventDelivery.event_id == data["event_id"]
+            )
+        )
+    ).scalars().first()
+    assert delivery is not None
+    env = delivery.envelope
+    assert env["target_plugin_id"] == plugin_id
+    assert env["manual"] is True
+    assert env["object"] == {"type": "alert", "id": str(alert_id)}
+
+
+async def test_manual_run_case_alert_no_longer_422(
+    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a,
+):
+    """The generic /plugins/{id}/run endpoint accepts case + alert now (the old
+    observable-only 422 is gone)."""
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _h(analyst_a_token, org_a.id)
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "No 422", "description": ""}, headers=h
+    )
+    r = await client.post(
+        f"/api/v1/plugins/{plugin_id}/run",
+        json={"entity_type": "case", "entity_id": str(case.json()["id"])},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["event_type"] == "case.manual"
+
+
+async def test_manual_run_rejects_unknown_entity_type(
+    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a,
+):
+    """An entity type outside {observable, case, alert} is still a 422."""
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _h(analyst_a_token, org_a.id)
+    r = await client.post(
+        f"/api/v1/plugins/{plugin_id}/run",
+        json={"entity_type": "task", "entity_id": "1"},
+        headers=h,
+    )
+    assert r.status_code == 422, r.text
+
+
+async def test_manual_run_case_visibility_enforced(
+    client: AsyncClient, runner_secret, admin_token, org_a, analyst_a_token,
+    org_b, analyst_b_token,
+):
+    """Org B cannot trigger a run against a case it can't see — it 404s like the
+    read would, via both the dedicated and generic endpoints."""
+    plugin_id, _ = await _setup_runner_and_plugin(client, admin_token)
+    for org_id in (org_a.id, org_b.id):
+        await _enable_plugin_for_org(client, admin_token, org_id, plugin_id)
+
+    h_a = _h(analyst_a_token, org_a.id)
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "Private", "description": ""}, headers=h_a
+    )
+    case_id = case.json()["id"]
+
+    for path, payload in (
+        (f"/api/v1/cases/{case_id}/plugin-runs", {"plugin_id": plugin_id}),
+        (
+            f"/api/v1/plugins/{plugin_id}/run",
+            {"entity_type": "case", "entity_id": str(case_id)},
+        ),
+    ):
+        r = await client.post(path, json=payload, headers=_h(analyst_b_token, org_b.id))
+        assert r.status_code == 404, (path, r.text)
+
+    # The owner org can run it.
+    ok = await client.post(
+        f"/api/v1/cases/{case_id}/plugin-runs",
+        json={"plugin_id": plugin_id},
+        headers=h_a,
+    )
+    assert ok.status_code == 200, ok.text
+
+
+async def test_manual_run_case_requires_run_enrichment(
+    client: AsyncClient, session, runner_secret, admin_token, org_a, readonly_a_token,
+):
+    """The read-only role (read:case but not run:enrichment) is 403."""
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    admin_h = _h(admin_token, org_a.id)
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "Gate", "description": ""}, headers=admin_h
+    )
+    r = await client.post(
+        f"/api/v1/cases/{case.json()['id']}/plugin-runs",
+        json={"plugin_id": plugin_id},
+        headers=_h(readonly_a_token, org_a.id),
+    )
+    assert r.status_code == 403, r.text
+
+
 # --- Runnable catalog (GET /plugins/runnable) ---
+
+
+RESPONDER_MANIFEST = {
+    "id": "case-responder",
+    "name": "Case Responder",
+    "version": "0.1.0",
+    "sdk": ">=0.1,<1",
+    "runtime": "python",
+    "entrypoint": "case_responder.plugin:Plugin",
+    "capabilities": ["responder"],
+    "triggers": ["case.created"],
+    "permissions": ["read:case", "write:plugin_result"],
+    "timeout_seconds": 30,
+}
+
+
+async def test_runnable_capability_responder_returns_responder_plugin(
+    client: AsyncClient, runner_secret, admin_token, org_a,
+):
+    """`runnable?capability=responder` returns a responder-capable plugin (mailer's
+    manifest is the model). Capabilities are stored on the API-side plugin record,
+    so the filter handles 'responder', not only 'enrichment'."""
+    from tests.test_api_plugin_runners import RUNNER1, _register_runner
+
+    await _register_runner(
+        client, admin_token, RUNNER1, plugins=[RESPONDER_MANIFEST]
+    )
+    await _enable_plugin_for_org(
+        client, admin_token, org_a.id, RESPONDER_MANIFEST["id"]
+    )
+    h = _h(admin_token, org_a.id)
+
+    responders = await client.get(
+        "/api/v1/plugins/runnable?capability=responder", headers=h
+    )
+    assert responders.status_code == 200, responders.text
+    ids = [p["id"] for p in responders.json()]
+    assert ids == [RESPONDER_MANIFEST["id"]]
+    assert responders.json()[0]["capabilities"] == ["responder"]
+
+    # The enrichment filter must NOT surface the responder.
+    enrich = await client.get(
+        "/api/v1/plugins/runnable?capability=enrichment", headers=h
+    )
+    assert enrich.status_code == 200
+    assert RESPONDER_MANIFEST["id"] not in [p["id"] for p in enrich.json()]
+
 
 
 async def _run_only_token(session, org_id, email="run-only@test.com"):

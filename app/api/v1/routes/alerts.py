@@ -20,6 +20,7 @@ from app.api.v1.routes._files import (
     attach_observable_blob,
     ingest_upload,
 )
+from app.api.v1.routes.plugins import ManualPluginRunRequest
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
 from app.crud import alert as alert_crud
@@ -881,3 +882,31 @@ async def set_alert_custom_fields(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+
+
+# --- Plugin runs (on-demand responders) ---
+
+
+@router.post("/{alert_id}/plugin-runs")
+async def run_plugin_for_alert(
+    alert_id: int,
+    body: ManualPluginRunRequest,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Dispatch a responder (or any plugin) on demand against this alert. Mirrors
+    ``POST /observables/{id}/plugin-runs``: visibility-checked (404 if the caller's
+    org doesn't own the alert), gated on ``run:enrichment``, returns the synthetic
+    queued-run view. ``force`` re-runs past retention dedup."""
+    await _resolve_owned_alert(session, ctx, alert_id)
+    _require_perm(ctx, "run:enrichment")
+    from app.api.v1.routes.plugins import create_manual_plugin_run
+
+    return await create_manual_plugin_run(
+        session,
+        ctx,
+        plugin_id=body.plugin_id,
+        entity_type="alert",
+        entity_id=str(alert_id),
+        force=body.force,
+    )

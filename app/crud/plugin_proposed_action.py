@@ -31,6 +31,13 @@ from app.models.tag import TaggableType
 logger = logging.getLogger(__name__)
 
 # Canonical action types a plugin may propose (mirrors the plan's enum).
+#
+# `execute_responder_action` was dropped (2026-07-15): it had no producer and no
+# executor — a dead enum member with no post-approval path from a proposal to a
+# responder run. Responders are now dispatched directly via on-demand manual runs
+# (POST /cases|alerts/{id}/plugin-runs), not through the proposed-action pipeline.
+# Re-add it only if proposal-chaining (a plugin proposing that another plugin run)
+# is ever designed.
 ACTION_TYPES = {
     "add_tag",
     "create_task",
@@ -39,19 +46,10 @@ ACTION_TYPES = {
     "change_severity_status",
     "patch_case_description",
     "patch_observable",
-    "execute_responder_action",
 }
 
 # Action types this version knows how to apply. The others are accepted as
 # proposals but reject on approval with a clear message until implemented.
-#
-# `execute_responder_action` is deliberately never added here: there is no
-# post-approval execution path from a PluginProposedAction to a responder.
-# The legacy connector-job responder pipeline that once backed these actions
-# has been retired, and the plugin runtime/runner has no responder-execution
-# path of its own. Until a plugin-native responder capability exists, approval
-# fails explicitly instead of guessing at a mapping — see the dedicated message
-# in `apply()` below.
 _APPLICABLE = {
     "add_tag",
     "create_task",
@@ -84,7 +82,6 @@ def approve_permission(action_type: str, entity_type: str) -> str:
         "change_severity_status": "write:case",
         "patch_case_description": "write:case",
         "patch_observable": "write:observable",
-        "execute_responder_action": "write:case",
     }[action_type]
 
 
@@ -307,16 +304,6 @@ async def apply(
     """
     action_type = action.action_type
     if action_type not in _APPLICABLE:
-        if action_type == "execute_responder_action":
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=(
-                    "execute_responder_action cannot be approved: there is no "
-                    "post-approval path from a proposed action to a responder "
-                    "run. The platform has no responder-execution capability, so "
-                    "this action type is never applicable."
-                ),
-            )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Action type {action_type!r} cannot be applied yet",

@@ -36,6 +36,7 @@ from app.api.v1.routes.case_common import (
     require_perm,
 )
 from app.api.v1.routes.case_detail import router as case_detail_router
+from app.api.v1.routes.plugins import ManualPluginRunRequest
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
 from app.crud import alert as alert_crud
@@ -785,4 +786,30 @@ async def delete_case_attachment(
         )
     await attachment_crud.delete_link(
         session, link, deleted_by=str(case_ctx.user.id)
+    )
+
+
+# --- Plugin runs (on-demand responders) ---
+
+
+@router.post("/{case_id}/plugin-runs")
+async def run_plugin_for_case(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("run:enrichment")],
+    body: ManualPluginRunRequest,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Dispatch a responder (or any plugin) on demand against this case. Mirrors
+    ``POST /observables/{id}/plugin-runs``: visibility-checked (404 if the caller
+    can't see the case), gated on ``run:enrichment``, and returns the synthetic
+    queued-run view. ``force`` re-runs past retention dedup."""
+    from app.api.v1.routes.plugins import create_manual_plugin_run
+
+    return await create_manual_plugin_run(
+        session,
+        ctx,
+        plugin_id=body.plugin_id,
+        entity_type="case",
+        entity_id=str(case_ctx.case.id),
+        force=body.force,
     )

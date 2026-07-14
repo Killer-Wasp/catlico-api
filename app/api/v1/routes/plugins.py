@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import delete, select
+from sqlmodel import SQLModel, delete, select
 
 from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
@@ -30,6 +30,15 @@ from app.models.plugin_runner import (
 
 router = APIRouter(prefix="/plugins", tags=["plugins"])
 runs_router = APIRouter(prefix="/plugin-runs", tags=["plugin-runs"])
+
+
+class ManualPluginRunRequest(SQLModel):
+    """Body for the per-entity ``POST /{entity}/{id}/plugin-runs`` routes. ``force``
+    re-runs a plugin even if it already ran for this entity within retention (salts
+    the otherwise-deterministic manual event id) instead of silently deduping."""
+
+    plugin_id: str
+    force: bool = False
 
 
 def _require(permission: str, permissions: set[str]) -> None:
@@ -359,6 +368,58 @@ async def _manual_run_eligibility(
     return None, installation
 
 
+# Entity types a manual on-demand run may target. Enrichment analyzers run on an
+# observable; responders run on a case or an alert.
+_MANUAL_ENTITY_TYPES = {"observable", "case", "alert"}
+
+
+async def _assert_manual_entity_visible(
+    session: AsyncSession,
+    ctx: ActiveOrgOrApiKeyContext,
+    entity_type: str,
+    entity_id: str,
+) -> None:
+    """Raise 404/403 unless the caller may see (and thus enrich/respond on) the
+    target entity, reusing each entity's canonical read-visibility rule. This is
+    the sole visibility check on the generic ``/plugins/{id}/run`` path, so it must
+    stand on its own even though the dedicated per-entity routes also gate."""
+    if entity_type == "observable":
+        from app.api.v1.routes.observables import _resolve_observable_visibility
+
+        try:
+            oid = uuid.UUID(entity_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Observable not found"
+            )
+        _, _, effective_perms = await _resolve_observable_visibility(session, ctx, oid)
+        _require("read:observable", effective_perms)
+        return
+    if entity_type == "case":
+        from app.api.deps import _resolve_case_context
+
+        try:
+            case_id = int(entity_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Case not found"
+            )
+        case_ctx = await _resolve_case_context(case_id, ctx, session)
+        _require("read:case", case_ctx.permissions)
+        return
+    # alert
+    from app.api.v1.routes.alerts import _resolve_owned_alert
+
+    try:
+        alert_id = int(entity_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found"
+        )
+    await _resolve_owned_alert(session, ctx, alert_id)
+    _require("read:alert", ctx.permissions)
+
+
 async def create_manual_plugin_run(
     session: AsyncSession,
     ctx: ActiveOrgOrApiKeyContext,
@@ -391,20 +452,18 @@ async def create_manual_plugin_run(
     if block_reason is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=block_reason)
 
-    if entity_type != "observable":
+    if entity_type not in _MANUAL_ENTITY_TYPES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Manual plugin runs currently support observable entities",
+            detail=(
+                "Manual plugin runs support observable, case, or alert entities"
+            ),
         )
-    # The same visibility resolution the observable read routes use — a bare
-    # get_observable would let any org trigger runs (and thus enrichment spend +
-    # result writes) against another org's observable by guessing its UUID.
-    from app.api.v1.routes.observables import _resolve_observable_visibility
-
-    _, _, effective_perms = await _resolve_observable_visibility(
-        session, ctx, uuid.UUID(entity_id)
-    )
-    _require("read:observable", effective_perms)
+    # The security boundary for the generic /plugins/{id}/run path (which trusts
+    # only the body): resolve the entity through the same visibility rule its read
+    # routes use, so no org can trigger a run — enrichment spend + result writes —
+    # against another org's entity by guessing its id.
+    await _assert_manual_entity_visible(session, ctx, entity_type, entity_id)
 
     from app.services.plugin_dispatch import (
         _enqueue_for_healthy_runners,
