@@ -11,6 +11,7 @@ import pytest
 from sqlmodel import select
 
 from app.crud import audit as audit_crud
+from app.crud import notification as notif_crud
 from app.models.audit import AuditOutbox
 from app.models.case_ import Case
 from app.models.notification import UserNotification
@@ -312,6 +313,88 @@ async def test_create_with_assignee_notifies(session, org_a, analyst_a, monkeypa
     targeted = [n for n in notifs if n.user_id == analyst_a.id]
     assert len(targeted) == 1
     assert targeted[0].event_type == "case.assigned"
+
+
+async def test_muted_event_type_creates_row_but_skips_push(
+    session, org_a, analyst_a, monkeypatch
+):
+    """When the assignee has muted `case.assigned`, the targeted DB row is still
+    created (the feed hides it on read) but NO live `{"type":"notification"}` WS
+    frame is pushed — push agrees with feed-read."""
+    await notif_crud.set_user_preferences(
+        session,
+        org_a.id,
+        analyst_a.id,
+        {"case.assigned": False},
+        actor="admin@test.com",
+    )
+    await session.flush()
+
+    row = await _outbox_row_for_update(
+        session,
+        org_id=org_a.id,
+        details={"assignee_id": [None, str(analyst_a.id)]},
+    )
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
+
+    await notify_feed_consumer(session, row)
+
+    notifs = await _user_notifs(session, org_a.id)
+    targeted = [n for n in notifs if n.user_id == analyst_a.id]
+    assert len(targeted) == 1  # DB row still created
+    assert targeted[0].event_type == "case.assigned"
+    # Muted → no live push for this user.
+    mock_hub.send_to_user.assert_not_called()
+
+
+async def test_muting_a_different_type_does_not_suppress_assignment_push(
+    session, org_a, analyst_a, monkeypatch
+):
+    """Muting an unrelated type (`case.updated`) must NOT suppress the
+    `case.assigned` live push — only the actual muted type is skipped."""
+    await notif_crud.set_user_preferences(
+        session,
+        org_a.id,
+        analyst_a.id,
+        {"case.updated": False},
+        actor="admin@test.com",
+    )
+    await session.flush()
+
+    row = await _outbox_row_for_update(
+        session,
+        org_id=org_a.id,
+        details={"assignee_id": [None, str(analyst_a.id)]},
+    )
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
+
+    await notify_feed_consumer(session, row)
+
+    notifs = await _user_notifs(session, org_a.id)
+    targeted = [n for n in notifs if n.user_id == analyst_a.id]
+    assert len(targeted) == 1
+    mock_hub.send_to_user.assert_awaited_once()
+    args, _ = mock_hub.send_to_user.call_args
+    assert args[2]["notification"]["event_type"] == "case.assigned"
+
+
+async def test_non_muting_user_still_gets_push(
+    session, org_a, analyst_a, monkeypatch
+):
+    """A user with no mute preference for the type gets the live push as before."""
+    row = await _outbox_row_for_update(
+        session,
+        org_id=org_a.id,
+        details={"assignee_id": [None, str(analyst_a.id)]},
+    )
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
+
+    await notify_feed_consumer(session, row)
+
+    mock_hub.send_to_user.assert_awaited_once()
 
 
 async def test_case_and_task_create_stamp_assignee_into_audit(

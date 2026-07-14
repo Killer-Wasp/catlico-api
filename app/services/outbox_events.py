@@ -212,6 +212,15 @@ async def _notify_user(
     if notif is None:
         return  # drain retry — the row (and its original push) already happened
 
+    # Respect the user's mute preferences on the live push. The feed-read filters
+    # `GET /notifications/` on `UserNotification.event_type NOT IN disabled_event_types`
+    # (see crud/notification.py::list_user_notifications); mirror that exact rule +
+    # field here so a muted user gets the persisted row (feed hides it on read) but
+    # NOT the live bell/toast frame. Keep row creation above unchanged.
+    disabled = await notif_crud.disabled_event_types(session, org_id, user_uuid)
+    if notif.event_type in disabled:
+        return
+
     # Best-effort live push. Local import to avoid an import cycle (matches
     # ws_broadcast_consumer). A hub/send failure must not raise: the notification
     # row is the source of truth and the drain must not be marked undelivered.
