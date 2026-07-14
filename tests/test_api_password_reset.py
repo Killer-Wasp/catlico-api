@@ -93,7 +93,7 @@ async def test_forgot_password_generic_response_when_smtp_fails(
             raise OSError("smtp down")
 
     monkeypatch.setattr(settings, "SMTP_HOST", "smtp.test")
-    monkeypatch.setattr("app.services.password_reset_delivery.smtplib.SMTP", BrokenSMTP)
+    monkeypatch.setattr("app.services.smtp.smtplib.SMTP", BrokenSMTP)
 
     resp = await client.post(
         "/api/v1/auth/password/forgot", json={"email": viewer_user.email}

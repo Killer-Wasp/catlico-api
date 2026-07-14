@@ -27,6 +27,7 @@ from app.models.notification import (
 )
 from app.services.net_guard import guarded_post
 from app.services.outbox_events import build_event_envelope
+from app.services.smtp import send_email
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +98,43 @@ async def _send_slack(notifier: Notifier, payload: dict) -> None:
     resp.raise_for_status()
 
 
+def _build_email_body(envelope: dict) -> str:
+    """A plain-text summary of the event for an email notifier body."""
+    obj = envelope.get("object", {}) or {}
+    ctx = envelope.get("context", {}) or {}
+    lines = [
+        f"Event: {envelope.get('event_type', 'unknown')}",
+        f"Actor: {envelope.get('actor', 'system')}",
+        f"Entity: {obj.get('type', '?')} {obj.get('id', '?')}".rstrip(),
+        f"Context: {ctx.get('type', '?')} {ctx.get('id', '?')}".rstrip(),
+        f"Timestamp: {envelope.get('created_at') or '?'}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+async def _send_email(notifier: Notifier, payload: dict) -> None:
+    """Email an event summary to the notifier's configured recipients.
+
+    Recipients come from ``notifier.config["recipients"]`` (a list of addresses);
+    ``notifier.target`` is only a display label. Raises when no recipients are
+    configured or when SMTP is unconfigured (the delivery consumer records either
+    as a failed delivery — an admin needs to see the notifier isn't delivering).
+    """
+    recipients = notifier.config.get("recipients") or []
+    if not recipients:
+        raise ValueError("email notifier has no recipients configured")
+    event_type = payload.get("event_type", "unknown")
+    actor = payload.get("actor", "system")
+    subject = f"[catlico] {event_type} by {actor}"
+    body = _build_email_body(payload)
+    await send_email(recipients, subject, body)
+
+
 _SENDERS = {
     NotifierType.webhook: _send_webhook,
     NotifierType.slack: _send_slack,
-    # email and kafka are explicit non-delivering types for now
+    NotifierType.email: _send_email,
+    # kafka is an explicit non-delivering type for now
 }
 
 
@@ -141,7 +175,7 @@ async def notifier_delivery_consumer(session: AsyncSession, row: AuditOutbox) ->
                 continue
             sender = _SENDERS.get(notifier.type)
             if sender is None:
-                # email/kafka are explicit non-delivering types
+                # kafka is an explicit non-delivering type
                 continue
 
             # Idempotency: fetch or create delivery row
