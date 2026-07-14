@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Column, Index, UniqueConstraint
+from sqlalchemy import JSON, Column, Index, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 
@@ -39,6 +39,13 @@ class AuditOutbox(SQLModel, table=True):
     __tablename__ = "audit_outbox"
     __table_args__ = (
         UniqueConstraint("audit_id", "topic", name="uq_audit_outbox_audit_topic"),
+        # Partial index backing the platform-wide dead-letter COUNT in
+        # crud/overview.py (_dead_letter_count), which runs on every overview build.
+        Index(
+            "ix_audit_outbox_dead_lettered_at",
+            "dead_lettered_at",
+            postgresql_where=text("dead_lettered_at IS NOT NULL"),
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)

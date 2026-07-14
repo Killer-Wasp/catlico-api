@@ -140,6 +140,20 @@ See [plugin-system.md](plugin-system.md) for what these govern.
 | `PLUGIN_PUSH_MAX_AGE_SECONDS` | `86400` |
 | `PLUGIN_PUSH_TIMEOUT_SECONDS` | `10.0` |
 
+## Outbox retention & failure handling
+
+Retention windows and the dead-letter cap for the audit outbox and the in-app
+notification tables. A background sweep prunes rows past these windows; see
+`app/services/outbox_maintenance.py`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MAX_OUTBOX_ATTEMPTS` | `10` | Delivery attempts before an outbox row is dead-lettered (marked terminal, excluded from the drain) instead of retried forever. |
+| `OUTBOX_RETENTION_DAYS` | `30` | Days a **delivered** outbox row is kept before pruning. |
+| `OUTBOX_DEAD_LETTER_RETENTION_DAYS` | `90` | Days a **dead-lettered** outbox row is kept (longer, for post-mortem) before pruning. |
+| `NOTIFICATION_READ_RETENTION_DAYS` | `90` | Days a **read** in-app notification (and its read receipts) is kept before pruning. Unread notifications are retained regardless of age. |
+| `NOTIFIER_DELIVERY_RETENTION_DAYS` | `30` | Days a notifier delivery-ledger row is kept before pruning. |
+
 ## Legacy connector worker (`catlico-konnect`)
 
 | Variable | Default | Notes |

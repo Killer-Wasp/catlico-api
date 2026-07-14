@@ -7,8 +7,16 @@ composes them and commits once.
 
 Because the outbox child FKs are ON DELETE SET NULL (migration c4e8f2a6b0d9),
 pruning an ``audit_outbox`` row leaves its child ``user_notification`` /
-``notifier_delivery`` rows intact — their ``outbox_id`` just goes NULL. Nothing
-here monotonically grows unbounded any more.
+``notifier_delivery`` rows intact — their ``outbox_id`` just goes NULL.
+
+What this sweep prunes: read in-app notifications (with their read receipts),
+delivered and dead-lettered outbox rows, and old notifier-delivery rows — each on
+its own retention window.
+
+What it deliberately does NOT prune: **unread** in-app notifications are kept
+regardless of age. In particular org-wide notifications (``user_id=None``) that no
+user ever reads never gain a read receipt, so ``prune_read_notifications`` leaves
+them in place — a real, intentional retention of unread rows, not an oversight.
 """
 import logging
 from datetime import UTC, datetime, timedelta

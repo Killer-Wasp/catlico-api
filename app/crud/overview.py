@@ -553,7 +553,9 @@ async def _sla_compliance(
 async def _dead_letter_count(session: AsyncSession) -> int:
     """Platform-wide count of dead-lettered outbox rows (a stuck-delivery signal).
     Not org-scoped — the outbox has no organisation column — but cheap to surface
-    on the org dashboard so operators notice stuck events."""
+    on the org dashboard so operators notice stuck events. Index-backed: the
+    partial index ``ix_audit_outbox_dead_lettered_at`` (WHERE dead_lettered_at IS
+    NOT NULL) keeps this COUNT off a seq scan even though it runs on every build."""
     return (
         await session.scalar(
             select(func.count())
