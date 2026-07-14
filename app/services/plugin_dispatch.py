@@ -127,24 +127,39 @@ async def _enqueue_for_healthy_runners(session: AsyncSession, envelope: dict) ->
 
 
 def manual_event_id(
-    org_id: str, plugin_id: str, entity_type: str, entity_id: str
+    org_id: str, plugin_id: str, entity_type: str, entity_id: str, *, force: bool = False
 ) -> str:
     """Deterministic id per (org, plugin, entity). Being deterministic is the
     whole point: a redelivered push or a double-clicked "run" button resolves to
     the same event_id, so the ``(event_id, plugin_id)`` unique constraint stops
-    the plugin from running twice."""
-    return f"manual:{org_id}:{plugin_id}:{entity_type}:{entity_id}"
+    the plugin from running twice.
+
+    ``force=True`` salts the id with a time component so an intentional re-run
+    dispatches instead of deduping. ``force=False`` is byte-identical to the
+    pre-force id — the salt only affects the manual on-demand path (this function
+    is used exclusively by ``build_manual_envelope``), never trigger auto-dispatch.
+    """
+    base = f"manual:{org_id}:{plugin_id}:{entity_type}:{entity_id}"
+    if force:
+        return f"{base}:{datetime.now(UTC).isoformat()}"
+    return base
 
 
 def build_manual_envelope(
-    *, org_id: str, plugin_id: str, entity_type: str, entity_id: str, actor: str
+    *,
+    org_id: str,
+    plugin_id: str,
+    entity_type: str,
+    entity_id: str,
+    actor: str,
+    force: bool = False,
 ) -> dict:
     """Synthesize an on-demand manual-run envelope (mirrors the cron precedent in
     ``schedule_due_events``). ``target_plugin_id`` makes the runner execute
     exactly one plugin; ``manual`` is the server-side flag ``create_run`` reads
     back to grant the analyst-intent relaxations."""
     return {
-        "event_id": manual_event_id(org_id, plugin_id, entity_type, entity_id),
+        "event_id": manual_event_id(org_id, plugin_id, entity_type, entity_id, force=force),
         "event_type": f"{entity_type}{MANUAL_EVENT_TYPE_SUFFIX}",
         "organisation_id": org_id,
         "actor": actor,

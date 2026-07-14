@@ -82,6 +82,17 @@ class PluginInstallRequest(SQLModel):
     version: str | None = None
 
 
+class RunnablePluginPublic(SQLModel):
+    """Slim view for GET /plugins/runnable — the plugins an analyst can dispatch
+    on demand right now (would not 409 from a manual run), gated on run:enrichment
+    rather than read:connector."""
+
+    id: str
+    name: str
+    description: str = ""
+    capabilities: list[str] = []
+
+
 class PluginInstallStatusUpdate(SQLModel):
     """Body for POST /api/internal/plugin-runner/plugins/{plugin_version_id}/install-status.
 

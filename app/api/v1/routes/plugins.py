@@ -20,6 +20,7 @@ from app.models.plugin_runner import (
     PluginDefinition,
     PluginRunner as PluginRunnerModel,
     PluginRun,
+    RunnablePluginPublic,
     RunnerPluginInstallation,
 )
 
@@ -214,6 +215,48 @@ def _manual_run_view(envelope: dict, pdef: PluginDefinition, runner_id: str) -> 
     }
 
 
+async def _manual_run_eligibility(
+    session: AsyncSession,
+    org_id: str,
+    pdef: PluginDefinition,
+    *,
+    require_healthy_runner: bool = False,
+) -> tuple[str | None, RunnerPluginInstallation | None]:
+    """The 409 predicate for a manual run. Returns ``(block_reason, installation)``:
+    ``block_reason`` is ``None`` exactly when the plugin is org-enabled, has an
+    active version, and is installed on a runner — in which case ``installation``
+    is the row to dispatch onto. ``create_manual_plugin_run`` raises the reason as
+    a 409.
+
+    ``require_healthy_runner`` narrows the install check to a runner that is
+    ``healthy`` + ``enrolled`` — the exact filter ``_enqueue_for_healthy_runners``
+    uses. The runnable *picker* opts in (a plugin installed only on an offline
+    runner would list as runnable yet dispatch zero deliveries); the manual-run
+    path leaves it off so its 409 semantics are unchanged.
+    """
+    org_plugin = await session.get(OrgPlugin, (org_id, pdef.id))
+    if org_plugin is None or not org_plugin.enabled:
+        return "Plugin is not enabled for this organisation", None
+    if not pdef.active_version_id:
+        return "Plugin has no active version", None
+    stmt = select(RunnerPluginInstallation).where(
+        RunnerPluginInstallation.plugin_version_id == pdef.active_version_id,
+        RunnerPluginInstallation.install_status == "installed",
+    )
+    if require_healthy_runner:
+        stmt = stmt.join(
+            PluginRunnerModel,
+            PluginRunnerModel.id == RunnerPluginInstallation.runner_id,
+        ).where(
+            PluginRunnerModel.status == "healthy",
+            PluginRunnerModel.enrollment_state == "enrolled",
+        )
+    installation = (await session.execute(stmt)).scalars().first()
+    if installation is None:
+        return "Plugin is not installed on a runner", None
+    return None, installation
+
+
 async def create_manual_plugin_run(
     session: AsyncSession,
     ctx: ActiveOrgOrApiKeyContext,
@@ -221,6 +264,7 @@ async def create_manual_plugin_run(
     plugin_id: str,
     entity_type: str,
     entity_id: str,
+    force: bool = False,
 ) -> dict:
     """Route an on-demand manual run onto the shared event/delivery path.
 
@@ -230,35 +274,20 @@ async def create_manual_plugin_run(
     reads the stored envelope's ``manual`` flag server-side and grants the
     analyst-intent relaxations (no trigger match required, no auto-run required,
     freshness cache bypassed) while keeping TLP/PAP and concurrency guards.
+
+    ``force=True`` salts the deterministic manual event id with a time component
+    so a real re-run dispatches instead of silently deduping against the prior
+    (org, plugin, entity) run.
     """
     _require("run:enrichment", ctx.permissions)
     pdef = await session.get(PluginDefinition, plugin_id)
     if pdef is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plugin not found")
-    org_plugin = await session.get(OrgPlugin, (ctx.organisation_id, plugin_id))
-    if org_plugin is None or not org_plugin.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Plugin is not enabled for this organisation",
-        )
-    if not pdef.active_version_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Plugin has no active version",
-        )
-    installation = (
-        await session.execute(
-            select(RunnerPluginInstallation).where(
-                RunnerPluginInstallation.plugin_version_id == pdef.active_version_id,
-                RunnerPluginInstallation.install_status == "installed",
-            )
-        )
-    ).scalars().first()
-    if installation is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Plugin is not installed on a runner",
-        )
+    block_reason, installation = await _manual_run_eligibility(
+        session, ctx.organisation_id, pdef
+    )
+    if block_reason is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=block_reason)
 
     if entity_type != "observable":
         raise HTTPException(
@@ -286,6 +315,7 @@ async def create_manual_plugin_run(
         entity_type=entity_type,
         entity_id=entity_id,
         actor=f"user:{ctx.user.id}",
+        force=force,
     )
     await _enqueue_for_healthy_runners(session, envelope)
     await session.flush()
@@ -323,6 +353,51 @@ async def list_plugins(
         )
         for p in pdefs
     ]
+
+
+@router.get("/runnable")
+async def list_runnable_plugins(
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    capability: str | None = None,
+) -> list[RunnablePluginPublic]:
+    """Plugins the caller can dispatch on demand right now — every plugin a manual
+    run would NOT 409 on (org-enabled, active version, installed on a runner).
+
+    Gated on ``run:enrichment`` rather than ``read:connector`` so an analyst with
+    run rights can enumerate what to run without connector-admin read. ``capability``
+    optionally filters to plugins declaring it in their manifest.
+
+    A picker must list only plugins that will *actually enrich*, so runnable is a
+    strict subset of "would not 409": beyond the manual-run predicate it also
+    requires config completeness and a healthy+enrolled runner (a plugin missing a
+    required secret, or installed only on an offline runner, would accept the run
+    but never produce a result).
+    """
+    _require("run:enrichment", ctx.permissions)
+    pdefs = (await session.execute(select(PluginDefinition))).scalars().all()
+    out: list[RunnablePluginPublic] = []
+    for pdef in pdefs:
+        capabilities = list((pdef.manifest or {}).get("capabilities", []) or [])
+        if capability is not None and capability not in capabilities:
+            continue
+        block_reason, _ = await _manual_run_eligibility(
+            session, ctx.organisation_id, pdef, require_healthy_runner=True
+        )
+        if block_reason is not None:
+            continue
+        cfg = await session.get(PluginConfig, (ctx.organisation_id, pdef.id))
+        if not _config_complete(pdef.manifest or {}, cfg):
+            continue
+        out.append(
+            RunnablePluginPublic(
+                id=pdef.id,
+                name=pdef.display_name,
+                description=pdef.description,
+                capabilities=capabilities,
+            )
+        )
+    return out
 
 
 @router.get("/{plugin_id}")

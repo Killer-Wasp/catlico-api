@@ -580,6 +580,261 @@ async def test_manual_plugin_run_cannot_target_another_orgs_observable(
     assert r.status_code == 200, r.text
 
 
+# --- Runnable catalog (GET /plugins/runnable) ---
+
+
+async def _run_only_token(session, org_id, email="run-only@test.com"):
+    """A token whose role grants only run:enrichment — no read:connector. This is
+    exactly the analyst the runnable endpoint exists for."""
+    from app.core.security import TokenPayload, create_access_token
+    from app.crud.organisation_member import add_member
+    from app.crud.role import create_role
+    from app.crud.user import create_user
+    from app.models.organisation_member import OrganisationMemberCreate
+    from app.models.role import Permission, RoleCreate
+    from app.models.user import UserCreate
+
+    user = await create_user(
+        session,
+        UserCreate(
+            first_name="Run", last_name="Only", email=email, password="password123"
+        ),
+    )
+    role = await create_role(
+        session,
+        RoleCreate(name="run-only", permissions=[Permission.run_enrichment]),
+        organisation_id=org_id,
+        created_by="system",
+    )
+    await add_member(
+        session,
+        org_id,
+        OrganisationMemberCreate(user_id=user.id, role_id=role.id),
+        created_by="system",
+    )
+    return create_access_token(
+        TokenPayload(user_id=user.id, is_superadmin=False, organisations=[org_id])
+    )
+
+
+async def _setup_runnable_plugin(
+    client: AsyncClient, admin_token: str, org_id: str, runner_id: str = "runner-1",
+) -> tuple[str, str]:
+    """Enabled + config-complete plugin on a healthy+enrolled runner — the full bar
+    the runnable picker requires (SAMPLE_MANIFEST declares a required api_key secret,
+    so config_complete needs it stored)."""
+    plugin_id, credential = await _setup_enabled_plugin(
+        client, admin_token, org_id, runner_id
+    )
+    await client.put(
+        f"/api/v1/plugins/{plugin_id}/config",
+        json={"settings": {}, "secrets": {"api_key": "s3cr3t"}},
+        headers=_h(admin_token, org_id),
+    )
+    return plugin_id, credential
+
+
+async def test_runnable_lists_only_eligible_plugin(
+    client: AsyncClient, runner_secret, admin_token, org_a,
+):
+    """An enabled + installed + configured plugin on a healthy runner is runnable;
+    the slim shape carries the manifest capabilities."""
+    plugin_id, _ = await _setup_runnable_plugin(client, admin_token, org_a.id)
+    h = _h(admin_token, org_a.id)
+
+    r = await client.get("/api/v1/plugins/runnable", headers=h)
+    assert r.status_code == 200, r.text
+    runnable = r.json()
+    assert len(runnable) == 1
+    assert runnable[0] == {
+        "id": plugin_id,
+        "name": "Acme Threat Intel",
+        "description": "",
+        "capabilities": ["enrichment"],
+    }
+
+
+async def test_runnable_excludes_disabled_plugin(
+    client: AsyncClient, runner_secret, admin_token, org_a,
+):
+    """Installed but not org-enabled → not runnable (would 409 on a manual run)."""
+    await _setup_runner_and_plugin(client, admin_token)  # registered, not enabled
+    h = _h(admin_token, org_a.id)
+
+    r = await client.get("/api/v1/plugins/runnable", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json() == []
+
+
+async def test_runnable_excludes_no_active_version_and_not_installed(
+    client: AsyncClient, session, admin_token, org_a,
+):
+    """Enabled plugins that (a) have no active version or (b) have an active
+    version installed on no runner are excluded — the same conditions that make a
+    manual run 409."""
+    from app.models.plugin_runner import OrgPlugin, PluginDefinition, PluginVersion
+
+    # (a) enabled, no active version
+    session.add(PluginDefinition(id="no-active-version", display_name="No Version"))
+    # (b) enabled, active version but installed on no runner. The version row must
+    # exist before the definition's active_version_id FK references it.
+    session.add(PluginDefinition(id="uninstalled", display_name="Uninstalled"))
+    session.add(PluginVersion(id="uninstalled@1.0.0", plugin_id="uninstalled", version="1.0.0"))
+    await session.flush()
+    uninstalled = await session.get(PluginDefinition, "uninstalled")
+    uninstalled.active_version_id = "uninstalled@1.0.0"
+    await session.flush()
+    for pid in ("no-active-version", "uninstalled"):
+        session.add(OrgPlugin(organisation_id=org_a.id, plugin_id=pid, enabled=True))
+    await session.commit()
+
+    r = await client.get("/api/v1/plugins/runnable", headers=_h(admin_token, org_a.id))
+    assert r.status_code == 200, r.text
+    assert r.json() == []
+
+
+async def test_runnable_capability_filter(
+    client: AsyncClient, runner_secret, admin_token, org_a,
+):
+    plugin_id, _ = await _setup_runnable_plugin(client, admin_token, org_a.id)
+    h = _h(admin_token, org_a.id)
+
+    match = await client.get("/api/v1/plugins/runnable?capability=enrichment", headers=h)
+    assert match.status_code == 200
+    assert [p["id"] for p in match.json()] == [plugin_id]
+
+    miss = await client.get("/api/v1/plugins/runnable?capability=responder", headers=h)
+    assert miss.status_code == 200
+    assert miss.json() == []
+
+
+async def test_runnable_excludes_config_incomplete_plugin(
+    client: AsyncClient, runner_secret, admin_token, org_a,
+):
+    """Enabled + installed on a healthy runner but a required secret is unset →
+    excluded (it would accept a run yet never enrich)."""
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _h(admin_token, org_a.id)
+
+    # SAMPLE_MANIFEST requires api_key; unset → not runnable.
+    r = await client.get("/api/v1/plugins/runnable", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json() == []
+
+    # Once configured, it becomes runnable.
+    await client.put(
+        f"/api/v1/plugins/{plugin_id}/config",
+        json={"settings": {}, "secrets": {"api_key": "s3cr3t"}},
+        headers=h,
+    )
+    r = await client.get("/api/v1/plugins/runnable", headers=h)
+    assert [p["id"] for p in r.json()] == [plugin_id]
+
+
+async def test_runnable_excludes_plugin_on_unhealthy_runner(
+    client: AsyncClient, session, runner_secret, admin_token, org_a,
+):
+    """A plugin installed only on an unhealthy runner dispatches zero deliveries,
+    so it is excluded from runnable even though a manual run would not 409."""
+    from app.models.plugin_runner import PluginRunner
+
+    plugin_id, _ = await _setup_runnable_plugin(client, admin_token, org_a.id)
+    h = _h(admin_token, org_a.id)
+    assert [p["id"] for p in (await client.get("/api/v1/plugins/runnable", headers=h)).json()] == [plugin_id]
+
+    # Take the only runner offline; no healthy+enrolled delivery target remains.
+    runner = await session.get(PluginRunner, "runner-1")
+    runner.status = "offline"
+    await session.commit()
+
+    r = await client.get("/api/v1/plugins/runnable", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json() == []
+
+
+async def test_runnable_gated_on_run_enrichment_not_connector_read(
+    client: AsyncClient, session, runner_secret, admin_token, org_a, readonly_a_token,
+):
+    """run:enrichment WITHOUT read:connector succeeds; read:connector without
+    run:enrichment (the read-only role) is 403 — the gate is run:enrichment."""
+    plugin_id, _ = await _setup_runnable_plugin(client, admin_token, org_a.id)
+    run_only = await _run_only_token(session, org_a.id)
+
+    ok = await client.get("/api/v1/plugins/runnable", headers=_h(run_only, org_a.id))
+    assert ok.status_code == 200, ok.text
+    assert [p["id"] for p in ok.json()] == [plugin_id]
+
+    # read-only has read:connector but not run:enrichment → 403.
+    denied = await client.get(
+        "/api/v1/plugins/runnable", headers=_h(readonly_a_token, org_a.id)
+    )
+    assert denied.status_code == 403
+
+
+# --- Manual run: force flag ---
+
+
+async def _make_observable(client, h):
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "Force", "description": ""}, headers=h
+    )
+    observable = await client.post(
+        f"/api/v1/cases/{case.json()['id']}/observables",
+        json={"observable_type": "ip", "data": "1.2.3.4", "tlp": 2, "pap": 2},
+        headers=h,
+    )
+    return observable.json()["id"]
+
+
+async def test_force_false_dedupes_second_run(
+    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a,
+):
+    """Default force=False keeps the deterministic event id: a re-run resolves to
+    the same run identity (silent dedup, unchanged behaviour)."""
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _h(analyst_a_token, org_a.id)
+    obs_id = await _make_observable(client, h)
+
+    first = await client.post(
+        f"/api/v1/observables/{obs_id}/plugin-runs",
+        json={"plugin_id": plugin_id, "force": False},
+        headers=h,
+    )
+    assert first.status_code == 200, first.text
+    second = await client.post(
+        f"/api/v1/observables/{obs_id}/plugin-runs",
+        json={"plugin_id": plugin_id},  # force omitted → defaults False
+        headers=h,
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["event_id"] == first.json()["event_id"]
+    assert second.json()["id"] == first.json()["id"]
+
+
+async def test_force_true_creates_distinct_run(
+    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a,
+):
+    """force=True salts the event id with a time component, so a real re-run
+    dispatches instead of deduping."""
+    plugin_id, _ = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _h(analyst_a_token, org_a.id)
+    obs_id = await _make_observable(client, h)
+
+    base = await client.post(
+        f"/api/v1/observables/{obs_id}/plugin-runs",
+        json={"plugin_id": plugin_id},
+        headers=h,
+    )
+    forced = await client.post(
+        f"/api/v1/observables/{obs_id}/plugin-runs",
+        json={"plugin_id": plugin_id, "force": True},
+        headers=h,
+    )
+    assert forced.status_code == 200, forced.text
+    assert forced.json()["event_id"] != base.json()["event_id"]
+    assert forced.json()["id"] != base.json()["id"]
+
+
 # --- Auto-run ---
 
 

@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
+from sqlmodel import SQLModel, select
 
 from app.api.deps import ActiveOrgOrApiKeyContext
 from app.api.v1.routes._files import stream_blob
@@ -213,10 +213,20 @@ async def set_observable_tags(
 
 # --- Plugin runs ---
 
+
+class ObservablePluginRunRequest(SQLModel):
+    """Body for POST /observables/{id}/plugin-runs. ``force`` re-runs an analyzer
+    even if it already ran for this observable within retention (salts the
+    otherwise-deterministic manual event id) instead of silently deduping."""
+
+    plugin_id: str
+    force: bool = False
+
+
 @router.post("/{observable_id}/plugin-runs")
 async def run_plugin_for_observable(
     observable_id: uuid.UUID,
-    body: dict,
+    body: ObservablePluginRunRequest,
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
@@ -227,7 +237,8 @@ async def run_plugin_for_observable(
     return await create_manual_plugin_run(
         session,
         ctx,
-        plugin_id=body["plugin_id"],
+        plugin_id=body.plugin_id,
         entity_type="observable",
         entity_id=str(obs.id),
+        force=body.force,
     )
