@@ -1,3 +1,4 @@
+import uuid
 from typing import Annotated
 
 from fastapi import (
@@ -25,7 +26,14 @@ from app.core.security import (
 from app.crud.auth import issue_refresh_token, rotate_refresh_token
 from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
-from app.models.auth import ForgotPasswordRequest, RefreshToken, ResetPasswordRequest
+from app.models.auth import (
+    IP_ADDRESS_MAX_LENGTH,
+    USER_AGENT_MAX_LENGTH,
+    ForgotPasswordRequest,
+    RefreshToken,
+    ResetPasswordRequest,
+    SessionPublic,
+)
 from app.models.user import User
 from app.services import password_reset as password_reset_service
 from app.services.password_reset import PasswordResetError
@@ -80,6 +88,31 @@ def enforce_csrf(request: Request) -> None:
 RefreshCookie = Annotated[str | None, Cookie(alias=REFRESH_COOKIE_NAME)]
 
 
+def request_user_agent(request: Request) -> str | None:
+    """The client's User-Agent, truncated before it ever reaches the DB. The
+    header is attacker-controlled, so we cap its length defensively."""
+    ua = request.headers.get("User-Agent")
+    return ua[:USER_AGENT_MAX_LENGTH] if ua else None
+
+
+def request_client_ip(request: Request) -> str | None:
+    """Best-effort client IP for the session list.
+
+    The app has no dedicated forwarded-IP config, so we keep it simple: when a
+    proxy sets X-Forwarded-For, the *leftmost* hop is the original client (each
+    proxy appends its peer to the right), so we take that; otherwise fall back to
+    the direct socket peer. This value is informational only (shown in the
+    session list) and never used for authorization, so trusting the header here
+    is acceptable."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        leftmost = forwarded.split(",")[0].strip()
+        if leftmost:
+            # Attacker-controlled header — truncate defensively before storing.
+            return leftmost[:IP_ADDRESS_MAX_LENGTH]
+    return request.client.host if request.client else None
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
@@ -104,6 +137,7 @@ async def _access_token_for(session: AsyncSession, user: User) -> str:
 @router.post("/login", response_model=Token)
 async def login(
     body: LoginRequest,
+    request: Request,
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Token:
@@ -118,7 +152,12 @@ async def login(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
 
     access_token = await _access_token_for(session, user)
-    refresh_row = await issue_refresh_token(session, user.id)
+    refresh_row = await issue_refresh_token(
+        session,
+        user.id,
+        user_agent=request_user_agent(request),
+        ip_address=request_client_ip(request),
+    )
     set_refresh_cookie(
         response,
         create_refresh_token(refresh_row.token, refresh_row.user_id, refresh_row.expires_at),
@@ -128,6 +167,7 @@ async def login(
 
 @router.post("/refresh", response_model=Token, dependencies=[Depends(enforce_csrf)])
 async def refresh(
+    request: Request,
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
     refresh_jwt: RefreshCookie = None,
@@ -152,7 +192,13 @@ async def refresh(
     if decoded is None:
         raise credential_error
     token_id, presented_user_id = decoded
-    new_row = await rotate_refresh_token(session, token_id, presented_user_id)
+    new_row = await rotate_refresh_token(
+        session,
+        token_id,
+        presented_user_id,
+        user_agent=request_user_agent(request),
+        ip_address=request_client_ip(request),
+    )
     if new_row is None:
         raise credential_error
     user = await get_user_by_id(session, new_row.user_id)
@@ -191,24 +237,45 @@ async def logout(
 # --- Sessions (G5) ---
 
 
-@router.get("/sessions")
+@router.get("/sessions", response_model=list[SessionPublic])
 async def list_sessions(
     user: CurrentUser,
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> list[dict]:
-    """List the user's active refresh tokens (sessions)."""
+    refresh_jwt: RefreshCookie = None,
+) -> list[SessionPublic]:
+    """List the user's active refresh tokens (sessions), each with the device
+    info captured at issuance and an ``is_current`` flag.
+
+    "Current" is the session behind the caller's own refresh cookie: we decode
+    the cookie the same way /refresh does to recover its token_id and match it
+    against each row. An absent or invalid cookie marks nothing current."""
+    from datetime import UTC, datetime
+
     from sqlmodel import select
-    from app.models.auth import RefreshToken
+
+    current_token_id: uuid.UUID | None = None
+    if refresh_jwt and (decoded := decode_refresh_token(refresh_jwt)):
+        token_id, cookie_user_id = decoded
+        # Only trust the cookie's identity if it names this same user.
+        if cookie_user_id == user.id:
+            current_token_id = token_id
 
     result = await session.execute(
         select(RefreshToken).where(
             RefreshToken.user_id == user.id,
-            RefreshToken.expires_at > __import__("datetime").datetime.now(__import__("datetime").UTC),
+            RefreshToken.expires_at > datetime.now(UTC),
         )
     )
     tokens = result.scalars().all()
     return [
-        {"id": str(t.token), "created_at": t.created_at.isoformat(), "expires_at": t.expires_at.isoformat()}
+        SessionPublic(
+            id=t.token,
+            created_at=t.created_at,
+            expires_at=t.expires_at,
+            user_agent=t.user_agent,
+            ip_address=t.ip_address,
+            is_current=t.token == current_token_id,
+        )
         for t in tokens
     ]
 
@@ -220,10 +287,7 @@ async def revoke_session(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     """Revoke a specific refresh token (log out a session)."""
-    from sqlmodel import select
-    from app.models.auth import RefreshToken
-
-    t = await session.get(RefreshToken, __import__("uuid").UUID(token_id))
+    t = await session.get(RefreshToken, uuid.UUID(token_id))
     if t is None or t.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     await session.delete(t)

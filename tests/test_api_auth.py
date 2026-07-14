@@ -312,3 +312,184 @@ async def test_logout_requires_csrf_header(client: AsyncClient, admin_user):
     await _login(client)
     response = await client.post("/api/v1/auth/logout")
     assert response.status_code == 403
+
+
+# --- Session device info + current-session marker (§1.5a) ---
+
+
+async def _login_with(client: AsyncClient, *, user_agent=None, xff=None) -> str:
+    """Log in with optional device headers; returns the access token."""
+    headers = {}
+    if user_agent is not None:
+        headers["User-Agent"] = user_agent
+    if xff is not None:
+        headers["X-Forwarded-For"] = xff
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "password123"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["access_token"]
+
+
+async def _sessions(client: AsyncClient, access_token: str):
+    response = await client.get(
+        "/api/v1/auth/sessions",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_login_stamps_user_agent_and_leftmost_ip(
+    client: AsyncClient, session, admin_user
+):
+    """Login records the UA header and the leftmost X-Forwarded-For hop (the
+    original client) on the refresh-token row, and the list endpoint surfaces
+    both."""
+    access_token = await _login_with(
+        client,
+        user_agent="Mozilla/5.0 (TestBrowser)",
+        xff="203.0.113.5, 70.41.3.18, 150.172.238.178",
+    )
+    rows = (
+        await session.execute(
+            select(RefreshToken).where(RefreshToken.user_id == admin_user.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].user_agent == "Mozilla/5.0 (TestBrowser)"
+    assert rows[0].ip_address == "203.0.113.5"
+
+    data = await _sessions(client, access_token)
+    assert len(data) == 1
+    assert data[0]["user_agent"] == "Mozilla/5.0 (TestBrowser)"
+    assert data[0]["ip_address"] == "203.0.113.5"
+
+
+async def test_login_ip_falls_back_to_client_host(
+    client: AsyncClient, session, admin_user
+):
+    """With no forwarded header, the direct socket peer is stored."""
+    await _login_with(client, user_agent="Browser-A")
+    rows = (
+        await session.execute(
+            select(RefreshToken).where(RefreshToken.user_id == admin_user.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].ip_address == "127.0.0.1"
+
+
+async def test_login_truncates_long_user_agent(
+    client: AsyncClient, session, admin_user
+):
+    await _login_with(client, user_agent="U" * 1000)
+    rows = (
+        await session.execute(
+            select(RefreshToken).where(RefreshToken.user_id == admin_user.id)
+        )
+    ).scalars().all()
+    assert rows[0].user_agent == "U" * 400
+
+
+async def test_sessions_marks_caller_current(client: AsyncClient, admin_user):
+    """The session behind the caller's refresh cookie is flagged is_current."""
+    access_token = await _login_with(client, user_agent="Browser-A")
+    data = await _sessions(client, access_token)
+    assert len(data) == 1
+    assert data[0]["is_current"] is True
+
+
+async def test_sessions_two_logins_flag_only_current(client: AsyncClient, admin_user):
+    """Two logins from different UAs yield two sessions; only the one matching
+    the current refresh cookie (the most recent login) is current."""
+    await _login_with(client, user_agent="Browser-A", xff="1.1.1.1")
+    access_token = await _login_with(client, user_agent="Browser-B", xff="2.2.2.2")
+
+    data = await _sessions(client, access_token)
+    assert len(data) == 2
+    current = [s for s in data if s["is_current"]]
+    others = [s for s in data if not s["is_current"]]
+    assert len(current) == 1
+    assert len(others) == 1
+    assert current[0]["user_agent"] == "Browser-B"
+    assert current[0]["ip_address"] == "2.2.2.2"
+    assert others[0]["user_agent"] == "Browser-A"
+
+
+async def test_sessions_none_current_without_cookie(client: AsyncClient, admin_user):
+    """Absent refresh cookie -> nothing is current."""
+    access_token = await _login_with(client, user_agent="Browser-A")
+    client.cookies.clear()
+    data = await _sessions(client, access_token)
+    assert len(data) == 1
+    assert data[0]["is_current"] is False
+
+
+async def test_refresh_restamps_device_info(client: AsyncClient, session, admin_user):
+    """Rotation on refresh re-stamps the replacement row with the current
+    request's UA/IP."""
+    await _login_with(client, user_agent="Browser-A", xff="1.1.1.1")
+    response = await client.post(
+        "/api/v1/auth/refresh",
+        headers={**CSRF_HEADERS, "User-Agent": "Browser-B", "X-Forwarded-For": "9.9.9.9"},
+    )
+    assert response.status_code == 200
+    rows = (
+        await session.execute(
+            select(RefreshToken).where(RefreshToken.user_id == admin_user.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].user_agent == "Browser-B"
+    assert rows[0].ip_address == "9.9.9.9"
+
+
+async def test_sessions_isolated_per_user(
+    client: AsyncClient, session, admin_user, viewer_user
+):
+    """Each user's session list is scoped to their own refresh tokens, and a
+    cookie belonging to another user never flags any row is_current."""
+    admin_access = await _login_with(
+        client, user_agent="Admin-Browser", xff="1.1.1.1"
+    )
+    admin_cookie = client.cookies.get("catlico_refresh")
+
+    # Viewer logs in on the same client — overwrites the shared cookie jar.
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "viewer@test.com", "password": "password123"},
+        headers={"User-Agent": "Viewer-Browser", "X-Forwarded-For": "2.2.2.2"},
+    )
+    assert response.status_code == 200
+    viewer_access = response.json()["access_token"]
+    viewer_cookie = client.cookies.get("catlico_refresh")
+
+    def use_cookie(value: str) -> None:
+        client.cookies.clear()
+        client.cookies.set(
+            "catlico_refresh", value, domain="test.local", path="/api/v1/auth"
+        )
+
+    # Admin sees only their own session, flagged current by their own cookie.
+    use_cookie(admin_cookie)
+    admin_sessions = await _sessions(client, admin_access)
+    assert len(admin_sessions) == 1
+    assert admin_sessions[0]["user_agent"] == "Admin-Browser"
+    assert admin_sessions[0]["is_current"] is True
+
+    # Viewer sees only their own session.
+    use_cookie(viewer_cookie)
+    viewer_sessions = await _sessions(client, viewer_access)
+    assert len(viewer_sessions) == 1
+    assert viewer_sessions[0]["user_agent"] == "Viewer-Browser"
+    assert viewer_sessions[0]["is_current"] is True
+
+    # Viewer's cookie against admin's list marks nothing current (cross-user guard).
+    use_cookie(viewer_cookie)
+    cross = await _sessions(client, admin_access)
+    assert len(cross) == 1
+    assert cross[0]["user_agent"] == "Admin-Browser"
+    assert cross[0]["is_current"] is False
