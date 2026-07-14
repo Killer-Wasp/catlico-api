@@ -223,3 +223,62 @@ async def test_only_owner_can_share_or_revoke(
     assert (
         await client.delete(f"/api/v1/dashboards/{board['id']}/share", headers=other)
     ).status_code == 403
+
+
+async def test_dashboard_crud(client: AsyncClient, org_a, analyst_a, analyst_a_token):
+    h = _h(analyst_a_token, org_a.id)
+    c = await client.post(
+        "/api/v1/dashboards",
+        json={"name": "SOC", "layout": {"widgets": []}, "is_public": True},
+        headers=h,
+    )
+    assert c.status_code == 201, c.text
+    did = c.json()["id"]
+    assert c.json()["is_public"] is True
+
+    assert any(
+        d["id"] == did
+        for d in (await client.get("/api/v1/dashboards", headers=h)).json()
+    )
+
+    upd = await client.patch(
+        f"/api/v1/dashboards/{did}", json={"name": "SOC v2"}, headers=h
+    )
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["name"] == "SOC v2"
+
+    assert (await client.delete(f"/api/v1/dashboards/{did}", headers=h)).status_code == 204
+
+
+async def test_dashboard_any_member_owns_a_private_view(
+    client: AsyncClient, org_a, readonly_a, readonly_a_token
+):
+    # Dashboards are user-bound views: any org member (even read-only) may create
+    # their own, and it is private to them by default.
+    h = _h(readonly_a_token, org_a.id)
+    r = await client.post("/api/v1/dashboards", json={"name": "x"}, headers=h)
+    assert r.status_code == 201, r.text
+    assert r.json()["is_owner"] is True
+    assert r.json()["is_public"] is False
+
+
+async def test_dashboard_cross_org_isolated(
+    client: AsyncClient,
+    org_a,
+    analyst_a,
+    analyst_a_token,
+    org_b,
+    analyst_b,
+    analyst_b_token,
+):
+    a_h = _h(analyst_a_token, org_a.id)
+    did = (
+        await client.post("/api/v1/dashboards", json={"name": "d"}, headers=a_h)
+    ).json()["id"]
+
+    b_h = _h(analyst_b_token, org_b.id)
+    assert (await client.get("/api/v1/dashboards", headers=b_h)).json() == []
+    assert (
+        await client.patch(f"/api/v1/dashboards/{did}", json={"name": "z"}, headers=b_h)
+    ).status_code == 404
+    assert (await client.delete(f"/api/v1/dashboards/{did}", headers=b_h)).status_code == 404

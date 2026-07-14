@@ -33,6 +33,7 @@ Workstream A models are written; see [blocked-features-schema-plan.md](blocked-f
 - **Organisation links** — `GET/POST/PATCH/DELETE organisations/{org_id}/links` live inside `app/api/v1/routes/organisations.py`; model + crud in `organisation_link.py`.
 - **Global admin audit search** — `GET /audit/` (SuperAdmin-only, paginated, filterable by action/object_type/context) in `app/api/v1/routes/audit.py`.
 - **Models + CRUD/routes**: KnowledgeBasePage, ApiKey, SlaPolicy, Notifier, NotificationRule models + CRUD + routes + mounts are DONE (Workstream A). See [blocked-features-schema-plan.md](blocked-features-schema-plan.md) for migration history. (Function was also built here but removed 2026-07 — superseded by the plugin system.)
+- **Custom metrics — ❌ REMOVED 2026-07-14** — redundant with custom fields (mirrors TheHive's own deprecation of case metrics). `/metrics` CRUD + per-case metric values dropped (`metric`/`case_metric_value` tables, migration `a9d1e3f5b7c9`); dashboards are unaffected — they read `/overview`, never metrics. Do not rebuild; use custom fields.
 
 ---
 

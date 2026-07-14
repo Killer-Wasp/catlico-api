@@ -17,7 +17,6 @@ from app.models.flag import Flag  # noqa: F401
 from app.models.knowledge_base import KnowledgeBasePage, KnowledgeBasePageVersion  # noqa: F401
 from app.models.log import Log  # noqa: F401
 from app.models.dashboard import Dashboard  # noqa: F401
-from app.models.metric import Metric, CaseMetricValue  # noqa: F401
 from app.models.misp import MispServer  # noqa: F401
 from app.models.notification import (  # noqa: F401
     NotificationRule,
