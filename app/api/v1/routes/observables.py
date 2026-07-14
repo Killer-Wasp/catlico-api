@@ -105,7 +105,8 @@ async def list_observables(
         limit=limit,
         filters=filters,
     )
-    return Page(items=obs, total=total, skip=skip, limit=limit)
+    items = await obs_crud.to_public_list(session, obs)
+    return Page(items=items, total=total, skip=skip, limit=limit)
 
 
 @router.get("/filters", response_model=ObservableFacets)
@@ -131,7 +132,7 @@ async def get_observable(
 ) -> ObservablePublic:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
     _require("read:observable", perms)
-    return obs
+    return await obs_crud.to_public(session, obs)
 
 
 @router.patch("/{observable_id}", response_model=ObservablePublic)
@@ -143,7 +144,8 @@ async def update_observable(
 ) -> ObservablePublic:
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
     _require("write:observable", perms)
-    return await obs_crud.update_observable(session, obs, obs_in, updated_by=str(ctx.user.id))
+    updated = await obs_crud.update_observable(session, obs, obs_in, updated_by=str(ctx.user.id))
+    return await obs_crud.to_public(session, updated)
 
 
 @router.delete("/{observable_id}", status_code=status.HTTP_204_NO_CONTENT)

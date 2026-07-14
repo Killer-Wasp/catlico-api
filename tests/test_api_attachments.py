@@ -47,6 +47,87 @@ async def test_upload_and_download_file_observable(
     assert "evil.bin" in d.headers["content-disposition"]
 
 
+async def test_promote_preserves_file_observable_attachment(
+    client: AsyncClient, session, org_a, builtin_roles, observable_types, analyst_a, analyst_a_token
+):
+    """Regression: alert->case promotion must carry the file observable's attachment
+    link over to the new case observable (content-addressed; same blob). Before the
+    fix the promoted observable's /file 404s."""
+    h = _headers(analyst_a_token, org_a.id)
+    r = await client.post(
+        "/api/v1/alerts/",
+        json={"type": "phishing", "source": "gw", "source_ref": "f1", "title": "a"},
+        headers=h,
+    )
+    alert_id = r.json()["id"]
+    content = b"promoted-malware-\x00\x01\x02"
+    up = await client.post(
+        f"/api/v1/alerts/{alert_id}/observables/file",
+        files={"file": ("evil.bin", content, "application/octet-stream")},
+        data={"observable_type": "file"},
+        headers=h,
+    )
+    assert up.status_code == 201, up.text
+
+    promo = await client.post(f"/api/v1/alerts/{alert_id}/promote", json={}, headers=h)
+    case_id = promo.json()["id"]
+    lst = await client.get(f"/api/v1/cases/{case_id}/observables", headers=h)
+    assert lst.json()["total"] == 1
+    obs_id = lst.json()["items"][0]["id"]
+
+    # The promoted observable's file download must return the same bytes.
+    d = await client.get(f"/api/v1/observables/{obs_id}/file", headers=h)
+    assert d.status_code == 200, d.text
+    assert d.content == content
+    assert "evil.bin" in d.headers["content-disposition"]
+
+
+async def test_observable_public_carries_attachment_metadata(
+    client: AsyncClient, session, org_a, builtin_roles, observable_types, analyst_a, analyst_a_token
+):
+    """ObservablePublic exposes {filename, size, content_type} for file observables
+    and null for string observables — on create, single GET, and list."""
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    h = _headers(analyst_a_token, org_a.id)
+    content = b"metadata-bytes-abc"
+    r = await client.post(
+        f"/api/v1/cases/{case.id}/observables/file",
+        files={"file": ("report.pdf", content, "application/pdf")},
+        data={"observable_type": "file"},
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["attachment"] == {
+        "filename": "report.pdf",
+        "size": len(content),
+        "content_type": "application/pdf",
+    }
+    obs_id = r.json()["id"]
+
+    got = await client.get(f"/api/v1/observables/{obs_id}", headers=h)
+    assert got.json()["attachment"]["filename"] == "report.pdf"
+    assert got.json()["attachment"]["size"] == len(content)
+
+    lst = await client.get(f"/api/v1/cases/{case.id}/observables", headers=h)
+    item = next(o for o in lst.json()["items"] if o["id"] == obs_id)
+    assert item["attachment"] == {
+        "filename": "report.pdf",
+        "size": len(content),
+        "content_type": "application/pdf",
+    }
+
+    # A string observable has no attachment.
+    s = await client.post(
+        f"/api/v1/cases/{case.id}/observables",
+        json={"observable_type": "ip", "data": "8.8.8.8"},
+        headers=h,
+    )
+    assert s.status_code == 201, s.text
+    assert s.json()["attachment"] is None
+    got_s = await client.get(f"/api/v1/observables/{s.json()['id']}", headers=h)
+    assert got_s.json()["attachment"] is None
+
+
 async def test_string_endpoint_rejects_file_type(
     client: AsyncClient, session, org_a, builtin_roles, observable_types, analyst_a, analyst_a_token
 ):

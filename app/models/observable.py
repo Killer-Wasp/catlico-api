@@ -108,6 +108,16 @@ class ObservableCreate(SQLModel):
     ignore_similarity: bool = False
 
 
+class ObservableAttachmentMeta(SQLModel):
+    """File-attachment projection embedded in ObservablePublic so the web can render
+    a file chip (and know a download exists) without a separate probe. All fields are
+    stored: filename on the ObservableAttachmentLink, size/content_type on the blob."""
+
+    filename: str
+    size: int
+    content_type: str
+
+
 class ObservablePublic(SQLModel):
     id: uuid.UUID
     case_id: int | None
@@ -123,6 +133,9 @@ class ObservablePublic(SQLModel):
     verdict: str | None = None
     created_at: datetime
     updated_at: datetime | None
+    #: Present for file (attachment-backed) observables; null for string observables.
+    #: Populated via crud.observable.load_attachment_meta at the API boundary.
+    attachment: ObservableAttachmentMeta | None = None
 
 
 class ObservableUpdate(SQLModel):

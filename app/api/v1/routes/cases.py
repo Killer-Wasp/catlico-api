@@ -381,7 +381,8 @@ async def list_case_observables(
         skip=skip,
         limit=limit,
     )
-    return Page(items=obs, total=total, skip=skip, limit=limit)
+    items = await obs_crud.to_public_list(session, obs)
+    return Page(items=items, total=total, skip=skip, limit=limit)
 
 
 @router.post(
@@ -429,7 +430,7 @@ async def create_case_observable(
         ):
             raise conflict
         raise
-    return observable
+    return await obs_crud.to_public(session, observable)
 
 
 @router.post(
@@ -482,7 +483,7 @@ async def create_case_file_observable(
         organisation_id=case_ctx.organisation_id,
         created_by=str(case_ctx.user.id),
     )
-    return observable
+    return await obs_crud.to_public(session, observable)
 
 
 @router.get("/{case_id}/alerts", response_model=Page[AlertPublic])

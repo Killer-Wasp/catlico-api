@@ -196,6 +196,58 @@ async def get_observable(session: AsyncSession, observable_id: uuid.UUID) -> Obs
     return obs
 
 
+async def _attachment_meta_map(
+    session: AsyncSession, observables: list[Observable]
+) -> dict[uuid.UUID, "ObservableAttachmentMeta"]:
+    """Map observable_id -> file-attachment metadata for the file observables in the
+    list. One query over ObservableAttachmentLink⋈Attachment keyed by observable_id —
+    no N+1, regardless of list size. String observables simply aren't in the map."""
+    from app.models.attachment import Attachment, ObservableAttachmentLink
+    from app.models.observable import ObservableAttachmentMeta
+
+    ids = [o.id for o in observables]
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(ObservableAttachmentLink, Attachment)
+            .join(Attachment, Attachment.id == ObservableAttachmentLink.attachment_id)
+            .where(
+                ObservableAttachmentLink.observable_id.in_(ids),
+                ObservableAttachmentLink.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    return {
+        link.observable_id: ObservableAttachmentMeta(
+            filename=link.name, size=blob.size, content_type=blob.content_type
+        )
+        for link, blob in rows
+    }
+
+
+async def to_public_list(
+    session: AsyncSession, observables: list[Observable]
+) -> list["ObservablePublic"]:
+    """Serialize observables to ObservablePublic, populating `.attachment` for file
+    observables (null for string observables) via one batched attachment lookup."""
+    from app.models.observable import ObservablePublic
+
+    meta = await _attachment_meta_map(session, observables)
+    out: list[ObservablePublic] = []
+    for o in observables:
+        pub = ObservablePublic.model_validate(o, from_attributes=True)
+        pub.attachment = meta.get(o.id)
+        out.append(pub)
+    return out
+
+
+async def to_public(session: AsyncSession, obs: Observable) -> "ObservablePublic":
+    """Single-observable convenience wrapper around to_public_list."""
+    (pub,) = await to_public_list(session, [obs])
+    return pub
+
+
 async def get_type(session: AsyncSession, name: str) -> ObservableType | None:
     return await session.get(ObservableType, name)
 
@@ -507,12 +559,14 @@ async def import_alert_observables_to_case(
 ) -> int:
     """Copy an alert's observables into the promoted case, deduped by (type, data).
     Returns the count imported. Fan-out shares apply as for any case observable."""
+    from app.crud import attachment as attachment_crud
+
     alert_obs, _ = await list_observables_for_alert(session, alert_id, limit=10_000)
     imported = 0
     for src in alert_obs:
         if await find_case_observable(session, case_id, src.observable_type, src.data):
             continue
-        await create_case_observable(
+        new_obs = await create_case_observable(
             session,
             ObservableCreate(
                 observable_type=src.observable_type,
@@ -527,6 +581,21 @@ async def import_alert_observables_to_case(
             organisation_id=organisation_id,
             created_by=created_by,
         )
+        # File observables carry a blob via an ObservableAttachmentLink. The link is
+        # keyed by observable_id, so the new case observable needs its own link — but
+        # pointing at the SAME content-addressed blob (no re-upload/data copy). Without
+        # this, the promoted observable's GET /file 404s.
+        src_link = await attachment_crud.first_observable_link(session, src.id)
+        if src_link is not None:
+            link, _blob = src_link
+            await attachment_crud.create_observable_link(
+                session,
+                attachment_id=link.attachment_id,
+                observable_id=new_obs.id,
+                name=link.name,
+                organisation_id=organisation_id,
+                created_by=created_by,
+            )
         imported += 1
     return imported
 

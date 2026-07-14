@@ -607,7 +607,8 @@ async def list_alert_observables(
     obs, total = await obs_crud.list_observables_for_alert(
         session, alert_id, skip=skip, limit=limit
     )
-    return Page(items=obs, total=total, skip=skip, limit=limit)
+    items = await obs_crud.to_public_list(session, obs)
+    return Page(items=items, total=total, skip=skip, limit=limit)
 
 
 @router.post(
@@ -633,7 +634,7 @@ async def create_alert_observable(
         organisation_id=ctx.organisation_id,
         created_by=str(ctx.user.id),
     )
-    return observable
+    return await obs_crud.to_public(session, observable)
 
 
 @router.post(
@@ -681,7 +682,7 @@ async def create_alert_file_observable(
         organisation_id=ctx.organisation_id,
         created_by=str(ctx.user.id),
     )
-    return observable
+    return await obs_crud.to_public(session, observable)
 
 
 @router.get("/{alert_id}/similar-cases", response_model=list[SimilarCasePublic])
