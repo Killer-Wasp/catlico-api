@@ -124,6 +124,21 @@ class Settings(BaseSettings):
     PLUGIN_PUSH_BACKOFF_CAP_SECONDS: int = 900
     PLUGIN_PUSH_MAX_AGE_SECONDS: int = 86400
     PLUGIN_PUSH_TIMEOUT_SECONDS: float = 10.0
+    # Audit outbox drain + retention (plans/phase-2 §2.4).
+    # A row that fails delivery is retried until `attempts` reaches this cap, then
+    # dead-lettered (marked terminal, excluded from the drain) instead of retried
+    # forever.
+    MAX_OUTBOX_ATTEMPTS: int = 10
+    # Delivered outbox rows are pruned after this many days; dead-lettered rows are
+    # kept longer for post-mortem before pruning.
+    OUTBOX_RETENTION_DAYS: int = 30
+    OUTBOX_DEAD_LETTER_RETENTION_DAYS: int = 90
+    # Read in-app notifications (and their read receipts) are pruned after this many
+    # days; unread ones are kept.
+    NOTIFICATION_READ_RETENTION_DAYS: int = 90
+    # Notifier delivery-ledger rows are pruned after this many days.
+    NOTIFIER_DELIVERY_RETENTION_DAYS: int = 30
+
     # Fernet key (urlsafe base64, 32 bytes) used to encrypt connector secrets at
     # rest. Required at startup.
     SECRET_ENCRYPTION_KEY: str | None = None

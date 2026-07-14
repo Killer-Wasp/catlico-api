@@ -120,3 +120,8 @@ class OverviewPublic(SQLModel):
     iocs_tracked: int
     cases_by_severity: list[TrendPoint]
     sla_compliance: SlaCompliance
+    #: Ops health: count of dead-lettered audit-outbox rows (delivery gave up after
+    #: exhausting retries). Non-zero means events are stuck and need investigation.
+    #: Platform-wide (the outbox is not org-scoped), surfaced here so operators see
+    #: it without a dedicated admin route.
+    dead_letter_count: int = 0

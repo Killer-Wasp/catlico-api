@@ -145,7 +145,7 @@ class UserNotification(SQLModel, table=True):
     #: idempotency key so drain retries can't duplicate rows; None for rows
     #: created outside the outbox pipeline.
     outbox_id: int | None = Field(
-        default=None, foreign_key="audit_outbox.id", index=True, ondelete="CASCADE"
+        default=None, foreign_key="audit_outbox.id", index=True, ondelete="SET NULL"
     )
     event_type: str = Field(index=True)
     title: str
@@ -246,8 +246,10 @@ class NotifierDelivery(SQLModel, table=True):
     )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    outbox_id: int = Field(
-        foreign_key="audit_outbox.id", index=True, ondelete="CASCADE"
+    #: Nullable + SET NULL: pruning the source outbox row nulls this link but
+    #: keeps the delivery-ledger row (see migration c4e8f2a6b0d9).
+    outbox_id: int | None = Field(
+        default=None, foreign_key="audit_outbox.id", index=True, ondelete="SET NULL"
     )
     notifier_id: uuid.UUID = Field(
         foreign_key="notifier.id", index=True, ondelete="CASCADE"

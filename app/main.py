@@ -14,6 +14,7 @@ from app.core.db import AsyncSessionLocal, init_db, run_migrations
 from app.crud.audit import dispatch_pending_outbox, register_consumer
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
+from app.services.outbox_maintenance import run_outbox_maintenance_sweep
 from app.services.plugin_dispatch import plugin_event_consumer, push_pending_deliveries
 from app.services.plugin_maintenance import run_maintenance_sweep
 from app.services.websocket_hub import ws_broadcast_consumer
@@ -50,7 +51,10 @@ async def _outbox_poller() -> None:
 
 
 async def _plugin_maintenance_poller() -> None:
-    """Reap stuck plugin runs, mark silent runners offline, roll up usage stats."""
+    """Reap stuck plugin runs, mark silent runners offline, roll up usage stats,
+    and prune the audit outbox + read notifications + delivery ledger past their
+    retention windows (separate sessions/commits so one sweep can't roll back the
+    other)."""
     while True:
         try:
             async with AsyncSessionLocal() as session:
@@ -59,6 +63,13 @@ async def _plugin_maintenance_poller() -> None:
             raise
         except Exception:  # noqa: BLE001 — poller must never die on a transient error
             logger.exception("plugin maintenance sweep failed")
+        try:
+            async with AsyncSessionLocal() as session:
+                await run_outbox_maintenance_sweep(session)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — poller must never die on a transient error
+            logger.exception("outbox maintenance sweep failed")
         await asyncio.sleep(settings.PLUGIN_MAINTENANCE_INTERVAL_SECONDS)
 
 

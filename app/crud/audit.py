@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.configs import settings
 from app.core.context import get_request_id
 from app.crud.pagination import paginate
 from app.models.audit import Audit, AuditOutbox
@@ -161,12 +162,20 @@ async def record_audit(
 async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) -> int:
     """Drain undelivered outbox rows: hand each to every registered consumer, then
     mark delivered only after *all* consumers complete successfully. Runs on its own
-    session (the poller's), so it commits. Returns the number of rows delivered."""
+    session (the poller's), so it commits. Returns the number of rows delivered.
+
+    A row that keeps failing is retried until `attempts` reaches
+    `MAX_OUTBOX_ATTEMPTS`, at which point it is dead-lettered (a terminal
+    `dead_lettered_at` marker) and excluded from future drains — the same way a
+    delivered row is — so a poison row can't retry forever."""
     rows = (
         (
             await session.execute(
                 select(AuditOutbox)
-                .where(AuditOutbox.delivered_at.is_(None))
+                .where(
+                    AuditOutbox.delivered_at.is_(None),
+                    AuditOutbox.dead_lettered_at.is_(None),
+                )
                 .order_by(AuditOutbox.id)
                 .limit(limit)
             )
@@ -194,6 +203,16 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
             row.delivered_at = datetime.now(UTC)
             session.add(row)
             delivered += 1
+        elif row.attempts >= settings.MAX_OUTBOX_ATTEMPTS:
+            # Terminal: give up and dead-letter. Logged once here (the row is then
+            # excluded from the drain query, so it never reaches this branch again).
+            row.dead_lettered_at = datetime.now(UTC)
+            session.add(row)
+            logger.error(
+                "outbox row %d dead-lettered after %d failed attempts",
+                row.id,
+                row.attempts,
+            )
     if rows:
         await session.commit()
     return delivered

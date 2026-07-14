@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.models.alert import Alert, AlertStatus
+from app.models.audit import AuditOutbox
 from app.models.case_ import Case, CaseResolutionStatus, CaseStatus
 from app.models.case_share import CaseShare
 from app.models.observable import Observable
@@ -549,6 +550,19 @@ async def _sla_compliance(
     return SlaCompliance(met=met, breached=breached, pct=pct)
 
 
+async def _dead_letter_count(session: AsyncSession) -> int:
+    """Platform-wide count of dead-lettered outbox rows (a stuck-delivery signal).
+    Not org-scoped — the outbox has no organisation column — but cheap to surface
+    on the org dashboard so operators notice stuck events."""
+    return (
+        await session.scalar(
+            select(func.count())
+            .select_from(AuditOutbox)
+            .where(AuditOutbox.dead_lettered_at.isnot(None))
+        )
+    ) or 0
+
+
 async def build_overview(
     session: AsyncSession, org_id: str, *, trend_days: int = 14
 ) -> OverviewPublic:
@@ -571,4 +585,5 @@ async def build_overview(
         iocs_tracked=await _iocs_tracked(session, org_id),
         cases_by_severity=await _cases_by_severity(session, org_id),
         sla_compliance=await _sla_compliance(session, org_id, now),
+        dead_letter_count=await _dead_letter_count(session),
     )

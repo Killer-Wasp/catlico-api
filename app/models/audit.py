@@ -47,6 +47,10 @@ class AuditOutbox(SQLModel, table=True):
     payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     delivered_at: datetime | None = None
     attempts: int = 0
+    #: Terminal marker: set once `attempts` reaches `MAX_OUTBOX_ATTEMPTS`. A
+    #: dead-lettered row is excluded from the drain (like a delivered one) so it
+    #: stops retrying forever, and is pruned on its own longer retention window.
+    dead_lettered_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

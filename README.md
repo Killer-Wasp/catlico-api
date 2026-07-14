@@ -100,6 +100,7 @@ membership — never as a post-filter. See **[docs/architecture.md](docs/archite
 | [Getting started](docs/getting-started.md) | Local setup, everyday commands, migrations, troubleshooting |
 | [Architecture](docs/architecture.md) | Layers, domain model, multi-tenancy, auth, the audit/outbox path |
 | [Configuration](docs/configuration.md) | Every environment variable, plus a production checklist |
+| [Deployment](docs/deployment.md) | Running in production: TLS/cookies, migrations, secrets, storage, scaling caveats |
 | [Plugin system](docs/plugin-system.md) | Runner and runtime surfaces, dispatch, proposed actions, invariants |
 | [Audit & outbox](docs/audit-outbox-plan.md) | Design of the transactional outbox |
 | [Case merge](docs/case-merge-design.md) | Case and alert merge semantics |
