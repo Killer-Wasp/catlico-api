@@ -25,8 +25,21 @@ async def _build_role_public(session: AsyncSession, role: Role) -> RolePublic:
         organisation_id=role.organisation_id,
         name=role.name,
         permissions=permissions,
+        is_builtin=role.is_builtin,
         created_at=role.created_at,
     )
+
+
+def _reject_if_builtin(role: Role, verb: str) -> None:
+    """Built-in roles are a stable, protected vocabulary: reject ANY mutation
+    (permissions, name, or delete) so an admin can't strip org-admin of its grants
+    and brick their own org. There are no harmless editable fields on a role, so the
+    guard rejects the whole operation rather than a subset of fields."""
+    if role.is_builtin:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Built-in roles cannot be {verb}",
+        )
 
 
 async def _role_in_org_or_404(
@@ -97,10 +110,11 @@ async def update_role(
     ctx: Annotated[AuthContext, require_active_permission("write:role")],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> RolePublic:
+    role = await _role_in_org_or_404(session, role_id, ctx.organisation_id)
+    _reject_if_builtin(role, "modified")
     assert_permissions_grantable(
         {p.value for p in role_in.permissions}, await get_granter_groups(session, ctx)
     )
-    role = await _role_in_org_or_404(session, role_id, ctx.organisation_id)
     role = await role_crud.update_role_permissions(
         session, role, role_in, updated_by=str(ctx.user.id)
     )
@@ -124,6 +138,7 @@ async def delete_role(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     role = await _role_in_org_or_404(session, role_id, ctx.organisation_id)
+    _reject_if_builtin(role, "deleted")
     await record_audit(
         session,
         action="delete",

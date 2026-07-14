@@ -125,3 +125,74 @@ async def test_non_member_cannot_read_roles(client: AsyncClient, viewer_token, o
 async def test_unauthenticated_rejected(client: AsyncClient):
     r = await client.get("/api/v1/roles/")
     assert r.status_code in (401, 403)
+
+
+# --- Built-in role protection ---
+
+
+async def test_builtin_roles_flagged_custom_not(client: AsyncClient, admin_token, org_a):
+    """Seeded built-in roles expose is_builtin=True; custom roles are False."""
+    h = _auth(admin_token, org_a.id)
+    listed = await client.get("/api/v1/roles/", headers=h)
+    assert listed.status_code == 200, listed.text
+    by_name = {r["name"]: r for r in listed.json()}
+    for name in ("org-admin", "analyst", "read-only"):
+        assert by_name[name]["is_builtin"] is True, name
+
+    created = await client.post(
+        "/api/v1/roles/",
+        json={"name": "custom", "permissions": ["read:investigation"]},
+        headers=h,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["is_builtin"] is False
+
+
+async def test_cannot_delete_builtin_role(client: AsyncClient, admin_token, org_a):
+    h = _auth(admin_token, org_a.id)
+    listed = await client.get("/api/v1/roles/", headers=h)
+    admin_role = next(r for r in listed.json() if r["name"] == "org-admin")
+    d = await client.delete(f"/api/v1/roles/{admin_role['id']}", headers=h)
+    assert d.status_code == 409, d.text
+    assert "built-in" in d.json()["detail"].lower()
+    # still present after the rejected delete
+    still = await client.get(f"/api/v1/roles/{admin_role['id']}", headers=h)
+    assert still.status_code == 200
+
+
+async def test_cannot_patch_builtin_role_permissions(
+    client: AsyncClient, admin_token, org_a
+):
+    h = _auth(admin_token, org_a.id)
+    listed = await client.get("/api/v1/roles/", headers=h)
+    admin_role = next(r for r in listed.json() if r["name"] == "org-admin")
+    upd = await client.patch(
+        f"/api/v1/roles/{admin_role['id']}",
+        json={"permissions": ["read:investigation"]},
+        headers=h,
+    )
+    assert upd.status_code == 409, upd.text
+    assert "built-in" in upd.json()["detail"].lower()
+    # permissions unchanged (org-admin still holds the full grant surface)
+    unchanged = await client.get(f"/api/v1/roles/{admin_role['id']}", headers=h)
+    assert len(unchanged.json()["permissions"]) > 1
+
+
+async def test_seed_stamps_already_seeded_org(session, org_a):
+    """Orgs seeded before is_builtin existed get re-stamped idempotently on re-seed
+    (mirrors the startup upsert running against already-seeded data)."""
+    from sqlalchemy import update
+
+    from app.crud.role import seed_org_builtin_roles
+    from app.models.role import Role
+
+    # Simulate legacy rows written before the flag existed.
+    await session.execute(
+        update(Role).where(Role.organisation_id == org_a.id).values(is_builtin=False)
+    )
+    await session.commit()
+
+    roles = await seed_org_builtin_roles(session, org_a.id)
+    for name in ("org-admin", "analyst", "read-only"):
+        await session.refresh(roles[name])
+        assert roles[name].is_builtin is True, name

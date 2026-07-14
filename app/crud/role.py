@@ -89,7 +89,12 @@ async def upsert_builtin_role(
 ) -> Role:
     role = await get_role_by_name(session, name, organisation_id)
     if not role:
-        role = Role(name=name, organisation_id=organisation_id, created_by=created_by)
+        role = Role(
+            name=name,
+            organisation_id=organisation_id,
+            created_by=created_by,
+            is_builtin=True,
+        )
         session.add(role)
         await session.flush()
         for perm in permissions:
@@ -98,12 +103,21 @@ async def upsert_builtin_role(
         await session.refresh(role)
         return role
 
-    # Add any newly defined permissions that the existing role is missing.
+    # Add any newly defined permissions that the existing role is missing, and
+    # (idempotently) stamp is_builtin so orgs seeded before the flag existed get
+    # flagged when this upsert re-runs at startup.
+    dirty = False
+    if not role.is_builtin:
+        role.is_builtin = True
+        session.add(role)
+        dirty = True
     existing_perms = set(await get_role_permissions(session, role.id))
     new_perms = {p.value for p in permissions} - existing_perms
     if new_perms:
         for perm in new_perms:
             session.add(RolePermission(role_id=role.id, permission=perm))
+        dirty = True
+    if dirty:
         await session.commit()
         await session.refresh(role)
     return role

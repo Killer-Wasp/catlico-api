@@ -115,6 +115,10 @@ class Role(TimestampMixin, table=True):
     #: another org. Name is unique per organisation, not globally.
     organisation_id: str = Field(foreign_key="organisation.id", index=True, ondelete="CASCADE")
     name: str = Field(index=True)
+    #: Built-in roles (org-admin/analyst/read-only) are a stable, protected
+    #: vocabulary seeded per-org. They cannot be edited or deleted via the API, so an
+    #: admin can't strip org-admin of its permissions and brick their own org.
+    is_builtin: bool = Field(default=False, nullable=False)
 
 
 class RolePermission(SQLModel, table=True):
@@ -134,6 +138,7 @@ class RolePublic(SQLModel):
     organisation_id: str
     name: str
     permissions: list[str]
+    is_builtin: bool
     created_at: datetime
 
 
