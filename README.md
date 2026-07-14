@@ -2,7 +2,7 @@
 
 **The backend for Catlico — an open-source security incident response platform.**
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1.svg?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -132,4 +132,4 @@ throwaway Postgres via testcontainers, so Docker must be running.
 
 ## License
 
-[GNU Affero General Public License v3.0](LICENSE).
+[MIT License](LICENSE).
