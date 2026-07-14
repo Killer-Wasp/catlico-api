@@ -230,31 +230,6 @@ async def task_queue_facets(
     return TaskQueueFacets(assignees=emails, unassigned=unassigned, kinds=kinds)
 
 
-async def list_groups_for_case(
-    session: AsyncSession,
-    case_id: int,
-    *,
-    organisation_id: str,
-    is_owner: bool,
-) -> list[str]:
-    """Distinct non-empty task group names visible to the caller's org — for UI autocomplete."""
-    base = (
-        select(Task.group)
-        .where(
-            Task.case_id == case_id,
-            Task.deleted_at.is_(None),
-            Task.group != "",
-        )
-        .distinct()
-    )
-    if not is_owner:
-        base = base.join(TaskShare, _SHARE_ON_TASK).where(
-            TaskShare.organisation_id == organisation_id
-        )
-    result = await session.execute(base.order_by(Task.group))
-    return list(result.scalars().all())
-
-
 async def create_task(
     session: AsyncSession,
     task_in: TaskCreate,

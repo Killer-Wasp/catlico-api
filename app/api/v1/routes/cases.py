@@ -340,19 +340,6 @@ async def list_case_tasks(
     )
 
 
-@router.get("/{case_id}/task-groups", response_model=list[str])
-async def list_case_task_groups(
-    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:task")],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> list[str]:
-    return await task_crud.list_groups_for_case(
-        session,
-        case_ctx.case.id,
-        organisation_id=case_ctx.organisation_id,
-        is_owner=case_ctx.is_owner,
-    )
-
-
 @router.post(
     "/{case_id}/tasks",
     response_model=TaskPublic,
@@ -798,20 +785,3 @@ async def delete_case_attachment(
     await attachment_crud.delete_link(
         session, link, deleted_by=str(case_ctx.user.id)
     )
-
-
-# --- Timeline (G1) ---
-
-
-@router.get("/{case_id}/timeline")
-async def case_timeline(
-    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
-    session: Annotated[AsyncSession, Depends(get_session)],
-    skip: int = 0,
-    limit: int = 100,
-) -> dict:
-    from app.services.timeline import build_timeline
-
-    events = await build_timeline(session, case_ctx.case.id, skip=skip, limit=limit)
-    total = len(events)
-    return {"items": events, "total": total, "skip": skip, "limit": limit}

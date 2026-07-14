@@ -1,5 +1,5 @@
 """Tests for the Tasks/Logs refinement (grill 2026-06-13): status state machine,
-auto end_date, soft delete, per-org flag, due_date, log occurred_at, task-groups."""
+auto end_date, soft delete, per-org flag, due_date, log occurred_at."""
 from datetime import UTC, datetime
 
 import pytest
@@ -202,31 +202,3 @@ async def test_log_occurred_at_orders_timeline(
     r = await client.get(f"/api/v1/cases/{task.case_id}/tasks/{task.id}/logs", headers=h)
     msgs = [item["message"] for item in r.json()["items"]]
     assert msgs[0] == "older-event"
-
-
-# --- Distinct task-groups endpoint ---
-
-
-async def test_task_groups_endpoint(
-    client, session, org_a, builtin_roles, analyst_a, analyst_a_token
-):
-    case = await case_crud.create_case(
-        session,
-        CaseCreate(title="c"),
-        owner_org_id=org_a.id,
-        owner_role_id=builtin_roles["org-admin"].id,
-        created_by=str(analyst_a.id),
-    )
-    for grp in ("Triage", "Containment", "Triage", ""):
-        await task_crud.create_task(
-            session,
-            TaskCreate(title="t", group=grp),
-            case_id=case.id,
-            organisation_id=org_a.id,
-            created_by=str(analyst_a.id),
-        )
-    h = _headers(analyst_a_token, org_a.id)
-    r = await client.get(f"/api/v1/cases/{case.id}/task-groups", headers=h)
-    assert r.status_code == 200, r.text
-    # Distinct, sorted, empty string excluded
-    assert r.json() == ["Containment", "Triage"]
