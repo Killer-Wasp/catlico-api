@@ -93,6 +93,48 @@ class RunnablePluginPublic(SQLModel):
     capabilities: list[str] = []
 
 
+class PluginVersionRunner(SQLModel):
+    """A runner hosting a plugin version, for the Versions tab."""
+
+    id: str
+    name: str = ""
+    status: str = ""
+    install_status: str = ""
+    health_status: str | None = None
+
+
+class PluginVersionInfo(SQLModel):
+    """Public view for GET /plugins/{plugin_id}/versions — the installed version
+    metadata the web Versions tab renders. ``installed_version`` is null when the
+    plugin is in the catalog but not installed on any runner."""
+
+    plugin_id: str
+    installed_version: str | None = None
+    installed_version_id: str | None = None
+    source_type: str | None = None
+    source_url: str | None = None
+    source_ref: str | None = None
+    commit_sha: str | None = None
+    status: str | None = None
+    installed_at: datetime | None = None
+    runners: list[PluginVersionRunner] = []
+
+
+class PluginLatestCheck(SQLModel):
+    """Public view for GET /plugins/{plugin_id}/versions/check-latest.
+
+    Best-effort: ``status`` is ``up_to_date | update_available | unknown``.
+    ``latest_version`` is null (and ``reason`` populated) whenever the source
+    cannot be consulted — the endpoint never errors on a failed/absent check."""
+
+    plugin_id: str
+    installed_version: str | None = None
+    latest_version: str | None = None
+    update_available: bool = False
+    status: str = "unknown"  # up_to_date | update_available | unknown
+    reason: str | None = None
+
+
 class PluginInstallStatusUpdate(SQLModel):
     """Body for POST /api/internal/plugin-runner/plugins/{plugin_version_id}/install-status.
 

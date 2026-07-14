@@ -18,8 +18,12 @@ from app.models.plugin_runner import (
     OrgPlugin,
     PluginConfig,
     PluginDefinition,
+    PluginLatestCheck,
     PluginRunner as PluginRunnerModel,
     PluginRun,
+    PluginVersion,
+    PluginVersionInfo,
+    PluginVersionRunner,
     RunnablePluginPublic,
     RunnerPluginInstallation,
 )
@@ -166,6 +170,104 @@ async def _runner_ids_for_definition(
         )
     ).scalars().all()
     return [row.runner_id for row in rows]
+
+
+# --- Version metadata (Versions tab) ---
+
+
+def _version_tuple(v: str) -> tuple:
+    """Best-effort ordered key for a version string. Splits on dots and orders
+    numeric segments numerically, everything else lexically (numbers sort before
+    text so ``1.0`` < ``1.0a``). Unparseable input degrades gracefully rather
+    than raising."""
+    parts: list[tuple[int, object]] = []
+    for seg in str(v).replace("-", ".").split("."):
+        if seg.isdigit():
+            parts.append((0, int(seg)))
+        else:
+            parts.append((1, seg))
+    return tuple(parts)
+
+
+def _version_is_newer(candidate: str, installed: str) -> bool:
+    """True when ``candidate`` is a strictly newer version than ``installed``.
+    Defensive: any comparison error falls back to a plain inequality check."""
+    if not candidate:
+        return False
+    try:
+        return _version_tuple(candidate) > _version_tuple(installed)
+    except Exception:  # noqa: BLE001 - any parse/compare failure falls back to inequality.
+        return candidate != installed
+
+
+async def _fetch_source_latest_version(source_url: str, source_ref: str) -> str | None:
+    """Best-effort lookup of the newest version a plugin's git source advertises.
+
+    v1 has no registry and no reliable, uniform way to locate/parse a manifest at
+    an arbitrary repo/ref, so this returns ``None`` ("unknown") by design. The
+    contract is deliberately isolated here so it can be filled in (e.g. fetch the
+    manifest from a pinned raw URL, compare its ``version``) without touching the
+    endpoint or its response shape, and so tests can stub it.
+
+    TODO(versions-tab): implement a timeboxed, defensive fetch of the source
+    manifest and return its ``version``. Callers already treat any raised
+    exception as an "unknown" result, so a real implementation may raise freely.
+    """
+    return None
+
+
+async def _installed_version_id(session: AsyncSession, pdef: PluginDefinition) -> str | None:
+    """The version id to treat as "installed" for the Versions tab.
+
+    Prefers the promoted ``active_version_id`` (register/sync path). Falls back to
+    the most recently installed ``RunnerPluginInstallation`` — the install-trigger
+    path records source_ref/commit on a version + an installed installation row
+    without necessarily promoting ``active_version_id``, and the tab must still
+    show it.
+    """
+    if pdef.active_version_id:
+        return pdef.active_version_id
+    return (
+        await session.execute(
+            select(RunnerPluginInstallation.plugin_version_id)
+            .join(
+                PluginVersion,
+                PluginVersion.id == RunnerPluginInstallation.plugin_version_id,
+            )
+            .where(
+                PluginVersion.plugin_id == pdef.id,
+                RunnerPluginInstallation.install_status == "installed",
+            )
+            .order_by(RunnerPluginInstallation.installed_at.desc().nullslast())
+            .limit(1)
+        )
+    ).scalars().first()
+
+
+async def _runners_for_version(
+    session: AsyncSession, version_id: str
+) -> list[PluginVersionRunner]:
+    rows = (
+        await session.execute(
+            select(RunnerPluginInstallation, PluginRunnerModel)
+            .join(
+                PluginRunnerModel,
+                PluginRunnerModel.id == RunnerPluginInstallation.runner_id,
+            )
+            .where(RunnerPluginInstallation.plugin_version_id == version_id)
+            .order_by(RunnerPluginInstallation.runner_id)
+        )
+    ).all()
+    return [
+        PluginVersionRunner(
+            id=runner.id,
+            name=runner.name,
+            status=runner.status,
+            install_status=inst.install_status,
+            health_status=inst.health_status,
+        )
+        for inst, runner in rows
+    ]
 
 
 def _plugin_run_public(run: PluginRun) -> dict:
@@ -437,6 +539,90 @@ async def get_plugin_stats(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+
+
+@router.get("/{plugin_id}/versions")
+async def get_plugin_versions(
+    plugin_id: str,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PluginVersionInfo:
+    """Installed-version metadata for the Versions tab: the installed version, the
+    git source it came from (if recorded), when it was installed, and which
+    runner(s) host it. ``installed_version`` is null for a catalog plugin not
+    installed on any runner. Gated on ``read:connector`` like plugin detail."""
+    _require("read:connector", ctx.permissions)
+    pdef = await session.get(PluginDefinition, plugin_id)
+    if pdef is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plugin not found")
+
+    version_id = await _installed_version_id(session, pdef)
+    if version_id is None:
+        return PluginVersionInfo(plugin_id=plugin_id)
+    pver = await session.get(PluginVersion, version_id)
+    if pver is None:
+        return PluginVersionInfo(plugin_id=plugin_id)
+    return PluginVersionInfo(
+        plugin_id=plugin_id,
+        installed_version=pver.version,
+        installed_version_id=pver.id,
+        source_type=pver.source_type,
+        source_url=pver.source_url,
+        source_ref=pver.source_ref,
+        commit_sha=pver.commit_sha,
+        status=pver.status,
+        installed_at=pver.installed_at,
+        runners=await _runners_for_version(session, version_id),
+    )
+
+
+@router.get("/{plugin_id}/versions/check-latest")
+async def check_plugin_latest_version(
+    plugin_id: str,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PluginLatestCheck:
+    """Best-effort "is a newer version available?" check for the Versions tab.
+
+    "Latest" is only knowable from the plugin's git source (there is no registry),
+    so this NEVER errors on an unknowable result: with no source ref, or on any
+    fetch failure, it returns ``status: "unknown"`` + a ``reason`` and a null
+    ``latest_version``. When the source is consulted successfully the status is
+    ``up_to_date`` or ``update_available``. Gated on ``read:connector``."""
+    _require("read:connector", ctx.permissions)
+    pdef = await session.get(PluginDefinition, plugin_id)
+    if pdef is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plugin not found")
+
+    version_id = await _installed_version_id(session, pdef)
+    pver = await session.get(PluginVersion, version_id) if version_id else None
+    installed_version = pver.version if pver else None
+    result = PluginLatestCheck(plugin_id=plugin_id, installed_version=installed_version)
+
+    if pver is None:
+        result.reason = "not_installed"
+        return result
+    if not pver.source_ref:
+        result.reason = "no_source_ref"
+        return result
+
+    try:
+        latest = await _fetch_source_latest_version(pver.source_url, pver.source_ref)
+    except Exception:  # noqa: BLE001 - a source fetch failure degrades to "unknown".
+        result.reason = "source_check_failed"
+        return result
+
+    if not latest:
+        result.reason = "source_check_unavailable"
+        return result
+
+    result.latest_version = latest
+    if _version_is_newer(latest, installed_version or ""):
+        result.update_available = True
+        result.status = "update_available"
+    else:
+        result.status = "up_to_date"
+    return result
 
 
 @router.get("/{plugin_id}/resources/{resource_path:path}")
