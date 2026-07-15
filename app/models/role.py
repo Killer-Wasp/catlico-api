@@ -17,19 +17,20 @@ class Permission(str, Enum):
     ``expand_permissions``). Keeping enforcement fine-grained while grants stay coarse
     means adding a new route doesn't require a new grantable permission."""
 
-    read_investigation = "read:investigation"
-    write_investigation = "write:investigation"
-    delete_investigation = "delete:investigation"
-    read_intel = "read:intel"
-    write_intel = "write:intel"
-    delete_intel = "delete:intel"
-    run_enrichment = "run:enrichment"
-    read_org = "read:org"
-    write_org = "write:org"
-    delete_org = "delete:org"
-    read_access = "read:access"
-    write_access = "write:access"
-    delete_access = "delete:access"
+    read_case = "read:case"
+    write_case = "write:case"
+    delete_case = "delete:case"
+    read_task = "read:task"
+    write_task = "write:task"
+    delete_task = "delete:task"
+    read_alert = "read:alert"
+    write_alert = "write:alert"
+    delete_alert = "delete:alert"
+    read_observable = "read:observable"
+    write_observable = "write:observable"
+    delete_observable = "delete:observable"
+    manage_users = "manage:users"
+    manage_org = "manage:org"
 
 
 # Each grantable group expands to the fine-grained capability strings that route
@@ -41,31 +42,33 @@ class Permission(str, Enum):
 # route guards check the fine-grained `delete:*` capabilities, which only the
 # delete groups expand to — a `write:*` grant no longer implies delete.
 PERMISSION_GROUPS: dict[str, set[str]] = {
-    Permission.read_investigation.value: {
-        "read:case", "read:task", "read:observable", "read:alert",
+    # Per-entity CRUD groups each expand to just their own capability string.
+    Permission.read_case.value: {"read:case"},
+    Permission.write_case.value: {"write:case"},
+    Permission.delete_case.value: {"delete:case"},
+    Permission.read_task.value: {"read:task"},
+    Permission.write_task.value: {"write:task"},
+    Permission.delete_task.value: {"delete:task"},
+    Permission.read_alert.value: {"read:alert"},
+    Permission.write_alert.value: {"write:alert"},
+    Permission.delete_alert.value: {"delete:alert"},
+    Permission.read_observable.value: {"read:observable"},
+    Permission.write_observable.value: {"write:observable"},
+    Permission.delete_observable.value: {"delete:observable"},
+    # manage:users covers the member + role admin surface.
+    Permission.manage_users.value: {
+        "read:user", "write:user", "delete:user",
+        "read:role", "write:role", "delete:role",
     },
-    Permission.write_investigation.value: {
-        "write:case", "write:task", "write:observable", "write:alert",
+    # manage:org covers org profile, integrations, custom fields, knowledge base,
+    # and enrichment runs — everything an org admin configures.
+    Permission.manage_org.value: {
+        "read:organisation", "write:organisation", "delete:organisation",
+        "read:connector", "write:connector",
+        "read:custom_field", "write:custom_field", "delete:custom_field",
+        "read:knowledge_base", "write:knowledge_base", "delete:knowledge_base",
+        "run:enrichment",
     },
-    Permission.delete_investigation.value: {
-        "delete:case", "delete:task", "delete:observable", "delete:alert",
-    },
-    Permission.read_intel.value: {
-        "read:custom_field", "read:knowledge_base",
-    },
-    Permission.write_intel.value: {
-        "write:custom_field", "write:knowledge_base",
-    },
-    Permission.delete_intel.value: {
-        "delete:custom_field", "delete:knowledge_base",
-    },
-    Permission.run_enrichment.value: {"run:enrichment"},
-    Permission.read_org.value: {"read:organisation", "read:connector"},
-    Permission.write_org.value: {"write:organisation", "write:connector"},
-    Permission.delete_org.value: {"delete:organisation"},
-    Permission.read_access.value: {"read:user", "read:role"},
-    Permission.write_access.value: {"write:user", "write:role"},
-    Permission.delete_access.value: {"delete:user", "delete:role"},
 }
 
 #: Every group value — the full grant surface (what a superadmin holds).
@@ -89,18 +92,18 @@ ORG_PERMISSIONS: set[Permission] = set(Permission)
 BUILTIN_ROLES: dict[str, set[Permission]] = {
     "org-admin": set(Permission),
     "analyst": {
-        Permission.read_investigation, Permission.write_investigation,
-        Permission.delete_investigation,
-        Permission.read_intel,
-        Permission.run_enrichment,
-        Permission.read_org,
-        Permission.read_access,
+        Permission.read_case, Permission.write_case, Permission.delete_case,
+        Permission.read_task, Permission.write_task, Permission.delete_task,
+        Permission.read_alert, Permission.write_alert, Permission.delete_alert,
+        Permission.read_observable, Permission.write_observable,
+        Permission.delete_observable,
+        Permission.manage_org,
     },
     "read-only": {
-        Permission.read_investigation,
-        Permission.read_intel,
-        Permission.read_org,
-        Permission.read_access,
+        Permission.read_case,
+        Permission.read_task,
+        Permission.read_alert,
+        Permission.read_observable,
     },
 }
 

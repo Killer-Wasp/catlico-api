@@ -16,7 +16,19 @@ from sqlmodel import select
 
 from app.api.deps import ActiveOrgContext
 from app.core.db import get_session
+from app.core.extensions import registry
 from app.crud.overview import build_overview
+
+
+def require_dashboard_capability() -> None:
+    """Gate the Dashboards (custom saved views) feature behind the ``dashboard``
+    capability flag. The flag is install-gated: it is flipped on only by the
+    enterprise extension, so in OSS (no extension) it is ``False`` and every
+    dashboard route 404s — a true server-side gate, not mere UI hiding."""
+    if not registry.capabilities().get("dashboard", False):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
+        )
 
 from app.models.dashboard import (
     Dashboard,
@@ -37,7 +49,11 @@ from app.models.dashboard import (
 # Any org member may create their own dashboards; only the owner (or a
 # superadmin) may edit, share or delete one.
 
-dash_router = APIRouter(prefix="/dashboards", tags=["dashboards"])
+dash_router = APIRouter(
+    prefix="/dashboards",
+    tags=["dashboards"],
+    dependencies=[Depends(require_dashboard_capability)],
+)
 
 
 def _owns(dashboard: Dashboard, ctx: ActiveOrgContext) -> bool:
@@ -187,7 +203,11 @@ async def revoke_share_link(dashboard_id: uuid.UUID, ctx: ActiveOrgContext, db=D
 
 # --- Public (unauthenticated) share view ---
 
-public_dash_router = APIRouter(prefix="/public/dashboards", tags=["dashboards"])
+public_dash_router = APIRouter(
+    prefix="/public/dashboards",
+    tags=["dashboards"],
+    dependencies=[Depends(require_dashboard_capability)],
+)
 
 
 @public_dash_router.get("/{token}", response_model=PublicDashboardView)

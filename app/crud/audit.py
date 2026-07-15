@@ -1,4 +1,4 @@
-"""Audit + outbox write path, drain, and the case activity read.
+"""Audit + outbox write path and drain.
 
 `record_audit` runs inside the request transaction (it only flushes; `get_session`
 owns the commit) so a mutation and its audit + outbox rows land atomically. It is
@@ -12,12 +12,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.configs import settings
 from app.core.context import get_request_id
-from app.crud.pagination import paginate
 from app.models.audit import Audit, AuditOutbox
 
 logger = logging.getLogger(__name__)
@@ -45,6 +44,18 @@ def _object_id_of(obj: Any) -> str:
         or getattr(obj, "name", None)
     )
     return str(value)
+
+
+def _display_title_of(obj: Any) -> str | None:
+    """Best-effort human-readable name for an entity, used to enrich notification
+    titles (Area 8). Cases/tasks/alerts carry `title`; observables carry `data`;
+    catalog entities carry `name`. Returns None when nothing suitable is present so
+    the consumer can fall back to the object id."""
+    for attr in ("title", "name", "data"):
+        value = getattr(obj, attr, None)
+        if value:
+            return str(value)
+    return None
 
 
 def _is_sensitive(key: str) -> bool:
@@ -112,9 +123,11 @@ async def record_audit(
     `update` event carries the *acting* org (delete is owner-gated, so it can't
     diverge).
     """
+    context_title: str | None = None
     if context is not None:
         context_type = _type_of(context)
         context_id = str(context.id)
+        context_title = _display_title_of(context)
 
     audit = Audit(
         request_id=get_request_id(),
@@ -145,6 +158,15 @@ async def record_audit(
         "details": audit.details,
         "created_at": audit.created_at.isoformat(),
     }
+    # Enrichment (Area 8): stamp human-readable names into the outbox payload so the
+    # notification consumer can build rich titles ("Task updated — <title>", with the
+    # parent case name) without re-querying. These live only on the outbox payload,
+    # not the audit row, and are never redacted (they are display names, not secrets).
+    object_title = _display_title_of(obj)
+    if object_title is not None:
+        payload["object_title"] = object_title
+    if context_title is not None:
+        payload["context_title"] = context_title
     if organisation_id:
         payload["organisation_id"] = organisation_id
 
@@ -216,39 +238,3 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
     if rows:
         await session.commit()
     return delivered
-
-
-async def list_audits(
-    session: AsyncSession,
-    *,
-    skip: int = 0,
-    limit: int = 100,
-    action: str | None = None,
-    object_type: str | None = None,
-    context_type: str | None = None,
-    context_id: str | None = None,
-) -> tuple[list[Audit], int]:
-    base = select(Audit)
-    if action:
-        base = base.where(Audit.action == action)
-    if object_type:
-        base = base.where(Audit.object_type == object_type)
-    if context_type:
-        base = base.where(Audit.context_type == context_type)
-    if context_id:
-        base = base.where(Audit.context_id == context_id)
-    return await paginate(session, base, Audit.id.desc(), skip=skip, limit=limit)
-
-
-async def list_case_activity(
-    session: AsyncSession, case_id: int, *, skip: int = 0, limit: int = 100
-) -> tuple[list[Audit], int]:
-    """The case's own changes plus all child activity scoped to it via `context`."""
-    cid = str(case_id)
-    cond = or_(
-        (Audit.object_type == "case") & (Audit.object_id == cid),
-        (Audit.context_type == "case") & (Audit.context_id == cid),
-    )
-    base = select(Audit).where(cond)
-
-    return await paginate(session, base, Audit.id.desc(), skip=skip, limit=limit)

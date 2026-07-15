@@ -3,7 +3,6 @@ from fastapi import APIRouter
 from app.api.v1.routes import (
     alerts,
     api_keys,
-    audit,
     auth,
     case_templates,
     cases,
@@ -38,7 +37,6 @@ from app.api.v1.routes import (
 )
 
 api_router = APIRouter()
-api_router.include_router(audit.router)
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(organisations.router)
