@@ -176,3 +176,114 @@ def test_empty_group_is_a_noop_and_load_is_idempotent(monkeypatch):
     reg.load_from_entry_points()
     reg.load_from_entry_points()
     assert reg.extensions == [fixture_extension]
+
+
+# --- Startup hook: run_startup_hooks resilience ------------------------------
+#
+# An installed extension may need to run STARTUP work (create its owned tables,
+# warm a provider cache). catlico-api uses a custom lifespan, so router-level
+# on_startup handlers are bypassed; the seam therefore exposes an explicit,
+# optional ``async def on_startup(self)`` hook the lifespan awaits. These tests
+# drive ``run_startup_hooks`` directly on a fresh registry (nothing leaks into
+# the process-wide singleton).
+
+
+class _StartupExtension:
+    """Extension whose async ``on_startup`` records that it ran."""
+
+    def __init__(self, log: list[str], name: str = "ok") -> None:
+        self._log = log
+        self._name = name
+
+    async def on_startup(self) -> None:
+        self._log.append(self._name)
+
+
+class _BrokenStartupExtension:
+    """Extension whose ``on_startup`` raises — must be logged and skipped."""
+
+    async def on_startup(self) -> None:
+        raise RuntimeError("boom on startup")
+
+
+class _NoStartupExtension:
+    """Extension that omits ``on_startup`` entirely (a partial extension)."""
+
+    def capabilities(self) -> dict[str, bool]:
+        return {}
+
+
+async def test_run_startup_hooks_awaits_on_startup():
+    """A loaded extension's async ``on_startup`` is awaited (side effect runs)."""
+    from app.core.extensions import ExtensionRegistry
+
+    log: list[str] = []
+    reg = ExtensionRegistry()
+    reg.register(_StartupExtension(log))
+
+    await reg.run_startup_hooks()
+
+    assert log == ["ok"]
+
+
+async def test_run_startup_hooks_noop_on_empty_registry():
+    """OSS / no extensions -> run_startup_hooks is a clean no-op."""
+    from app.core.extensions import ExtensionRegistry
+
+    reg = ExtensionRegistry()
+    # Must not raise and must do nothing.
+    await reg.run_startup_hooks()
+    assert reg.extensions == []
+
+
+async def test_extension_without_on_startup_is_fine():
+    """An extension that omits on_startup is skipped without error."""
+    from app.core.extensions import ExtensionRegistry
+
+    reg = ExtensionRegistry()
+    reg.register(_NoStartupExtension())
+    # No hook -> nothing to run, no crash.
+    await reg.run_startup_hooks()
+
+
+async def test_broken_on_startup_is_logged_and_others_still_run(monkeypatch):
+    """A hook that raises is logged and skipped; other extensions' startup still
+    runs and no exception propagates (same resilience contract as discovery).
+
+    caplog / log-handler capture is suppressed by this project's pytest harness,
+    so we spy on the module logger's ``exception`` call directly to prove the
+    failure is logged."""
+    from app.core import extensions as ext_mod
+    from app.core.extensions import ExtensionRegistry
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        ext_mod.logger,
+        "exception",
+        lambda msg, *args, **kwargs: logged.append(msg),
+    )
+
+    log: list[str] = []
+    reg = ExtensionRegistry()
+    reg.register(_BrokenStartupExtension())
+    reg.register(_StartupExtension(log, name="after-broken"))
+
+    # Must not raise even though the first hook throws.
+    await reg.run_startup_hooks()
+
+    # The good extension after the broken one still ran.
+    assert log == ["after-broken"]
+    # The failure was logged via logger.exception (captures the active traceback).
+    assert any("startup" in msg.lower() for msg in logged)
+
+
+def test_lifespan_wires_run_startup_hooks():
+    """The app lifespan must actually call run_startup_hooks. The test client uses
+    ASGITransport without a lifespan manager, so the real lifespan never runs
+    under pytest; assert the wiring by inspecting the lifespan source instead."""
+    import inspect
+
+    import app.main as main_mod
+
+    source = inspect.getsource(main_mod.lifespan)
+    assert "run_startup_hooks" in source

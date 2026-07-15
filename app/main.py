@@ -11,7 +11,7 @@ from app.api.v1.main import api_router
 from app.core.configs import settings
 from app.core.context import RequestIdMiddleware
 from app.core.db import AsyncSessionLocal, init_db, run_migrations
-from app.core.extensions import load_and_mount_extensions
+from app.core.extensions import load_and_mount_extensions, registry
 from app.crud.audit import dispatch_pending_outbox, register_consumer
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
@@ -97,6 +97,12 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(run_migrations)
     async with AsyncSessionLocal() as session:
         await init_db(session)
+    # Enterprise extension startup: run AFTER catlico-api's own DB is ready
+    # (migrations applied, seed committed) and after extensions have been loaded
+    # + mounted at module import, so an extension can create its own tables /
+    # warm a cache. A no-op in OSS (no extensions); a broken hook is logged and
+    # skipped inside run_startup_hooks so it can't crash boot.
+    await registry.run_startup_hooks()
     register_consumer(notify_feed_consumer)
     register_consumer(notifier_delivery_consumer)
     register_consumer(ws_broadcast_consumer)

@@ -20,6 +20,15 @@ registry duck-types each hook and skips any that a given extension omits):
         def identity_providers(self) -> list[IdentityProvider]: ...
         def second_factor_hook(self, user) -> Challenge | None: ...   # may be async
         def capabilities(self) -> dict[str, bool]: ...
+        async def on_startup(self) -> None: ...   # run once at app boot
+
+``on_startup`` lets an extension run startup work (create its owned tables, warm
+a provider cache). catlico-api uses a custom lifespan, so router-level
+``on_startup`` handlers are bypassed — the lifespan awaits
+:meth:`ExtensionRegistry.run_startup_hooks` explicitly instead. It runs AFTER
+catlico-api's own DB init/migrations, so an extension can create/query its own
+tables; a hook that raises is logged and skipped so a broken extension can't
+crash the OSS app boot.
 
 Router mount convention: every router an extension returns is mounted under the
 ``/api/v1`` prefix (the same namespace as the core API), so an extension router
@@ -98,6 +107,8 @@ class Extension(Protocol):
     def second_factor_hook(self, user: User) -> Challenge | None: ...
 
     def capabilities(self) -> dict[str, bool]: ...
+
+    async def on_startup(self) -> None: ...
 
 
 class ExtensionRegistry:
@@ -182,6 +193,27 @@ class ExtensionRegistry:
             if result is not None:
                 return result
         return None
+
+    async def run_startup_hooks(self) -> None:
+        """Await each loaded extension's optional ``on_startup`` hook once, in
+        registration order. Called from the app lifespan AFTER catlico-api's own
+        DB init/migrations, so an extension can create/query its own tables or
+        warm a cache. An extension without ``on_startup`` is skipped; a hook that
+        raises is logged and skipped so a broken extension can't crash the OSS
+        app boot (same resilience contract as entry-point discovery). A no-op in
+        OSS where no extension is loaded."""
+        for ext in self._extensions:
+            hook = getattr(ext, "on_startup", None)
+            if hook is None:
+                continue
+            try:
+                result = hook()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001 — a bad hook must not down the app
+                logger.exception(
+                    "extension startup hook failed for %r", ext
+                )
 
 
 #: Process-wide singleton. Populated once at app module load from entry points.
