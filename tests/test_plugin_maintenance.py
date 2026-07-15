@@ -81,6 +81,114 @@ async def test_reaper_fails_runs_past_deadline(session, org_a):
     assert fresh.status == "running"
 
 
+async def test_reaper_emits_audit_event_per_reaped_run(session, org_a):
+    """§6.5.4: each reaped run produces one audit + outbox row attributing the forced
+    terminal state; fresh runs produce nothing."""
+    from sqlmodel import select as _select
+
+    from app.models.audit import Audit, AuditOutbox
+
+    runner, pdef, version_id = await _seed_plugin(session, org_a.id, timeout=60)
+    stuck = await _make_run(
+        session, org_a.id, runner, pdef, version_id,
+        status="running", started_at=NOW - timedelta(seconds=300),
+    )
+    await _make_run(
+        session, org_a.id, runner, pdef, version_id,
+        status="running", started_at=NOW - timedelta(seconds=10),
+    )
+
+    reaped = await reap_stuck_runs(session, NOW)
+    assert reaped == 1
+
+    audits = (
+        (await session.execute(_select(Audit).where(Audit.action == "reaped")))
+        .scalars()
+        .all()
+    )
+    assert len(audits) == 1
+    audit = audits[0]
+    assert audit.object_type == "plugin_run"
+    assert audit.object_id == str(stuck.id)
+    assert audit.actor == "system:maintenance"
+    assert audit.details["terminal_state"] == "failure"
+    assert audit.details["error_kind"] == "timeout"
+    assert audit.details["plugin_id"] == pdef.id
+
+    outbox = (
+        (await session.execute(_select(AuditOutbox).where(AuditOutbox.audit_id == audit.id)))
+        .scalars()
+        .all()
+    )
+    assert len(outbox) == 1
+    assert outbox[0].payload["organisation_id"] == org_a.id
+    assert outbox[0].payload["action"] == "reaped"
+
+
+async def test_scan_orphan_blobs_report_only(session, org_a, tmp_path):
+    """§6.5.5: unreferenced blobs older than the age floor are reported (not deleted)
+    while the delete flag is OFF; referenced or too-recent blobs are left alone."""
+    import os
+
+    from app.core.storage import BlobStorage
+    from app.models.attachment import Attachment
+    from app.services.plugin_maintenance import scan_orphan_blobs
+
+    storage = BlobStorage("local", str(tmp_path / "blobs-root"))
+    referenced_sha = "1" * 64
+    orphan_sha = "2" * 64
+    recent_orphan_sha = "3" * 64
+    await storage.put(referenced_sha, b"kept")
+    await storage.put(orphan_sha, b"orphan")
+    await storage.put(recent_orphan_sha, b"recent")
+
+    # Register only the referenced blob as an Attachment.
+    session.add(Attachment(sha256=referenced_sha, size=4, created_by="test"))
+    await session.flush()
+
+    # Age the orphan blob past the floor; leave the recent orphan fresh.
+    old = (NOW - timedelta(days=30)).timestamp()
+    os.utime(storage._path(orphan_sha), (old, old))
+
+    report = await scan_orphan_blobs(
+        session, storage, NOW, min_age_days=7, delete_enabled=False
+    )
+    assert report["scanned"] == 3
+    assert report["orphans"] == 1
+    assert report["deleted"] == 0
+    assert orphan_sha in report["sample"]
+    # Nothing deleted: all three blobs remain on disk.
+    assert await storage.exists(orphan_sha) is True
+    assert await storage.exists(recent_orphan_sha) is True
+
+
+async def test_scan_orphan_blobs_deletes_when_flag_enabled(session, org_a, tmp_path):
+    """§6.5.5: with the delete flag ON, aged orphans are removed; referenced blobs stay."""
+    import os
+
+    from app.core.storage import BlobStorage
+    from app.models.attachment import Attachment
+    from app.services.plugin_maintenance import scan_orphan_blobs
+
+    storage = BlobStorage("local", str(tmp_path / "blobs-root"))
+    referenced_sha = "a" * 64
+    orphan_sha = "b" * 64
+    await storage.put(referenced_sha, b"kept")
+    await storage.put(orphan_sha, b"orphan")
+    session.add(Attachment(sha256=referenced_sha, size=4, created_by="test"))
+    await session.flush()
+    old = (NOW - timedelta(days=30)).timestamp()
+    os.utime(storage._path(orphan_sha), (old, old))
+
+    report = await scan_orphan_blobs(
+        session, storage, NOW, min_age_days=7, delete_enabled=True
+    )
+    assert report["orphans"] == 1
+    assert report["deleted"] == 1
+    assert await storage.exists(orphan_sha) is False
+    assert await storage.exists(referenced_sha) is True
+
+
 async def test_offline_detection_marks_silent_runners(session, org_a):
     runner, _, _ = await _seed_plugin(session, org_a.id)
     runner.status = "healthy"
