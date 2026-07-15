@@ -236,7 +236,9 @@ async def _try_api_key_auth(
     return AuthContext(
         user=api_user,
         organisation_id=key.organisation_id,
-        permissions=expand_permissions(key.scopes),
+        # API keys are unscoped: every key grants the full capability set. There is
+        # no per-key scoping surface anymore (the `scopes` column was dropped).
+        permissions=set(ALL_CAPABILITIES),
     )
 
 

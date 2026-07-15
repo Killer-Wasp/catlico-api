@@ -57,7 +57,6 @@ from app.crud import task as task_crud
 from app.crud import user as user_crud
 from app.models.alert import AlertPublic
 from app.models.attachment import AttachmentPublic
-from app.models.audit import AuditPublic
 from app.models.case_ import (
     Case,
     CaseCounts,
@@ -604,24 +603,6 @@ async def create_case_comment(
         updated_at=comment.updated_at,
         author_name=_display_name_from_email(case_ctx.user.email),
     )
-
-
-# --- Activity feed (audit trail) ---
-
-@router.get("/{case_id}/activity", response_model=Page[AuditPublic])
-async def list_case_activity(
-    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
-    session: Annotated[AsyncSession, Depends(get_session)],
-    skip: int = 0,
-    limit: int = 100,
-) -> Page[AuditPublic]:
-    """The case's audit trail — its own changes plus child activity (tasks, logs,
-    observables, comments) scoped to it. Visibility rides the case's `read:case`
-    grant, so a shared org sees the activity it's allowed to see the case for."""
-    rows, total = await audit_crud.list_case_activity(
-        session, case_ctx.case.id, skip=skip, limit=limit
-    )
-    return Page(items=rows, total=total, skip=skip, limit=limit)
 
 
 # --- Tags on a case ---

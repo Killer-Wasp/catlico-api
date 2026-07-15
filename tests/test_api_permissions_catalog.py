@@ -1,15 +1,10 @@
-"""Permission catalog endpoint, effective-permission endpoint, and the
-subset-of-caller enforcement on API-key scopes."""
-import pytest
-from httpx import AsyncClient
+"""Permission catalog endpoint and effective-permission endpoint.
 
-from app.core.security import TokenPayload, create_access_token
-from app.crud.organisation_member import add_member
-from app.crud.role import create_role
-from app.crud.user import create_user
-from app.models.organisation_member import OrganisationMemberCreate
-from app.models.role import RoleCreate
-from app.models.user import UserCreate
+RBAC is now a flat per-entity grant vocabulary (read/write/delete per
+case/task/alert/observable + manage:users/manage:org). API keys are unscoped, so
+the old subset-of-caller scope enforcement is gone.
+"""
+from httpx import AsyncClient
 
 
 def _h(token, org):
@@ -22,81 +17,31 @@ async def test_permission_catalog_lists_all_groups(client: AsyncClient, admin_to
     catalog = r.json()
     keys = {c["key"] for c in catalog}
     assert keys == {
-        "read:investigation", "write:investigation", "delete:investigation",
-        "read:intel", "write:intel", "delete:intel",
-        "run:enrichment",
-        "read:org", "write:org", "delete:org",
-        "read:access", "write:access", "delete:access",
+        "read:case", "write:case", "delete:case",
+        "read:task", "write:task", "delete:task",
+        "read:alert", "write:alert", "delete:alert",
+        "read:observable", "write:observable", "delete:observable",
+        "manage:users", "manage:org",
     }
-    assert all(c["kind"] in {"read", "write", "delete", "run"} for c in catalog)
+    assert all(c["kind"] in {"read", "write", "delete", "manage"} for c in catalog)
 
 
 async def test_me_permissions_expands_groups(
     client: AsyncClient, readonly_a_token, org_a, builtin_roles
 ):
-    """A read-only member's stored group grants expand to fine-grained capabilities."""
+    """A read-only member's stored grants. In the flat vocabulary each per-entity
+    read group is its own capability, so read:case is present while write:case is
+    not. (The read-only builtin now grants only the four entity read:* — it no
+    longer carries read:knowledge_base / read:organisation, which live in
+    manage:org — see Finding 3.)"""
     r = await client.get(
         "/api/v1/users/me/permissions", headers=_h(readonly_a_token, org_a.id)
     )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["is_superadmin"] is False
-    # read:investigation expands to read:case; write is not granted.
     assert "read:case" in body["permissions"]
     assert "write:case" not in body["permissions"]
-    # raw groups are the coarse grant vocabulary
-    assert "read:investigation" in body["groups"]
-    assert "write:investigation" not in body["groups"]
-
-
-async def test_api_key_scopes_must_be_known_groups(
-    client: AsyncClient, analyst_a_token, org_a
-):
-    """analyst_a is seeded org-admin (all groups); a fine-grained/unknown scope
-    string is not a valid grant vocabulary value."""
-    r = await client.post(
-        "/api/v1/api-keys/",
-        json={"name": "k", "scopes": ["read:case"]},
-        headers=_h(analyst_a_token, org_a.id),
-    )
-    assert r.status_code == 422, r.text
-
-
-async def test_api_key_scopes_bounded_by_caller(
-    client: AsyncClient, session, org_a, builtin_roles, admin_user
-):
-    """A member whose role can manage the org (write:org) but lacks write:investigation
-    cannot mint a key carrying write:investigation, but can mint one with write:org."""
-    role = await create_role(
-        session,
-        RoleCreate(name="org-manager", permissions=["write:org", "read:access"]),
-        organisation_id=org_a.id,
-        created_by=str(admin_user.id),
-    )
-    user = await create_user(
-        session,
-        UserCreate(first_name="Org", last_name="Manager", email="orgmgr@test.com", password="password123"),
-    )
-    await add_member(
-        session, org_a.id,
-        OrganisationMemberCreate(user_id=user.id, role_id=role.id),
-        created_by=str(admin_user.id),
-    )
-    token = create_access_token(
-        TokenPayload(user_id=user.id, is_superadmin=False, organisations=[org_a.id])
-    )
-
-    denied = await client.post(
-        "/api/v1/api-keys/",
-        json={"name": "escalate", "scopes": ["write:investigation"]},
-        headers=_h(token, org_a.id),
-    )
-    assert denied.status_code == 403, denied.text
-
-    ok = await client.post(
-        "/api/v1/api-keys/",
-        json={"name": "legit", "scopes": ["write:org"]},
-        headers=_h(token, org_a.id),
-    )
-    assert ok.status_code == 201, ok.text
-    assert set(ok.json()["scopes"]) == {"write:org"}
+    # raw groups are the flat grant vocabulary
+    assert "read:case" in body["groups"]
+    assert "write:case" not in body["groups"]

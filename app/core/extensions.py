@@ -60,7 +60,7 @@ EXTENSION_ROUTER_PREFIX = "/api/v1"
 
 #: The capability keys the platform always reports. An extension may flip these
 #: to ``True`` or add its own keys; OSS reports them all-false.
-DEFAULT_CAPABILITIES: dict[str, bool] = {"sso": False, "mfa": False}
+DEFAULT_CAPABILITIES: dict[str, bool] = {"sso": False, "mfa": False, "dashboard": False}
 
 
 class IdentityProvider(BaseModel):

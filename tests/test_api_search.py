@@ -632,7 +632,7 @@ class TestSearchKnowledgeBase:
         # so no read:knowledge_base.
         role = await create_role(
             session,
-            RoleCreate(name="no-kb", permissions=[Permission.read_investigation]),
+            RoleCreate(name="no-kb", permissions=[Permission.read_case]),
             organisation_id=org_a.id,
             created_by=str(admin_user.id),
         )

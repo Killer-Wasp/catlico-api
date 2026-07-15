@@ -56,7 +56,6 @@ async def create_key(
         prefix=_PREFIX,
         last_four=plaintext[-4:],
         key_hash=key_hash,
-        scopes=key_in.scopes,
         expires_at=key_in.expires_at,
         created_by=created_by,
     )

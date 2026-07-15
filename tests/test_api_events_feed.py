@@ -242,7 +242,7 @@ async def test_member_without_read_cap_forbidden(
     # A role that grants read:access (read:user/read:role) but NOT read:case.
     role = await create_role(
         session,
-        RoleCreate(name="access-only", permissions=[Permission.read_access]),
+        RoleCreate(name="access-only", permissions=[Permission.manage_users]),
         organisation_id=org_a.id,
         created_by=str(admin_user.id),
     )
@@ -283,7 +283,7 @@ async def test_api_key_pinned_to_a_cannot_read_org_b_events(
 
     _, api_key = await create_key(
         session,
-        ApiKeyCreate(name="events-key", scopes=[Permission.read_investigation.value]),
+        ApiKeyCreate(name="events-key"),
         organisation_id=org_a.id,
         created_by="test",
     )
@@ -305,7 +305,7 @@ async def test_api_key_reads_its_own_org_events(
 
     _, api_key = await create_key(
         session,
-        ApiKeyCreate(name="events-key-own", scopes=[Permission.read_investigation.value]),
+        ApiKeyCreate(name="events-key-own"),
         organisation_id=org_a.id,
         created_by="test",
     )

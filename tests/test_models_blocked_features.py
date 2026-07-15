@@ -84,7 +84,6 @@ async def test_api_key_insert(session, org):
         prefix="thp_",
         last_four="3f9a",
         key_hash="abc123def456",
-        scopes=["read:alert", "write:case"],
         last_used_at=None,
         expires_at=datetime(2027, 1, 1, tzinfo=UTC),
         created_by="system",
@@ -97,7 +96,6 @@ async def test_api_key_insert(session, org):
     assert row.prefix == "thp_"
     assert row.last_four == "3f9a"
     assert row.key_hash == "abc123def456"
-    assert row.scopes == ["read:alert", "write:case"]
     assert row.last_used_at is None
     assert row.expires_at == datetime(2027, 1, 1, tzinfo=UTC)
     assert row.deleted_at is None
@@ -390,9 +388,10 @@ async def test_knowledge_base_page_title_index(session):
 # ── permission backfill (from migrations 4 & 5) ──────────────────────────────
 
 async def test_intel_permissions_present(session, org):
-    """init_db seeds roles carrying the intel group (custom fields and knowledge
-    base fold into read/write:intel)."""
-    for perm in ("read:intel", "write:intel"):
+    """init_db seeds roles carrying the flat admin grants: custom fields, knowledge
+    base, connectors and enrichment all fold into manage:org, and member/role admin
+    into manage:users."""
+    for perm in ("manage:org", "manage:users"):
         result = await session.execute(
             text(f"SELECT 1 FROM role_permission WHERE permission = '{perm}'")
         )
@@ -411,7 +410,7 @@ async def test_upsert_builtin_role_backfills_new_permissions(session, org):
     role = Role(name="test-custom", organisation_id=org, created_by="system")
     session.add(role)
     await session.flush()
-    session.add(RolePermission(role_id=role.id, permission="read:investigation"))
+    session.add(RolePermission(role_id=role.id, permission="read:case"))
     await session.commit()
 
     # Now "upsert" with a larger permission set
@@ -419,9 +418,9 @@ async def test_upsert_builtin_role_backfills_new_permissions(session, org):
         session,
         "test-custom",
         {
-            Permission.read_investigation,
-            Permission.write_investigation,
-            Permission.read_intel,
+            Permission.read_case,
+            Permission.write_case,
+            Permission.manage_org,
         },
         org,
         created_by="system",
@@ -431,6 +430,6 @@ async def test_upsert_builtin_role_backfills_new_permissions(session, org):
         text(f"SELECT permission FROM role_permission WHERE role_id = '{role.id}'")
     )
     perm_set = {row[0] for row in perms}
-    assert "read:investigation" in perm_set  # original preserved
-    assert "write:investigation" in perm_set  # newly backfilled
-    assert "read:intel" in perm_set  # newly backfilled
+    assert "read:case" in perm_set  # original preserved
+    assert "write:case" in perm_set  # newly backfilled
+    assert "manage:org" in perm_set  # newly backfilled

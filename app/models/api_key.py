@@ -1,7 +1,6 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 from app.models.common import SoftDeleteMixin, TimestampMixin
@@ -12,7 +11,8 @@ class ApiKey(TimestampMixin, SoftDeleteMixin, table=True):
     exactly once at creation; only its sha256 `key_hash` is persisted. `prefix`
     and `last_four` exist purely so the UI can render a masked label
     (`thp_**********3f9a`) without holding the secret. Revoking soft-deletes the
-    row. `scopes` are permission strings the key grants (e.g. `write:alert`)."""
+    row. API keys are unscoped: every key grants the full capability set (the
+    per-key `scopes` surface was removed)."""
 
     __tablename__ = "api_key"
 
@@ -26,20 +26,17 @@ class ApiKey(TimestampMixin, SoftDeleteMixin, table=True):
     # sha256 hex of the full token — high-entropy, so a plain digest (not bcrypt)
     # is sufficient and lets lookups stay O(1). The plaintext is never stored.
     key_hash: str = Field(index=True)
-    scopes: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     last_used_at: datetime | None = Field(default=None)
     expires_at: datetime | None = Field(default=None)
 
 
 class ApiKeyCreate(SQLModel):
     name: str
-    scopes: list[str] = []
     expires_at: datetime | None = None
 
 
 class ApiKeyUpdate(SQLModel):
     name: str | None = None
-    scopes: list[str] | None = None
     expires_at: datetime | None = None
 
 
@@ -48,7 +45,6 @@ class ApiKeyPublic(SQLModel):
     name: str
     prefix: str
     last_four: str
-    scopes: list[str]
     last_used_at: datetime | None
     expires_at: datetime | None
     organisation_id: str

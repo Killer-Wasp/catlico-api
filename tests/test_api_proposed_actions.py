@@ -15,6 +15,8 @@ from app.crud.organisation_member import add_member
 from app.crud.user import create_user
 from app.models.organisation_member import OrganisationMemberCreate
 from app.models.plugin_runner import PluginRun
+from app.models.audit import Audit
+from sqlalchemy import select
 from app.models.user import UserCreate
 
 from tests.test_api_plugin_runners import RUNNER1, _enable_plugin_for_org, _register_runner
@@ -233,14 +235,14 @@ async def test_add_related_observable_propose_then_approve_applies(
     assert linked["observable_type"] == "ip"
     assert linked["ioc"] is True
 
-    activity = await client.get(f"/api/v1/cases/{case_id}/activity?limit=50", headers=h)
-    assert activity.status_code == 200, activity.text
-    audit_row = next(
-        (a for a in activity.json()["items"] if a["object_id"] == linked["id"]), None
-    )
+    # The /activity viewer endpoint was removed; assert the audit row directly.
+    rows = (
+        await session.execute(select(Audit).where(Audit.object_id == linked["id"]))
+    ).scalars().all()
+    audit_row = next((a for a in rows if a.actor and "approved-by" in a.actor), None)
     assert audit_row is not None
-    assert audit_row["actor"].startswith(f"plugin:{action.plugin_id}@")
-    assert audit_row["actor"].endswith(f"approved-by user:{analyst_a.id}")
+    assert audit_row.actor.startswith(f"plugin:{action.plugin_id}@")
+    assert audit_row.actor.endswith(f"approved-by user:{analyst_a.id}")
 
 
 async def _propose_observable_patch(client, token, obs_id, body):
@@ -254,7 +256,7 @@ async def _propose_observable_patch(client, token, obs_id, body):
 
 
 async def test_patch_observable_propose_then_approve_applies(
-    client: AsyncClient, org_a, analyst_a, analyst_a_token, runner_secret, admin_token,
+    client: AsyncClient, session: AsyncSession, org_a, analyst_a, analyst_a_token, runner_secret, admin_token,
 ):
     case_id, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
     token = await _runtime_token_for(
@@ -281,13 +283,14 @@ async def test_patch_observable_propose_then_approve_applies(
     assert linked["sighted"] is True
     assert linked["message"] == "malicious"
 
-    # Applied under the combined plugin + approving-analyst actor.
-    activity = await client.get(f"/api/v1/cases/{case_id}/activity?limit=50", headers=h)
-    audit_row = next(
-        (a for a in activity.json()["items"] if a["object_id"] == str(obs_id)), None
-    )
+    # Applied under the combined plugin + approving-analyst actor. The /activity
+    # viewer endpoint was removed; assert the audit row directly.
+    rows = (
+        await session.execute(select(Audit).where(Audit.object_id == str(obs_id)))
+    ).scalars().all()
+    audit_row = next((a for a in rows if a.actor and "approved-by" in a.actor), None)
     assert audit_row is not None
-    assert audit_row["actor"].endswith(f"approved-by user:{analyst_a.id}")
+    assert audit_row.actor.endswith(f"approved-by user:{analyst_a.id}")
 
 
 async def test_patch_observable_requires_write_observable_to_approve(

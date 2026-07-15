@@ -57,14 +57,38 @@ def build_event_envelope(row: AuditOutbox) -> dict[str, Any]:
         "object": {
             "type": payload.get("object_type", "unknown"),
             "id": payload.get("object_id", ""),
+            # Human-readable name stamped by record_audit (Area 8); may be absent.
+            "title": payload.get("object_title"),
         },
         "context": {
             "type": payload.get("context_type", "unknown"),
             "id": payload.get("context_id", ""),
+            "title": payload.get("context_title"),
         },
         "details": payload.get("details") or {},
         "created_at": payload.get("created_at", ""),
     }
+
+
+def _entity_label(obj: dict[str, Any]) -> str:
+    """Display label for an event object: its human title when known, else its id."""
+    return obj.get("title") or obj.get("id") or ""
+
+
+def _feed_title(obj: dict[str, Any], context: dict[str, Any], action: str) -> str:
+    """Compose an enriched org-feed notification title (Area 8), e.g.
+    ``"Task updated — Investigate phishing"`` and, when the entity is not itself a
+    case, appending the parent case name ``" (case Acme breach)"``."""
+    obj_type = obj.get("type", "unknown")
+    verb = action.replace("_", " ")
+    title = f"{str(obj_type).title()} {verb}"
+    label = _entity_label(obj)
+    if label:
+        title = f"{title} — {label}"
+    ctx_title = context.get("title")
+    if ctx_title and context.get("type") == "case" and obj_type != "case":
+        title = f"{title} (case {ctx_title})"
+    return title
 
 
 async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
@@ -75,11 +99,16 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
     "Case created").
     """
     envelope = build_event_envelope(row)
-    obj_type = envelope["object"]["type"]
+    obj = envelope["object"]
+    context = envelope["context"]
+    obj_type = obj["type"]
     action = envelope["event_type"].rsplit(".", 1)[-1]
-    # ponytail: title generation fits the common case; add i18n/templates later
-    title = f"{obj_type.title()} {action.replace('_', ' ')}"
+    # Area 8: enriched title carries the entity's human name + parent-case context.
+    title = _feed_title(obj, context, action)
+    # Prefer an explicit summary; otherwise surface the parent-case context in body.
     body = envelope.get("details", {}).get("summary", "")
+    if not body and context.get("title") and context.get("type") == "case":
+        body = f"In case {context['title']}"
     # ponytail: org-wide notifications (user_id=None) for now; per-user routing
     # when notification rules gain user-scoping
     org_id = row.payload.get("organisation_id")
@@ -107,17 +136,17 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
     # above is unchanged; this is additive. Targeted rows use a distinct
     # `<obj>.assigned` event type so muting the noisy `<obj>.updated` type does not
     # silently mute assignments.
+    object_label = _entity_label(obj)
     if obj_type in {"case", "task", "alert"}:
         target_user_id = _assignee_target(envelope.get("details") or {})
         if target_user_id:
-            object_id = envelope["object"]["id"]
             await _notify_user(
                 session,
                 org_id=org_id,
                 target_user_id=target_user_id,
                 envelope=envelope,
                 event_type=f"{obj_type}.assigned",
-                title=f"You were assigned {obj_type} {object_id}",
+                title=f"You were assigned {obj_type} {object_label}",
                 outbox_id=row.id,
             )
 
@@ -129,7 +158,6 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
     if obj_type in {"case", "task"}:
         added = (envelope.get("details") or {}).get("added_assignee_ids") or []
         if isinstance(added, list):
-            object_id = envelope["object"]["id"]
             for target in added:
                 await _notify_user(
                     session,
@@ -137,7 +165,7 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
                     target_user_id=str(target),
                     envelope=envelope,
                     event_type=f"{obj_type}.assigned",
-                    title=f"You were assigned {obj_type} {object_id}",
+                    title=f"You were assigned {obj_type} {object_label}",
                     outbox_id=row.id,
                 )
 
