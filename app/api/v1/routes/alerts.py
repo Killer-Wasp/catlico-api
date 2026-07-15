@@ -33,6 +33,7 @@ from app.crud import custom_field as cf_crud
 from app.crud import flag as flag_crud
 from app.crud import observable as obs_crud
 from app.crud import organisation_member as member_crud
+from app.crud import pattern as pattern_crud
 from app.crud import role as role_crud
 from app.crud import tag as tag_crud
 from app.crud import user as user_crud
@@ -64,6 +65,12 @@ from app.models.common import Page
 from app.models.custom_field import CustomFieldEntityType, CustomFieldValuesSet
 from app.models.flag import FlagEntityType
 from app.models.observable import ObservableCreate, ObservablePublic
+from app.models.pattern import (
+    Pattern,
+    PatternPublic,
+    ProcedurePublic,
+    ProcedureReplace,
+)
 from app.models.tag import TaggableType, TagSetRequest
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
@@ -370,9 +377,11 @@ async def _import_alert_into_case(
     session: AsyncSession, *, alert: Alert, case_id: int, actor: str
 ) -> int:
     """Import one alert into a case: observables (deduped by type+value), tags
-    (unioned), custom fields (added only where the case has none), then mark the
-    alert Imported. Returns the observable count imported. Shared by single
-    promote and bulk merge so both stay in lockstep."""
+    (unioned), custom fields (added only where the case has none), TTPs (copied,
+    deduped by pattern), then mark the alert Imported. Returns the observable
+    count imported. Comments deliberately STAY on the alert (readable from the
+    case via the case↔alert link); plugin results stay keyed to the alert. Shared
+    by single promote and bulk merge so both stay in lockstep."""
     imported = await obs_crud.import_alert_observables_to_case(
         session,
         alert_id=alert.id,
@@ -406,6 +415,9 @@ async def _import_alert_into_case(
                 alert.organisation_id,
                 new_cfs,
             )
+    await pattern_crud.copy_alert_procedures_to_case(
+        session, alert_id=alert.id, case_id=case_id, created_by=actor
+    )
     await alert_crud.mark_promoted(session, alert, case_id=case_id, updated_by=actor)
     return imported
 
@@ -882,6 +894,52 @@ async def set_alert_custom_fields(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+
+
+# --- TTPs (procedures) on an alert ---
+
+async def _procedure_public(session: AsyncSession, proc) -> ProcedurePublic:
+    pattern = await session.get(Pattern, proc.pattern_id)
+    return ProcedurePublic(
+        id=proc.id,
+        case_id=proc.case_id,
+        alert_id=proc.alert_id,
+        pattern_id=proc.pattern_id,
+        pattern=(
+            PatternPublic.model_validate(pattern, from_attributes=True)
+            if pattern
+            else None
+        ),
+        description=proc.description,
+        created_at=proc.created_at,
+    )
+
+
+@router.get("/{alert_id}/procedures", response_model=list[ProcedurePublic])
+async def list_alert_procedures(
+    alert_id: int,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[ProcedurePublic]:
+    _require_perm(ctx, "read:alert")
+    alert = await _resolve_owned_alert(session, ctx, alert_id)
+    procedures = await pattern_crud.list_alert_procedures(session, alert.id)
+    return [await _procedure_public(session, p) for p in procedures]
+
+
+@router.put("/{alert_id}/procedures", response_model=list[ProcedurePublic])
+async def replace_alert_procedures(
+    alert_id: int,
+    body: ProcedureReplace,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[ProcedurePublic]:
+    _require_perm(ctx, "write:alert")
+    alert = await _resolve_owned_alert(session, ctx, alert_id)
+    procedures = await pattern_crud.replace_alert_procedures(
+        session, alert.id, body, created_by=str(ctx.user.id)
+    )
+    return [await _procedure_public(session, p) for p in procedures]
 
 
 # --- Plugin runs (on-demand responders) ---

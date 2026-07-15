@@ -248,3 +248,123 @@ async def test_cases_by_technique_is_org_scoped(
     theirs = await client.get("/api/v1/patterns/T1566/cases", headers=hb)
     assert theirs.status_code == 200, theirs.text
     assert theirs.json() == []
+
+
+# --- Alert TTPs (§4.1a: entity-polymorphic Procedure) -----------------------
+
+
+def _alert_payload(**overrides):
+    base = {
+        "type": "phishing",
+        "source": "mail-gw",
+        "source_ref": "evt-ttp",
+        "title": "Suspicious email",
+        "description": "user reported",
+        "severity": 2,
+    }
+    base.update(overrides)
+    return base
+
+
+async def _make_alert(client, h, **overrides):
+    r = await client.post("/api/v1/alerts/", json=_alert_payload(**overrides), headers=h)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def test_replace_and_list_alert_procedures(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    alert_id = await _make_alert(client, h)
+
+    put = await client.put(
+        f"/api/v1/alerts/{alert_id}/procedures",
+        json={
+            "procedures": [
+                {"external_id": "T1566", "name": "Phishing", "description": "spear-phish"}
+            ]
+        },
+        headers=h,
+    )
+    assert put.status_code == 200, put.text
+    procs = put.json()
+    assert len(procs) == 1
+    assert procs[0]["alert_id"] == alert_id
+    assert procs[0]["case_id"] is None
+    assert procs[0]["description"] == "spear-phish"
+    assert procs[0]["pattern"]["external_id"] == "T1566"
+
+    listed = await client.get(f"/api/v1/alerts/{alert_id}/procedures", headers=h)
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+    # Replace with empty set clears them.
+    cleared = await client.put(
+        f"/api/v1/alerts/{alert_id}/procedures", json={"procedures": []}, headers=h
+    )
+    assert cleared.status_code == 200
+    assert cleared.json() == []
+    assert (
+        await client.get(f"/api/v1/alerts/{alert_id}/procedures", headers=h)
+    ).json() == []
+
+
+async def test_replace_alert_procedures_requires_write(
+    client: AsyncClient, org_a, builtin_roles,
+    analyst_a_token, readonly_a, readonly_a_token,
+):
+    """A read-only member (no write:alert) cannot mutate an alert's TTPs."""
+    h = _headers(analyst_a_token, org_a.id)
+    alert_id = await _make_alert(client, h)
+    ro = _headers(readonly_a_token, org_a.id)
+    r = await client.put(
+        f"/api/v1/alerts/{alert_id}/procedures",
+        json={"procedures": [{"external_id": "T1566", "name": "Phishing"}]},
+        headers=ro,
+    )
+    assert r.status_code == 403, r.text
+
+
+async def test_alert_procedures_are_org_scoped(
+    client: AsyncClient, org_a, org_b, builtin_roles,
+    analyst_a_token, analyst_b, analyst_b_token,
+):
+    """Another org can neither read nor write an alert's TTPs — the alert is
+    invisible (404), same guard as GET /alerts/{id}."""
+    ha = _headers(analyst_a_token, org_a.id)
+    alert_id = await _make_alert(client, ha)
+    await client.put(
+        f"/api/v1/alerts/{alert_id}/procedures",
+        json={"procedures": [{"external_id": "T1566", "name": "Phishing"}]},
+        headers=ha,
+    )
+
+    hb = _headers(analyst_b_token, org_b.id)
+    assert (
+        await client.get(f"/api/v1/alerts/{alert_id}/procedures", headers=hb)
+    ).status_code == 404
+    assert (
+        await client.put(
+            f"/api/v1/alerts/{alert_id}/procedures",
+            json={"procedures": [{"external_id": "T1059", "name": "Exec"}]},
+            headers=hb,
+        )
+    ).status_code == 404
+
+
+async def test_alert_ttps_excluded_from_case_matrix(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token
+):
+    """Alert TTPs are alert-scoped: they don't leak into the case-based ATT&CK
+    matrix stats (which count DISTINCT case_id)."""
+    h = _headers(analyst_a_token, org_a.id)
+    alert_id = await _make_alert(client, h)
+    await client.put(
+        f"/api/v1/alerts/{alert_id}/procedures",
+        json={"procedures": [{"external_id": "T1490", "name": "Inhibit Recovery"}]},
+        headers=h,
+    )
+    stats = await client.get("/api/v1/patterns/case-stats", headers=h)
+    assert stats.status_code == 200, stats.text
+    assert "T1490" not in stats.json()

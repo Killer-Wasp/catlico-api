@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, CheckConstraint, Column
 from sqlmodel import Field, SQLModel
 
 from app.models.common import TimestampMixin
@@ -25,12 +25,27 @@ class Pattern(TimestampMixin, table=True):
 
 
 class Procedure(TimestampMixin, table=True):
-    """Links a case to a MITRE pattern — "we observed T1059 in this case"."""
+    """Links a case *or* an alert to a MITRE pattern — "we observed T1059 here".
+
+    Entity-polymorphic: exactly one of ``case_id`` / ``alert_id`` is set (the
+    check constraint enforces it), mirroring the Comment / Tagging /
+    CustomFieldValue precedents."""
 
     __tablename__ = "procedure"
+    __table_args__ = (
+        CheckConstraint(
+            "(case_id IS NULL) <> (alert_id IS NULL)",
+            name="ck_procedure_one_owner",
+        ),
+    )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    case_id: int = Field(foreign_key="case_.id", index=True, ondelete="CASCADE")
+    case_id: int | None = Field(
+        default=None, foreign_key="case_.id", index=True, ondelete="CASCADE"
+    )
+    alert_id: int | None = Field(
+        default=None, foreign_key="alert.id", index=True, ondelete="CASCADE"
+    )
     pattern_id: uuid.UUID = Field(foreign_key="pattern.id", ondelete="CASCADE")
     description: str = Field(default="")
 
@@ -72,7 +87,8 @@ class PatternPublic(SQLModel):
 
 class ProcedurePublic(SQLModel):
     id: uuid.UUID
-    case_id: int
+    case_id: int | None = None
+    alert_id: int | None = None
     pattern_id: uuid.UUID
     pattern: PatternPublic | None = None
     description: str
