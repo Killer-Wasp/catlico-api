@@ -46,3 +46,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+markers = [
+    "slow: multi-process / multi-connection HA coordination tests (SKIP LOCKED, advisory lock, LISTEN/NOTIFY round-trip)",
+]
