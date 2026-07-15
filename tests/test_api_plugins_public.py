@@ -823,7 +823,7 @@ async def test_runnable_capability_responder_returns_responder_plugin(
 
 
 async def _run_only_token(session, org_id, email="run-only@test.com"):
-    """A token whose role grants only run:enrichment — no read:connector. This is
+    """A token whose role can run enrichment (via the manage:org grant). This is
     exactly the analyst the runnable endpoint exists for."""
     from app.core.security import TokenPayload, create_access_token
     from app.crud.organisation_member import add_member
@@ -841,7 +841,7 @@ async def _run_only_token(session, org_id, email="run-only@test.com"):
     )
     role = await create_role(
         session,
-        RoleCreate(name="run-only", permissions=[Permission.run_enrichment]),
+        RoleCreate(name="run-only", permissions=[Permission.manage_org]),
         organisation_id=org_id,
         created_by="system",
     )
@@ -994,8 +994,8 @@ async def test_runnable_excludes_plugin_on_unhealthy_runner(
 async def test_runnable_gated_on_run_enrichment_not_connector_read(
     client: AsyncClient, session, runner_secret, admin_token, org_a, readonly_a_token,
 ):
-    """run:enrichment WITHOUT read:connector succeeds; read:connector without
-    run:enrichment (the read-only role) is 403 — the gate is run:enrichment."""
+    """A role with run:enrichment (via manage:org) succeeds; the read-only role
+    (no run:enrichment) is 403 — the gate is run:enrichment."""
     plugin_id, _ = await _setup_runnable_plugin(client, admin_token, org_a.id)
     run_only = await _run_only_token(session, org_a.id)
 
@@ -1003,7 +1003,7 @@ async def test_runnable_gated_on_run_enrichment_not_connector_read(
     assert ok.status_code == 200, ok.text
     assert [p["id"] for p in ok.json()] == [plugin_id]
 
-    # read-only has read:connector but not run:enrichment → 403.
+    # read-only has no run:enrichment → 403.
     denied = await client.get(
         "/api/v1/plugins/runnable", headers=_h(readonly_a_token, org_a.id)
     )

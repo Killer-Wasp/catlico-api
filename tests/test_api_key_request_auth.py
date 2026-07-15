@@ -1,5 +1,6 @@
 """C1: API-key request auth — prove API keys can call read/write endpoints
-and that revocation, expiry, missing scope, and mismatched org are enforced."""
+and that revocation, expiry, and mismatched org are enforced. Keys are unscoped
+(full capability set), so there is no per-scope denial."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -16,7 +17,7 @@ def _auth_headers(token: str, org_id: str) -> dict:
 
 @pytest.fixture
 async def api_key_read_alert(session: AsyncSession, org_a):
-    key_in = ApiKeyCreate(name="test-read-alert", scopes=["read:alert"])
+    key_in = ApiKeyCreate(name="test-read-alert")
     _, plaintext = await create_key(
         session, key_in, organisation_id=org_a.id, created_by="test"
     )
@@ -25,11 +26,8 @@ async def api_key_read_alert(session: AsyncSession, org_a):
 
 @pytest.fixture
 async def api_key_full(session: AsyncSession, org_a):
-    """An API key with case/alert/observable write scopes."""
-    key_in = ApiKeyCreate(
-        name="test-full",
-        scopes=["read:alert", "write:alert", "write:case", "write:observable"],
-    )
+    """An API key. Keys are unscoped, so this grants the full capability set."""
+    key_in = ApiKeyCreate(name="test-full")
     _, plaintext = await create_key(
         session, key_in, organisation_id=org_a.id, created_by="test"
     )
@@ -58,7 +56,6 @@ async def an_alert(client, org_a, api_key_full):
 async def api_key_expired(session: AsyncSession, org_a):
     key_in = ApiKeyCreate(
         name="test-expired",
-        scopes=["read:alert"],
         expires_at=datetime.now(UTC) - timedelta(hours=1),
     )
     _, plaintext = await create_key(
@@ -69,7 +66,7 @@ async def api_key_expired(session: AsyncSession, org_a):
 
 @pytest.fixture
 async def api_key_revoked(session: AsyncSession, org_a):
-    key_in = ApiKeyCreate(name="test-revoked", scopes=["read:alert"])
+    key_in = ApiKeyCreate(name="test-revoked")
     key, plaintext = await create_key(
         session, key_in, organisation_id=org_a.id, created_by="test"
     )
@@ -124,7 +121,7 @@ async def test_api_key_last_used_updated(session: AsyncSession, org_a):
     """Successful auth updates last_used_at."""
     from app.crud.api_key import touch_key
 
-    key_in = ApiKeyCreate(name="test-last-used", scopes=["read:alert"])
+    key_in = ApiKeyCreate(name="test-last-used")
     key, plaintext = await create_key(
         session, key_in, organisation_id=org_a.id, created_by="test"
     )
@@ -153,16 +150,6 @@ async def test_api_key_invalid_prefix_401(client, org_a):
         headers=_auth_headers("thp_" + "ab" * 32, org_a.id),
     )
     assert resp.status_code == 401
-
-
-async def test_api_key_missing_scope_403(client, org_a, api_key_read_alert, an_alert):
-    """An API key without write:observable cannot POST an observable."""
-    resp = await client.post(
-        f"/api/v1/alerts/{an_alert}/observables",
-        json={"observable_type": "domain", "data": "blocked.com"},
-        headers=_auth_headers(api_key_read_alert, org_a.id),
-    )
-    assert resp.status_code == 403, resp.text
 
 
 async def test_api_key_revoked_401(client, org_a, api_key_revoked):

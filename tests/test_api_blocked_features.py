@@ -85,13 +85,12 @@ async def test_api_key_crud(client: AsyncClient, org_a, analyst_a_token):
     h = _h(analyst_a_token, org_a.id)
     r = await client.post(
         "/api/v1/api-keys/",
-        json={"name": "my-key", "scopes": ["read:investigation"]},
+        json={"name": "my-key"},
         headers=h,
     )
     assert r.status_code == 201, r.text
     data = r.json()
     assert data["name"] == "my-key"
-    assert data["scopes"] == ["read:investigation"]
     assert data["prefix"] == "thp_"
     assert len(data["key"]) > 40  # plaintext token returned once
     key_id = data["id"]

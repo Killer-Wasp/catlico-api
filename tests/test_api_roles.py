@@ -1,9 +1,9 @@
 """Role CRUD (/api/v1/roles).
 
 Create/update/delete are superadmin-only; listing/reading a role is available to any
-org member holding ``read:access`` (expanded ``read:role``). Permissions are the
-domain-group grant vocabulary (e.g. ``read:investigation``), not fine-grained
-capabilities.
+org member holding ``read:role`` (granted via ``manage:users``). Permissions are the
+flat per-entity grant vocabulary (e.g. ``read:case``, ``manage:org``), not the old
+domain groups.
 """
 import pytest
 from httpx import AsyncClient
@@ -20,13 +20,13 @@ async def test_create_list_get_role(client: AsyncClient, admin_token, org_a):
     h = _auth(admin_token, org_a.id)
     r = await client.post(
         "/api/v1/roles/",
-        json={"name": "triage", "permissions": ["read:investigation", "write:investigation"]},
+        json={"name": "triage", "permissions": ["read:case", "write:case"]},
         headers=h,
     )
     assert r.status_code == 201, r.text
     role = r.json()
     assert role["name"] == "triage"
-    assert set(role["permissions"]) == {"read:investigation", "write:investigation"}
+    assert set(role["permissions"]) == {"read:case", "write:case"}
     role_id = role["id"]
 
     listed = await client.get("/api/v1/roles/", headers=h)
@@ -42,27 +42,27 @@ async def test_update_role_permissions(client: AsyncClient, admin_token, org_a):
     h = _auth(admin_token, org_a.id)
     r = await client.post(
         "/api/v1/roles/",
-        json={"name": "editable", "permissions": ["read:investigation"]},
+        json={"name": "editable", "permissions": ["read:case"]},
         headers=h,
     )
     role_id = r.json()["id"]
 
     upd = await client.patch(
         f"/api/v1/roles/{role_id}",
-        json={"permissions": ["read:investigation", "write:investigation", "read:intel"]},
+        json={"permissions": ["read:case", "write:case", "manage:org"]},
         headers=h,
     )
     assert upd.status_code == 200, upd.text
     assert set(upd.json()["permissions"]) == {
-        "read:investigation", "write:investigation", "read:intel",
+        "read:case", "write:case", "manage:org",
     }
 
 
 async def test_reject_unknown_permission(client: AsyncClient, admin_token, org_a):
-    """The old fine-grained strings are no longer a valid grant vocabulary."""
+    """The old domain-group strings are no longer a valid grant vocabulary."""
     r = await client.post(
         "/api/v1/roles/",
-        json={"name": "legacy", "permissions": ["read:case"]},
+        json={"name": "legacy", "permissions": ["read:investigation"]},
         headers=_auth(admin_token, org_a.id),
     )
     assert r.status_code == 422, r.text
@@ -72,7 +72,7 @@ async def test_delete_role(client: AsyncClient, admin_token, org_a):
     h = _auth(admin_token, org_a.id)
     r = await client.post(
         "/api/v1/roles/",
-        json={"name": "temp", "permissions": ["read:investigation"]},
+        json={"name": "temp", "permissions": ["read:case"]},
         headers=h,
     )
     role_id = r.json()["id"]
@@ -84,7 +84,7 @@ async def test_delete_role(client: AsyncClient, admin_token, org_a):
 
 async def test_duplicate_name_conflicts(client: AsyncClient, admin_token, org_a):
     h = _auth(admin_token, org_a.id)
-    body = {"name": "dup", "permissions": ["read:investigation"]}
+    body = {"name": "dup", "permissions": ["read:case"]}
     assert (await client.post("/api/v1/roles/", json=body, headers=h)).status_code == 201
     again = await client.post("/api/v1/roles/", json=body, headers=h)
     assert again.status_code == 409, again.text
@@ -99,18 +99,19 @@ async def test_get_missing_role_404(client: AsyncClient, admin_token, org_a):
     assert r.status_code == 404
 
 
-async def test_member_can_read_roles(
+async def test_readonly_member_cannot_read_or_write_roles(
     client: AsyncClient, readonly_a_token, org_a, builtin_roles
 ):
-    """A read-only member holds read:access, so can list/read roles (for the UI's
-    role dropdowns), but cannot create them."""
+    """Reading roles now requires read:role, which is granted only via manage:users
+    (Finding 3): the flat read-only builtin no longer carries it, so a read-only
+    member is denied both listing and creating roles."""
     h = _auth(readonly_a_token, org_a.id)
     listed = await client.get("/api/v1/roles/", headers=h)
-    assert listed.status_code == 200, listed.text
+    assert listed.status_code == 403, listed.text
 
     denied = await client.post(
         "/api/v1/roles/",
-        json={"name": "nope", "permissions": ["read:investigation"]},
+        json={"name": "nope", "permissions": ["read:case"]},
         headers=h,
     )
     assert denied.status_code == 403, denied.text
@@ -141,7 +142,7 @@ async def test_builtin_roles_flagged_custom_not(client: AsyncClient, admin_token
 
     created = await client.post(
         "/api/v1/roles/",
-        json={"name": "custom", "permissions": ["read:investigation"]},
+        json={"name": "custom", "permissions": ["read:case"]},
         headers=h,
     )
     assert created.status_code == 201, created.text
@@ -168,7 +169,7 @@ async def test_cannot_patch_builtin_role_permissions(
     admin_role = next(r for r in listed.json() if r["name"] == "org-admin")
     upd = await client.patch(
         f"/api/v1/roles/{admin_role['id']}",
-        json={"permissions": ["read:investigation"]},
+        json={"permissions": ["read:case"]},
         headers=h,
     )
     assert upd.status_code == 409, upd.text

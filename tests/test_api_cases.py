@@ -252,50 +252,47 @@ async def test_delete_case_owner_only(
 
 
 def test_delete_grants_are_split_from_write_groups():
-    """Grant separation (finale): write:<domain> no longer expands to any delete:*
-    capability — those live in the standalone delete:<domain> group."""
+    """Grant separation (flat RBAC): each write:<entity> grant expands to just its
+    own write capability — never to any delete:* — and delete lives in a standalone
+    delete:<entity> grant. The admin folds (manage:org/manage:users) carry their own
+    delete capabilities but none of the per-entity ones."""
     from app.models.role import expand_permissions
 
-    # write groups grant edit but NOT delete.
-    inv_write = expand_permissions({"write:investigation"})
-    assert {"write:case", "write:task", "write:observable", "write:alert"} <= inv_write
-    assert not any(c.startswith("delete:") for c in inv_write)
+    # write grants edit but NOT delete, per entity.
+    for entity in ("case", "task", "alert", "observable"):
+        exp = expand_permissions({f"write:{entity}"})
+        assert exp == {f"write:{entity}"}
+        assert f"delete:{entity}" not in exp
 
-    for grp in ("write:intel", "write:org", "write:access"):
-        assert not any(c.startswith("delete:") for c in expand_permissions({grp}))
+    # each delete grant expands to exactly its own delete capability.
+    for entity in ("case", "task", "alert", "observable"):
+        assert expand_permissions({f"delete:{entity}"}) == {f"delete:{entity}"}
 
-    # The delete groups grant exactly the delete capabilities for their domain.
-    assert expand_permissions({"delete:investigation"}) == {
-        "delete:case", "delete:task", "delete:observable", "delete:alert",
-    }
-    assert expand_permissions({"delete:intel"}) == {
-        "delete:custom_field", "delete:knowledge_base",
-    }
-    assert expand_permissions({"delete:access"}) == {"delete:user", "delete:role"}
-    assert expand_permissions({"delete:org"}) == {"delete:organisation"}
-
-    # A raw write:case capability alone still does NOT imply delete:case.
-    assert "delete:case" not in expand_permissions({"write:case"})
+    # the admin folds don't grant any per-entity delete:*.
+    for grp in ("manage:org", "manage:users"):
+        exp = expand_permissions({grp})
+        assert not any(
+            c in exp for c in ("delete:case", "delete:task", "delete:alert", "delete:observable")
+        )
 
 
 def test_builtin_roles_delete_grants():
-    """org-admin holds every delete group; analyst keeps delete on investigation
-    (it had it via write:investigation before the split); read-only has none."""
+    """org-admin holds every per-entity delete grant; analyst keeps delete on the
+    four core entities; read-only has none."""
     from app.models.role import BUILTIN_ROLES, Permission, expand_permissions
 
     admin = {p.value for p in BUILTIN_ROLES["org-admin"]}
     assert {
-        "delete:investigation", "delete:intel", "delete:org", "delete:access",
+        "delete:case", "delete:task", "delete:alert", "delete:observable",
     } <= admin
 
     analyst = {p.value for p in BUILTIN_ROLES["analyst"]}
-    assert "delete:investigation" in analyst
-    assert "delete:intel" not in analyst  # analyst only reads intel
+    assert "delete:case" in analyst
     assert "delete:case" in expand_permissions(analyst)
 
     readonly = expand_permissions(p.value for p in BUILTIN_ROLES["read-only"])
     assert not any(c.startswith("delete:") for c in readonly)
-    assert Permission.delete_investigation not in BUILTIN_ROLES["read-only"]
+    assert Permission.delete_case not in BUILTIN_ROLES["read-only"]
 
 
 async def test_delete_case_forbidden_for_readonly_owner_member(
