@@ -83,7 +83,7 @@ from app.core.security import TokenPayload, create_access_token  # noqa: E402
 from app.crud.organisation import create_organisation  # noqa: E402
 from app.crud.organisation_member import add_member  # noqa: E402
 from app.crud.role import seed_org_builtin_roles  # noqa: E402
-from app.crud.user import create_user  # noqa: E402
+from app.crud.user import create_user, set_password  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.organisation import OrganisationCreate  # noqa: E402
 from app.models.organisation_member import OrganisationMemberCreate  # noqa: E402
@@ -214,18 +214,20 @@ def runner_secret(monkeypatch):
 
 @pytest.fixture
 async def admin_user(session):
-    return await create_user(
+    user = await create_user(
         session,
-        UserCreate(first_name="Test", last_name="User", email="admin@test.com", password="password123", is_superadmin=True),
+        UserCreate(first_name="Test", last_name="User", email="admin@test.com", is_superadmin=True),
     )
+    return await set_password(session, user, "password123")
 
 
 @pytest.fixture
 async def viewer_user(session):
-    return await create_user(
+    user = await create_user(
         session,
-        UserCreate(first_name="Test", last_name="User", email="viewer@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="viewer@test.com"),
     )
+    return await set_password(session, user, "password123")
 
 
 @pytest.fixture
@@ -290,8 +292,9 @@ async def analyst_a(session, org_a, builtin_roles, admin_user):
     """A user who is org-admin of org-a."""
     user = await create_user(
         session,
-        UserCreate(first_name="Test", last_name="User", email="analyst-a@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="analyst-a@test.com"),
     )
+    await set_password(session, user, "password123")
     await add_member(
         session,
         org_a.id,
@@ -314,8 +317,9 @@ def analyst_a_token(analyst_a, org_a):
 async def analyst_b(session, org_b, builtin_roles_b, admin_user):
     user = await create_user(
         session,
-        UserCreate(first_name="Test", last_name="User", email="analyst-b@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="analyst-b@test.com"),
     )
+    await set_password(session, user, "password123")
     await add_member(
         session,
         org_b.id,
@@ -339,8 +343,9 @@ async def readonly_a(session, org_a, builtin_roles, admin_user):
     """A read-only user in org-a (no write:case)."""
     user = await create_user(
         session,
-        UserCreate(first_name="Test", last_name="User", email="ro-a@test.com", password="password123"),
+        UserCreate(first_name="Test", last_name="User", email="ro-a@test.com"),
     )
+    await set_password(session, user, "password123")
     await add_member(
         session,
         org_a.id,

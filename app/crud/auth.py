@@ -6,6 +6,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.configs import settings
 from app.models.auth import RefreshToken
+from app.models.user import User
+
+
+async def password_reset_required_token(
+    session: AsyncSession, user: User
+) -> str | None:
+    """Shared force-reset guard for EVERY password-path token-issuance point.
+
+    If ``user.must_change_password`` is set, mint a single-use password-reset
+    token and return its raw value; the caller must then issue NO access/refresh
+    tokens and instead bounce the user to the reset page with this token. Returns
+    ``None`` when the flag is clear (normal login proceeds).
+
+    Called from the OSS login route AND the enterprise MFA/passkey verify paths,
+    so a flagged user cannot obtain a session by completing a second factor. SSO/
+    OIDC logins are passwordless and EXEMPT — the IdP owns the credential. Invoke
+    this only AFTER the is_active/lockout checks so no new enumeration oracle
+    appears (a locked/inactive flagged user still gets the generic responses)."""
+    if not user.must_change_password:
+        return None
+    # Imported lazily to avoid a crud import cycle (password_reset -> auth).
+    from app.crud import password_reset as reset_crud
+
+    raw_token, _ = await reset_crud.create_token(session, user.id)
+    return raw_token
 
 
 async def issue_refresh_token(

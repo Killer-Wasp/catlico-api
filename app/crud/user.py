@@ -95,13 +95,16 @@ async def emails_for_ids(
 
 
 async def create_user(session: AsyncSession, user_in: UserCreate) -> User:
+    # Always password-less: an admin-created account owns its own credential and
+    # sets it via the emailed invite link. Internal callers that genuinely need a
+    # password (seeding, tests) set one afterwards with `set_password`.
     db_user = User(
         email=_normalize_email(str(user_in.email)),
         first_name=user_in.first_name,
         last_name=user_in.last_name,
         is_superadmin=user_in.is_superadmin,
         is_active=True,
-        hashed_password=get_password_hash(user_in.password) if user_in.password else None,
+        hashed_password=None,
     )
     session.add(db_user)
     await session.commit()
@@ -110,14 +113,27 @@ async def create_user(session: AsyncSession, user_in: UserCreate) -> User:
 
 
 async def update_user(session: AsyncSession, db_user: User, user_in: UserUpdate) -> User:
+    # UserUpdate carries no password field; passwords are set only through
+    # `set_password` (self-service) or the reset flow — never an admin PATCH.
     update_data = user_in.model_dump(exclude_unset=True)
-    if "password" in update_data:
-        raw = update_data.pop("password")
-        update_data["hashed_password"] = get_password_hash(raw) if raw else None
     if "email" in update_data:
         update_data["email"] = _normalize_email(str(update_data["email"]))
     update_data["updated_at"] = datetime.now(UTC)
     db_user.sqlmodel_update(update_data)
+    session.add(db_user)
+    await session.commit()
+    await session.refresh(db_user)
+    return db_user
+
+
+async def set_password(session: AsyncSession, db_user: User, raw_password: str) -> User:
+    """Set a user's local password (self-service change or reset). Hashes the
+    password, clears the force-reset flag (`must_change_password`) since the user
+    has now chosen a fresh credential, and stamps `updated_at`. Callers that must
+    also revoke existing sessions do so separately (delete_all_refresh_tokens)."""
+    db_user.hashed_password = get_password_hash(raw_password)
+    db_user.must_change_password = False
+    db_user.updated_at = datetime.now(UTC)
     session.add(db_user)
     await session.commit()
     await session.refresh(db_user)

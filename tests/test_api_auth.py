@@ -262,12 +262,15 @@ async def test_login_unknown_user(client: AsyncClient):
 
 
 async def test_login_inactive_user(client: AsyncClient, session, admin_user):
-    user = await create_user(session, UserCreate(first_name="Test", last_name="User", email="inactive@test.com", password="pass123"))
+    from app.crud.user import set_password
+
+    user = await create_user(session, UserCreate(first_name="Test", last_name="User", email="inactive@test.com"))
+    await set_password(session, user, "pass123-long-enough")
     await update_user(session, user, UserUpdate(is_active=False))
 
     response = await client.post(
         "/api/v1/auth/login",
-        json={"email": "inactive@test.com", "password": "pass123"},
+        json={"email": "inactive@test.com", "password": "pass123-long-enough"},
     )
     assert response.status_code == 403
 
@@ -280,6 +283,78 @@ async def test_login_no_password_user(client: AsyncClient, session):
         json={"email": "oauth@test.com", "password": "anything"},
     )
     assert response.status_code == 401
+
+
+async def test_login_flagged_user_gets_reset_required_not_a_session(
+    client: AsyncClient, session, admin_user
+):
+    """F.3 force-reset gate: a must_change_password user who proves their password
+    gets NO session — only `password_reset_required` + a single-use reset token, so
+    the client can bounce straight to the reset page."""
+    admin_user.must_change_password = True
+    session.add(admin_user)
+    await session.flush()
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "password123"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["password_reset_required"] is True
+    assert body.get("reset_token")
+    # No session was issued.
+    assert "access_token" not in body
+    assert "catlico_refresh" not in response.cookies
+
+
+async def test_login_flagged_user_reset_token_completes_reset_and_unblocks(
+    client: AsyncClient, session, admin_user
+):
+    """The reset token returned by the gate drives the ordinary reset endpoint;
+    once used, the flag is cleared and a normal login succeeds."""
+    admin_user.must_change_password = True
+    session.add(admin_user)
+    await session.flush()
+
+    blocked = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "password123"},
+    )
+    reset_token = blocked.json()["reset_token"]
+
+    done = await client.post(
+        "/api/v1/auth/password/reset",
+        json={"token": reset_token, "new_password": "a-brand-new-password"},
+    )
+    assert done.status_code == 200
+
+    ok = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "a-brand-new-password"},
+    )
+    assert ok.status_code == 200
+    assert ok.json().get("access_token")
+    await session.refresh(admin_user)
+    assert admin_user.must_change_password is False
+
+
+async def test_login_flagged_gate_is_after_lockout_no_oracle(
+    client: AsyncClient, session, admin_user
+):
+    """The gate sits AFTER the is_active/lockout checks: a locked flagged user still
+    gets the generic 401 (no password_reset_required leak — no enumeration oracle)."""
+    admin_user.must_change_password = True
+    admin_user.locked_until = datetime.now(UTC) + timedelta(minutes=15)
+    session.add(admin_user)
+    await session.flush()
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@test.com", "password": "password123"},
+    )
+    assert response.status_code == 401
+    assert "password_reset_required" not in response.text
 
 
 async def test_logout_revokes_session_and_clears_cookie(

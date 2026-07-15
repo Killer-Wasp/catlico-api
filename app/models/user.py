@@ -32,6 +32,12 @@ class User(UserBase, table=True):
     # cleared on a successful login (and by a superadmin re-activating the user).
     failed_login_count: int = Field(default=0, nullable=False)
     locked_until: datetime | None = Field(default=None)
+    # Force-reset lever: when True, a successful password login issues no session
+    # and instead bounces the user to set a new password (see the login gate in
+    # app/api/v1/routes/auth.py and the enterprise MFA/passkey verify paths). It
+    # is a PASSWORD-PATH lever only — SSO/OIDC logins are passwordless and exempt.
+    # Cleared whenever the user sets a password (set_password / perform_reset).
+    must_change_password: bool = Field(default=False, nullable=False)
 
     @property
     def has_avatar(self) -> bool:
@@ -39,8 +45,9 @@ class User(UserBase, table=True):
 
 
 class UserCreate(SQLModel):
+    # No password: admin-created accounts are always password-less and receive a
+    # set-password invite email. The user owns their own credential.
     email: EmailStr
-    password: str | None = None
     # Required: a user cannot be created without a name.
     first_name: str = Field(min_length=1)
     last_name: str = Field(min_length=1)
@@ -55,18 +62,21 @@ class UserPublic(SQLModel):
     is_active: bool
     is_superadmin: bool
     has_avatar: bool
+    must_change_password: bool
     created_at: datetime
     last_login_at: datetime | None
 
 
 class UserUpdate(SQLModel):
+    # No password: admins cannot set a user's password (self-service only). They
+    # can, however, flip must_change_password to force a reset on next login.
     email: EmailStr | None = None
-    password: str | None = None
     # Omit to leave unchanged; when provided it must be non-empty (no clearing).
     first_name: str | None = Field(default=None, min_length=1)
     last_name: str | None = Field(default=None, min_length=1)
     is_active: bool | None = None
     is_superadmin: bool | None = None
+    must_change_password: bool | None = None
 
 
 class UserMeUpdate(SQLModel):
