@@ -106,6 +106,10 @@ class ExtensionRegistry:
 
     def __init__(self) -> None:
         self._extensions: list[Extension] = []
+        #: Names of entry points already loaded, so repeated
+        #: ``load_from_entry_points`` calls (module re-import, app re-creation)
+        #: are idempotent no-ops rather than double-registering.
+        self._loaded_entry_points: set[str] = set()
 
     @property
     def extensions(self) -> list[Extension]:
@@ -117,19 +121,27 @@ class ExtensionRegistry:
     def reset(self, extensions: list[Extension] | None = None) -> None:
         """Replace the registered set (mainly for tests). Empty by default."""
         self._extensions = list(extensions) if extensions else []
+        self._loaded_entry_points = set()
 
     def load_from_entry_points(self, group: str = ENTRY_POINT_GROUP) -> None:
         """Discover and register extensions from the ``catlico.extensions``
         entry-point group. Each entry point resolves to an object implementing
         (part of) the ``Extension`` protocol. A broken extension is logged and
-        skipped rather than crashing startup."""
+        skipped rather than crashing startup.
+
+        Idempotent: entry points already loaded (tracked by name) are skipped, so
+        calling this repeatedly never double-registers. The OSS empty-group path
+        is a clean no-op."""
         for ep in importlib.metadata.entry_points(group=group):
+            if ep.name in self._loaded_entry_points:
+                continue
             try:
                 extension = ep.load()
             except Exception:  # noqa: BLE001 — a bad extension must not down the app
                 logger.exception("failed to load extension entry point %s", ep.name)
                 continue
             self.register(extension)
+            self._loaded_entry_points.add(ep.name)
             logger.info("loaded extension %s", ep.name)
 
     def routers(self) -> list[APIRouter]:

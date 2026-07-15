@@ -102,3 +102,77 @@ async def test_login_calls_second_factor_hook(
     assert "access_token" not in data
     # No refresh cookie is set for a challenge (tokens were never issued).
     assert "set-cookie" not in {k.lower() for k in response.headers}
+
+
+# --- Entry-point loader: resilience + idempotency ----------------------------
+#
+# A real enterprise extension is discovered via the ``catlico.extensions``
+# entry-point group. These tests drive the loader directly (on a fresh registry,
+# so nothing leaks into the process-wide singleton) with a monkeypatched
+# ``importlib.metadata.entry_points`` to prove: a broken package can't crash
+# startup, and repeated loads never double-register.
+
+
+class _FakeEntryPoint:
+    """Minimal stand-in for ``importlib.metadata.EntryPoint`` — just ``name`` and
+    a ``load()`` that either returns an extension object or raises."""
+
+    def __init__(self, name, obj=None, exc=None):
+        self.name = name
+        self._obj = obj
+        self._exc = exc
+
+    def load(self):
+        if self._exc is not None:
+            raise self._exc
+        return self._obj
+
+
+def test_broken_extension_is_skipped_good_one_loads(monkeypatch):
+    """A broken/throwing enterprise package must not crash startup: its entry
+    point is logged and skipped while a good one still loads."""
+    import importlib.metadata
+
+    from app.core.extensions import ExtensionRegistry
+    from tests.fixtures.extension import fixture_extension
+
+    bad = _FakeEntryPoint("bad-ext", exc=RuntimeError("boom on import"))
+    good = _FakeEntryPoint("good-ext", obj=fixture_extension)
+
+    def fake_entry_points(*, group):
+        return [bad, good]
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points)
+
+    reg = ExtensionRegistry()
+    # Must not raise even though one entry point's load() throws.
+    reg.load_from_entry_points()
+
+    # The bad one is skipped; the good one is registered.
+    assert reg.extensions == [fixture_extension]
+
+
+def test_empty_group_is_a_noop_and_load_is_idempotent(monkeypatch):
+    """An empty entry-point group is a clean no-op, and loading twice never
+    double-registers (idempotency)."""
+    import importlib.metadata
+
+    from app.core.extensions import ExtensionRegistry
+    from tests.fixtures.extension import fixture_extension
+
+    # Empty group -> clean no-op.
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda *, group: []
+    )
+    reg = ExtensionRegistry()
+    reg.load_from_entry_points()
+    assert reg.extensions == []
+
+    # Now a group with one entry point; loading twice registers it exactly once.
+    good = _FakeEntryPoint("good-ext", obj=fixture_extension)
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda *, group: [good]
+    )
+    reg.load_from_entry_points()
+    reg.load_from_entry_points()
+    assert reg.extensions == [fixture_extension]
