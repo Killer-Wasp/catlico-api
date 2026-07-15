@@ -1,6 +1,21 @@
 """Dashboards as user-owned, optionally org-shared views (metrics_dashboards)."""
 
+import pytest
 from httpx import AsyncClient
+
+from app.core.extensions import registry
+
+
+@pytest.fixture(autouse=True)
+def _enable_dashboard_capability(monkeypatch):
+    """Dashboards are gated on the ``dashboard`` capability (enterprise-only in
+    production). These tests exercise the feature itself, so report the flag on for
+    the module — mirroring an installed enterprise extension."""
+    original = registry.capabilities
+    monkeypatch.setattr(
+        registry, "capabilities", lambda: {**original(), "dashboard": True}
+    )
+    yield
 
 
 def _h(token, org_id):

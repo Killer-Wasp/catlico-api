@@ -27,7 +27,9 @@ async def _make_case(session, org, builtin_roles, user, title="c"):
 
 @pytest.fixture
 async def plain_analyst_a(session, org_a, builtin_roles, admin_user):
-    """A user with the *analyst* role in org-a: has write:case but NOT write:custom_field."""
+    """A user with the *analyst* role in org-a. Note: analyst now carries manage:org,
+    so it CAN write custom fields (the read/write split for that domain folded into
+    manage:org)."""
     user = await create_user(
         session, UserCreate(first_name="Test", last_name="User", email="plain-analyst-a@test.com", password="password123")
     )
@@ -133,15 +135,20 @@ async def test_definition_write_gating(
     admin_h = _headers(analyst_a_token, org_a.id)
     await _make_def(client, admin_h, name="bu", field_type="string")
 
-    # read-only and analyst roles can READ definitions...
-    for token in (readonly_a_token, plain_analyst_a_token):
-        h = _headers(token, org_a.id)
-        assert (await client.get("/api/v1/custom-fields/", headers=h)).json()["total"] == 1
-        # ...but cannot create them (no write:custom_field).
-        r = await client.post(
-            "/api/v1/custom-fields/", json={"name": "x", "field_type": "string"}, headers=h
-        )
-        assert r.status_code == 403, r.text
+    # read-only can READ definitions but NOT create them (no write:custom_field).
+    ro = _headers(readonly_a_token, org_a.id)
+    assert (await client.get("/api/v1/custom-fields/", headers=ro)).json()["total"] == 1
+    denied = await client.post(
+        "/api/v1/custom-fields/", json={"name": "x", "field_type": "string"}, headers=ro
+    )
+    assert denied.status_code == 403, denied.text
+
+    # The analyst role now carries manage:org, so it CAN create definitions.
+    pa = _headers(plain_analyst_a_token, org_a.id)
+    created = await client.post(
+        "/api/v1/custom-fields/", json={"name": "x", "field_type": "string"}, headers=pa
+    )
+    assert created.status_code == 201, created.text
 
 
 # --- Values ---

@@ -50,21 +50,26 @@ def build_event_envelope(row: AuditOutbox) -> dict[str, Any]:
         payload.get("object_type", "unknown"),
         payload.get("action", "unknown"),
     )
+    obj: dict[str, Any] = {
+        "type": payload.get("object_type", "unknown"),
+        "id": payload.get("object_id", ""),
+    }
+    context: dict[str, Any] = {
+        "type": payload.get("context_type", "unknown"),
+        "id": payload.get("context_id", ""),
+    }
+    # Human-readable names stamped by record_audit (Area 8). Added only when present
+    # so the envelope shape is unchanged for events without a resolvable title.
+    if payload.get("object_title"):
+        obj["title"] = payload["object_title"]
+    if payload.get("context_title"):
+        context["title"] = payload["context_title"]
     return {
         "event_id": f"audit:{row.audit_id}",
         "event_type": event_type,
         "actor": payload.get("actor", "system"),
-        "object": {
-            "type": payload.get("object_type", "unknown"),
-            "id": payload.get("object_id", ""),
-            # Human-readable name stamped by record_audit (Area 8); may be absent.
-            "title": payload.get("object_title"),
-        },
-        "context": {
-            "type": payload.get("context_type", "unknown"),
-            "id": payload.get("context_id", ""),
-            "title": payload.get("context_title"),
-        },
+        "object": obj,
+        "context": context,
         "details": payload.get("details") or {},
         "created_at": payload.get("created_at", ""),
     }

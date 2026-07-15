@@ -291,6 +291,9 @@ async def test_build_event_envelope_from_outbox_row(session):
     assert envelope["event_id"] == f"audit:{row.audit_id}"
     assert envelope["event_type"] == "case.created"
     assert envelope["actor"] == "user-test"
-    assert envelope["object"] == {"type": "case", "id": str(row.audit_id)}
+    assert envelope["object"]["type"] == "case"
+    assert envelope["object"]["id"] == str(row.audit_id)
+    # Area 8 enrichment: record_audit stamps the entity's title onto the envelope.
+    assert envelope["object"]["title"]
     assert envelope["details"] == {"key": "value"}
     assert envelope["created_at"]
