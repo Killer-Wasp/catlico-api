@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import notification as notif_crud
 from app.models.audit import AuditOutbox
-from app.models.notification import UserNotificationPublic
 
 logger = logging.getLogger(__name__)
 
@@ -274,24 +273,20 @@ async def _notify_user(
     if notif.event_type in disabled:
         return
 
-    # Best-effort live push. Local import to avoid an import cycle (matches
-    # ws_broadcast_consumer). A hub/send failure must not raise: the notification
-    # row is the source of truth and the drain must not be marked undelivered.
+    # Cross-replica live push (§6.2). Publish a NOTIFY (target marker: kind="user")
+    # carrying only the notification id — it fires on the drain's commit and reaches
+    # every replica's EventListener, which fetches the row and pushes to that user's
+    # sockets locally. Local import avoids an import cycle (matches ws_broadcast_
+    # consumer). A publish failure must not raise: the notification row is the source
+    # of truth and the drain must not be marked undelivered.
     try:
-        from app.services.websocket_hub import get_hub
+        from app.services.event_bus import publish_user
 
-        message = {
-            "type": "notification",
-            "notification": UserNotificationPublic(
-                id=notif.id,
-                event_type=notif.event_type,
-                title=notif.title,
-                body=notif.body,
-                payload=notif.payload,
-                read_at=None,
-                created_at=notif.created_at,
-            ).model_dump(mode="json"),
-        }
-        await get_hub().send_to_user(org_id, target_user_id, message)
+        await publish_user(
+            session,
+            org_id=org_id,
+            user_id=target_user_id,
+            notification_id=str(notif.id),
+        )
     except Exception:
-        logger.exception("targeted routing: WS push failed (notification persisted)")
+        logger.exception("targeted routing: WS publish failed (notification persisted)")

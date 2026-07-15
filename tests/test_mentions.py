@@ -163,8 +163,8 @@ async def test_comment_mention_creates_targeted_notification(
     )
     await session.flush()
     row = await _latest_outbox(session)
-    mock_hub = AsyncMock()
-    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
+    mock_pub = AsyncMock()
+    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
 
     await notify_feed_consumer(session, row)
 
@@ -175,7 +175,7 @@ async def test_comment_mention_creates_targeted_notification(
     assert len(targeted) == 1
     assert targeted[0].event_type == "comment.mentioned"
     assert "mentioned" in targeted[0].title
-    mock_hub.send_to_user.assert_awaited_once()
+    mock_pub.assert_awaited_once()
 
 
 async def test_case_description_mention_notifies(session, org_a, analyst_a, monkeypatch):

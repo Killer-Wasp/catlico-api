@@ -338,7 +338,12 @@ async def push_pending_deliveries(
     transport: httpx.AsyncBaseTransport | None = None,
     limit: int = 100,
 ) -> dict:
-    """POST due pending deliveries to their runners. Returns counts for tests."""
+    """POST due pending deliveries to their runners. Returns counts for tests.
+
+    HA (§6.2): `FOR UPDATE SKIP LOCKED` lets multiple API replicas run this poller
+    concurrently — each claims a disjoint slice of due deliveries (rows locked by
+    another replica are skipped, not waited on) and holds the locks until the pass
+    commits, so a delivery is never pushed twice. A lone replica is unaffected."""
     now = now or datetime.now(UTC)
     due = (
         (
@@ -349,6 +354,7 @@ async def push_pending_deliveries(
                     PluginEventDelivery.next_attempt_at <= now,
                 )
                 .limit(limit)
+                .with_for_update(skip_locked=True)
             )
         )
         .scalars()
