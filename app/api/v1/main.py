@@ -29,6 +29,7 @@ from app.api.v1.routes import (
     roles,
     search,
     slas,
+    system,
     tags,
     tasks,
     users,
@@ -70,4 +71,5 @@ api_router.include_router(plugins.runs_router)
 api_router.include_router(proposed_actions.router)
 api_router.include_router(report_templates.router)
 api_router.include_router(search.router)
+api_router.include_router(system.router)
 api_router.include_router(ws.router)

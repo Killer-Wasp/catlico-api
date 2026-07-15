@@ -11,12 +11,14 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user
 from app.core.configs import settings
 from app.core.db import get_session
+from app.core.extensions import IdentityProvider, registry
 from app.core.security import (
     TokenPayload,
     create_access_token,
@@ -134,13 +136,21 @@ async def _access_token_for(session: AsyncSession, user: User) -> str:
     return create_access_token(payload=payload)
 
 
+@router.get("/providers", response_model=list[IdentityProvider])
+async def list_identity_providers() -> list[IdentityProvider]:
+    """The SSO identity providers advertised by installed extensions (empty in
+    OSS). Unauthenticated: the login page calls this before any credentials
+    exist to decide whether to render SSO buttons and where to send the browser."""
+    return registry.identity_providers()
+
+
 @router.post("/login", response_model=Token)
 async def login(
     body: LoginRequest,
     request: Request,
     response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> Token:
+) -> Token | JSONResponse:
     user = await authenticate_user(session, body.email, body.password)
     if not user:
         raise HTTPException(
@@ -150,6 +160,16 @@ async def login(
         )
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+
+    # Extension seam: after the password succeeds but before tokens are issued,
+    # an installed extension (catlico-enterprise) may demand a second factor. In
+    # OSS no extension is registered, so this is always None and the flow below
+    # is byte-for-byte today's behaviour.
+    challenge = await registry.second_factor_challenge(user)
+    if challenge is not None:
+        return JSONResponse(
+            content={"mfa_required": True, "pending_token": challenge.pending_token}
+        )
 
     access_token = await _access_token_for(session, user)
     refresh_row = await issue_refresh_token(

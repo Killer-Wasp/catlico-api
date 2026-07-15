@@ -1,0 +1,205 @@
+"""Enterprise extension seam (plans/phase-3 §3.0).
+
+This is the OSS-side foundation the private ``catlico-enterprise`` package plugs
+into. With NO extension installed the seam is inert: no routers are mounted, the
+identity-provider list is empty, capabilities are all-false, and the login
+second-factor hook returns ``None`` — so OSS behaviour is byte-for-byte
+unchanged. An installed extension (discovered via the ``catlico.extensions``
+entry-point group) can:
+
+  * mount its own routers under the versioned API,
+  * advertise SSO identity providers to the login page,
+  * gate login behind a second factor (MFA),
+  * flip capability flags the web reads to decide whether to render enterprise UI.
+
+Extension interface (all hooks OPTIONAL — a partial extension is fine; the
+registry duck-types each hook and skips any that a given extension omits):
+
+    class Extension(Protocol):
+        def routers(self) -> list[APIRouter]: ...
+        def identity_providers(self) -> list[IdentityProvider]: ...
+        def second_factor_hook(self, user) -> Challenge | None: ...   # may be async
+        def capabilities(self) -> dict[str, bool]: ...
+
+Router mount convention: every router an extension returns is mounted under the
+``/api/v1`` prefix (the same namespace as the core API), so an extension router
+declaring ``prefix="/sso"`` is served at ``/api/v1/sso/...``.
+"""
+
+from __future__ import annotations
+
+import importlib.metadata
+import inspect
+import logging
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+    from app.models.user import User
+
+logger = logging.getLogger(__name__)
+
+#: The setuptools/importlib entry-point group extensions register themselves under.
+ENTRY_POINT_GROUP = "catlico.extensions"
+
+#: Prefix every extension router is mounted under (alongside the core v1 API).
+EXTENSION_ROUTER_PREFIX = "/api/v1"
+
+#: The capability keys the platform always reports. An extension may flip these
+#: to ``True`` or add its own keys; OSS reports them all-false.
+DEFAULT_CAPABILITIES: dict[str, bool] = {"sso": False, "mfa": False}
+
+
+class IdentityProvider(BaseModel):
+    """A single SSO provider advertised to the (pre-auth) login page.
+
+    Just enough for the web to render an SSO button and know where to send the
+    browser to begin the flow.
+    """
+
+    #: Stable identifier, e.g. "okta". Used by the web as a key / in the callback.
+    id: str
+    #: Human-readable label for the login button, e.g. "Log in with Okta".
+    name: str
+    #: Federation protocol.
+    kind: Literal["oidc", "saml"]
+    #: Absolute path the browser is sent to in order to start the flow.
+    authorize_path: str
+
+
+class Challenge(BaseModel):
+    """A second-factor challenge returned by ``second_factor_hook``.
+
+    When present, the login route responds with an ``mfa_required`` envelope
+    carrying ``pending_token`` instead of issuing access/refresh tokens. The
+    actual MFA verification + token exchange is built by ``catlico-enterprise``;
+    OSS only defines this contract and never produces a challenge.
+    """
+
+    #: Challenge type, e.g. "totp".
+    kind: str
+    #: Opaque token the client returns when completing the second factor.
+    pending_token: str
+
+
+@runtime_checkable
+class Extension(Protocol):
+    """Structural type documenting the full extension surface. Every method is
+    optional at runtime — the registry checks for each hook before calling it."""
+
+    def routers(self) -> list[APIRouter]: ...
+
+    def identity_providers(self) -> list[IdentityProvider]: ...
+
+    def second_factor_hook(self, user: User) -> Challenge | None: ...
+
+    def capabilities(self) -> dict[str, bool]: ...
+
+
+class ExtensionRegistry:
+    """Holds the loaded extensions and aggregates their hooks. In OSS (no
+    extensions) every aggregate is empty / all-false / ``None``."""
+
+    def __init__(self) -> None:
+        self._extensions: list[Extension] = []
+
+    @property
+    def extensions(self) -> list[Extension]:
+        return list(self._extensions)
+
+    def register(self, extension: Extension) -> None:
+        self._extensions.append(extension)
+
+    def reset(self, extensions: list[Extension] | None = None) -> None:
+        """Replace the registered set (mainly for tests). Empty by default."""
+        self._extensions = list(extensions) if extensions else []
+
+    def load_from_entry_points(self, group: str = ENTRY_POINT_GROUP) -> None:
+        """Discover and register extensions from the ``catlico.extensions``
+        entry-point group. Each entry point resolves to an object implementing
+        (part of) the ``Extension`` protocol. A broken extension is logged and
+        skipped rather than crashing startup."""
+        for ep in importlib.metadata.entry_points(group=group):
+            try:
+                extension = ep.load()
+            except Exception:  # noqa: BLE001 — a bad extension must not down the app
+                logger.exception("failed to load extension entry point %s", ep.name)
+                continue
+            self.register(extension)
+            logger.info("loaded extension %s", ep.name)
+
+    def routers(self) -> list[APIRouter]:
+        result: list[APIRouter] = []
+        for ext in self._extensions:
+            hook = getattr(ext, "routers", None)
+            if hook is not None:
+                result.extend(hook())
+        return result
+
+    def identity_providers(self) -> list[IdentityProvider]:
+        result: list[IdentityProvider] = []
+        for ext in self._extensions:
+            hook = getattr(ext, "identity_providers", None)
+            if hook is not None:
+                result.extend(hook())
+        return result
+
+    def capabilities(self) -> dict[str, bool]:
+        merged = dict(DEFAULT_CAPABILITIES)
+        for ext in self._extensions:
+            hook = getattr(ext, "capabilities", None)
+            if hook is not None:
+                merged.update(hook())
+        return merged
+
+    async def second_factor_challenge(self, user: User) -> Challenge | None:
+        """Call each extension's ``second_factor_hook`` (sync or async) after a
+        successful password check. The first non-``None`` challenge wins; with no
+        extension this returns ``None`` and login proceeds to issue tokens."""
+        for ext in self._extensions:
+            hook = getattr(ext, "second_factor_hook", None)
+            if hook is None:
+                continue
+            result = hook(user)
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not None:
+                return result
+        return None
+
+
+#: Process-wide singleton. Populated once at app module load from entry points.
+registry = ExtensionRegistry()
+
+
+def mount_extension_router(app: FastAPI, router: APIRouter) -> None:
+    app.include_router(router, prefix=EXTENSION_ROUTER_PREFIX)
+
+
+def install_extension(app: FastAPI, extension: Extension) -> None:
+    """Register a single extension and mount its routers immediately. Used both
+    by tests (to inject the fixture extension) and internally by
+    :func:`load_and_mount_extensions`."""
+    registry.register(extension)
+    hook = getattr(extension, "routers", None)
+    if hook is not None:
+        for router in hook():
+            mount_extension_router(app, router)
+
+
+def load_and_mount_extensions(app: FastAPI, group: str = ENTRY_POINT_GROUP) -> None:
+    """Discover extensions from entry points and mount their routers. Called once
+    at app module load; a no-op in OSS where the entry-point group is empty."""
+    before = set(registry.extensions)
+    registry.load_from_entry_points(group)
+    for ext in registry.extensions:
+        if ext in before:
+            continue
+        hook = getattr(ext, "routers", None)
+        if hook is not None:
+            for router in hook():
+                mount_extension_router(app, router)

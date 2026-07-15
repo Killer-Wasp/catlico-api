@@ -11,6 +11,7 @@ from app.api.v1.main import api_router
 from app.core.configs import settings
 from app.core.context import RequestIdMiddleware
 from app.core.db import AsyncSessionLocal, init_db, run_migrations
+from app.core.extensions import load_and_mount_extensions
 from app.crud.audit import dispatch_pending_outbox, register_consumer
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
@@ -143,3 +144,8 @@ if settings.all_cors_origins:
 app.add_middleware(RequestIdMiddleware)
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(internal_api_router, prefix="/api/internal")
+
+# Enterprise extension seam: discover extensions from the `catlico.extensions`
+# entry-point group and mount their routers under /api/v1. No-op in OSS (the
+# group is empty), so behaviour is unchanged without the enterprise package.
+load_and_mount_extensions(app)
