@@ -219,6 +219,9 @@ __marimo__/
 
 dev.db
 
+# Local-filesystem blob storage (default STORAGE_ROOT when no S3 endpoint is set)
+dev/uploads/
+
 .DS_Store
 # Local-only reference material — not published.
 # docs/thehive4/: reverse-engineered TheHive/Cortex reference docs.
