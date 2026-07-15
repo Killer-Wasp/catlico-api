@@ -337,8 +337,8 @@ async def test_no_additions_no_fan_out(session, org_a, monkeypatch):
     row = await _case_update_outbox(
         session, org_id=org_a.id, details={"added_assignee_ids": []}
     )
-    mock_hub = AsyncMock()
-    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
+    mock_pub = AsyncMock()
+    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
 
     await notify_feed_consumer(session, row)
 
@@ -351,7 +351,7 @@ async def test_no_additions_no_fan_out(session, org_a, monkeypatch):
     ).scalars().all()
     assert len(notifs) == 1
     assert notifs[0].user_id is None
-    mock_hub.send_to_user.assert_not_called()
+    mock_pub.assert_not_called()
 
 
 async def test_primary_and_collaborator_same_user_deduped(

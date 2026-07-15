@@ -135,16 +135,14 @@ def get_hub() -> WebSocketHub:
 
 
 async def ws_broadcast_consumer(session, row) -> None:
-    """Outbox consumer: broadcast the event envelope to all connected clients
-    in the event's organisation."""
-    from app.services.outbox_events import build_event_envelope
+    """Outbox consumer: announce the event to *every* replica's hub over the
+    Postgres LISTEN/NOTIFY bus (§6.2), rather than feeding only this process's
+    local hub. The NOTIFY carries just the outbox row id and fires on the drain's
+    commit; each replica's `EventListener` fetches the row, builds the envelope,
+    and broadcasts to its own connected clients (this replica included)."""
+    from app.services.event_bus import publish_broadcast
 
     org_id = row.payload.get("organisation_id")
     if not org_id:
         return
-    envelope = build_event_envelope(row)
-    hub = get_hub()
-    await hub.broadcast(
-        org_id,
-        {"type": "event", "event": envelope},
-    )
+    await publish_broadcast(session, org_id=org_id, outbox_id=row.id)
