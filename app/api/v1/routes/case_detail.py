@@ -14,9 +14,12 @@ from app.api.v1.routes.case_common import (
     custom_fields_for_case,
 )
 from app.core.db import get_session
+from app.crud import assignee as assignee_crud
+from app.crud import audit as audit_crud
 from app.crud import case_ as case_crud
 from app.crud import flag as flag_crud
 from app.models.case_ import CasePublic, CaseUpdate
+from app.models.common import AssigneeSetRequest
 from app.models.flag import FlagEntityType
 
 router = APIRouter(prefix="/{case_id}", tags=["cases"])
@@ -76,6 +79,65 @@ async def update_case(
         updated_by=str(case_ctx.user.id),
         organisation_id=case_ctx.organisation_id,
     )
+    flagged = await flag_crud.is_flagged(
+        session, FlagEntityType.case, str(case.id), case_ctx.organisation_id
+    )
+    cfs = await custom_fields_for_case(session, case.id)
+    return await case_public_resolved(
+        case, session, flagged, cfs, organisation_id=case_ctx.organisation_id
+    )
+
+
+async def _case_owner_org_id(session: AsyncSession, case_id: int) -> str:
+    """The owner org of a case (mirrors the PATCH assignee-validation path)."""
+    from app.crud.case_share import list_shares
+
+    shares = await list_shares(session, case_id)
+    owner_org_id = next((s.organisation_id for s in shares if s.is_owner), None)
+    if owner_org_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Case has no owner organisation",
+        )
+    return owner_org_id
+
+
+@router.put("/assignees", response_model=CasePublic)
+async def set_case_assignees(
+    body: AssigneeSetRequest,
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("write:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CasePublic:
+    """Replace the case's collaborator (secondary-assignee) set. The primary owner
+    is set separately via PATCH `assignee_id`. Each collaborator must be a member
+    of the owner organisation (mirrors the PATCH assignee check). Newly-added
+    collaborators are stamped into the audit event for targeted `case.assigned`
+    notification fan-out."""
+    case = case_ctx.case
+    if body.user_ids:
+        owner_org_id = await _case_owner_org_id(session, case.id)
+        for uid in set(body.user_ids):
+            await assert_assignee_in_org(session, uid, owner_org_id)
+
+    before = set(await assignee_crud.list_case_collaborators(session, case.id))
+    added = await assignee_crud.set_case_collaborators(
+        session, case.id, body.user_ids, primary_id=case.assignee_id
+    )
+    after = set(await assignee_crud.list_case_collaborators(session, case.id))
+    if before != after:
+        await audit_crud.record_audit(
+            session,
+            action="update",
+            obj=case,
+            context=case,
+            actor=str(case_ctx.user.id),
+            details={
+                "added_assignee_ids": [str(u) for u in added],
+                "assignee_ids": sorted(str(u) for u in after),
+            },
+            organisation_id=case_ctx.organisation_id,
+        )
+
     flagged = await flag_crud.is_flagged(
         session, FlagEntityType.case, str(case.id), case_ctx.organisation_id
     )

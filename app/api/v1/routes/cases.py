@@ -40,6 +40,7 @@ from app.api.v1.routes.plugins import ManualPluginRunRequest
 from app.core.db import get_session
 from app.core.storage import BlobStorage, get_storage
 from app.crud import alert as alert_crud
+from app.crud import assignee as assignee_crud
 from app.crud import audit as audit_crud
 from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
@@ -118,9 +119,14 @@ async def list_cases(
     tags_map = await tag_crud.tags_for_many(
         session, TaggableType.case, [str(c.id) for c in cases]
     )
-    emails = await user_crud.emails_for_ids(
-        session, list({c.assignee_id for c in cases if c.assignee_id})
+    collaborators_map = await assignee_crud.collaborators_for_cases(
+        session, [c.id for c in cases]
     )
+    # One id→email lookup covering primaries + collaborators across the page.
+    all_assignee_ids = {c.assignee_id for c in cases if c.assignee_id}
+    for collab in collaborators_map.values():
+        all_assignee_ids.update(collab)
+    emails = await user_crud.emails_for_ids(session, list(all_assignee_ids))
     tasks_map = await task_crud.summaries_for_cases(session, [c.id for c in cases])
     sla_targets = await sla_crud.resolve_targets(session, ctx.organisation_id)
     now = datetime.now(UTC)
@@ -136,6 +142,9 @@ async def list_cases(
         )
         pub.tags = tags_map.get(str(c.id), [])
         pub.assignee_email = emails.get(c.assignee_id) if c.assignee_id else None
+        pub.assignees = assignee_crud.assignee_refs(
+            c.assignee_id, collaborators_map.get(c.id, []), emails
+        )
         pub.tasks = [
             CaseTaskSummary(
                 id=t.id,
@@ -328,10 +337,20 @@ async def list_case_tasks(
         session, FlagEntityType.task, [t.public_id for t in tasks], case_ctx.organisation_id
     )
     log_counts = await log_crud.log_counts_for_case(session, case_ctx.case.id)
+    collaborators_map = await assignee_crud.collaborators_for_tasks(
+        session, [(t.case_id, t.id) for t in tasks]
+    )
+    all_assignee_ids = {t.assignee_id for t in tasks if t.assignee_id}
+    for collab in collaborators_map.values():
+        all_assignee_ids.update(collab)
+    emails = await user_crud.emails_for_ids(session, list(all_assignee_ids))
 
     def _public(task: Task) -> TaskPublic:
         pub = _task_public(task, task.public_id in flagged)
         pub.log_count = log_counts.get(task.id, 0)
+        pub.assignees = assignee_crud.assignee_refs(
+            task.assignee_id, collaborators_map.get((task.case_id, task.id), []), emails
+        )
         return pub
 
     return Page(
@@ -363,7 +382,11 @@ async def create_case_task(
         organisation_id=case_ctx.organisation_id,
         created_by=str(case_ctx.user.id),
     )
-    return _task_public(task, flagged=False)
+    pub = _task_public(task, flagged=False)
+    pub.assignees = await assignee_crud.build_assignee_refs(
+        session, primary_id=task.assignee_id, collaborator_ids=[]
+    )
+    return pub
 
 
 # --- Observables under a case ---

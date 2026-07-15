@@ -4,7 +4,7 @@ from enum import Enum
 
 from sqlmodel import Field, SQLModel
 
-from app.models.common import SoftDeleteMixin, TimestampMixin
+from app.models.common import AssigneeRef, SoftDeleteMixin, TimestampMixin
 from app.util.ids import format_task_id
 
 
@@ -85,6 +85,9 @@ class TaskPublic(SQLModel):
     description: str
     status: TaskStatus
     assignee_id: uuid.UUID | None
+    #: Full assignee set (primary + collaborators), populated by a batched lookup
+    #: at read time. The primary is flagged `is_primary=True`.
+    assignees: list[AssigneeRef] = []
     order: int
     flagged: bool = False
     #: Live work-log count, populated by a batched lookup in the list view so the

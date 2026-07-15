@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime
 from typing import Generic, TypeVar
 
@@ -51,3 +52,20 @@ class Page(BaseModel, Generic[T]):
     total: int
     skip: int
     limit: int
+
+
+class AssigneeRef(SQLModel):
+    """One assignee of a case/task in the read models. The primary owner (from
+    ``assignee_id``) is included with ``is_primary=True``; collaborators (from the
+    join table) with ``is_primary=False``."""
+
+    id: uuid.UUID
+    email: str | None = None
+    is_primary: bool = False
+
+
+class AssigneeSetRequest(SQLModel):
+    """Body for ``PUT …/assignees``: the full replacement collaborator set. The
+    primary owner is set separately (via the entity's PATCH ``assignee_id``)."""
+
+    user_ids: list[uuid.UUID] = []

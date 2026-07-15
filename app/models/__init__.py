@@ -8,6 +8,7 @@ from app.models.attachment import (  # noqa: F401
 )
 from app.models.audit import Audit, AuditOutbox  # noqa: F401
 from app.models.case_ import Case  # noqa: F401
+from app.models.case_assignee import CaseAssignee  # noqa: F401
 from app.models.case_merge import CaseMerge  # noqa: F401
 from app.models.case_share import CaseShare  # noqa: F401
 from app.models.case_template import CaseTemplate, CaseTemplateTask  # noqa: F401
@@ -50,6 +51,7 @@ from app.models.role import Role, RolePermission  # noqa: F401
 from app.models.sla import SlaPolicy  # noqa: F401
 from app.models.tag import Tag, Tagging  # noqa: F401
 from app.models.task import Task  # noqa: F401
+from app.models.task_assignee import TaskAssignee  # noqa: F401
 from app.models.task_share import TaskShare  # noqa: F401
 from app.models.user import User  # noqa: F401
 

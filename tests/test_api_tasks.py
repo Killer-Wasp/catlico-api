@@ -85,6 +85,13 @@ async def test_list_tasks_returns_org_visible_queue_context(
         "description": "",
         "status": "Waiting",
         "assignee_id": str(analyst_a.id),
+        "assignees": [
+            {
+                "id": str(analyst_a.id),
+                "email": "analyst-a@test.com",
+                "is_primary": True,
+            }
+        ],
         "order": 0,
         "flagged": False,
         "start_date": None,
