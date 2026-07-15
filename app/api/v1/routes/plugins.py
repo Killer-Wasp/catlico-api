@@ -360,7 +360,6 @@ async def _manual_run_eligibility(
             PluginRunnerModel.id == RunnerPluginInstallation.runner_id,
         ).where(
             PluginRunnerModel.status == "healthy",
-            PluginRunnerModel.enrollment_state == "enrolled",
         )
     installation = (await session.execute(stmt)).scalars().first()
     if installation is None:

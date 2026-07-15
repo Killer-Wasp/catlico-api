@@ -1,5 +1,14 @@
-"""Plugin runner internal API: registration, heartbeat, sync."""
+"""Plugin runner internal API: registration, heartbeat, sync.
+
+Auth model: a single ``PLUGIN_RUNNER_SHARED_SECRET`` (the autouse ``runner_secret``
+fixture, value ``RUNNER_SECRET``) is the whole trust boundary. Runners
+self-register and then send every internal call with
+``Authorization: Bearer <secret>`` + ``X-Runner-Id``.
+"""
 from httpx import AsyncClient
+
+# Must match the value the autouse ``runner_secret`` conftest fixture configures.
+RUNNER_SECRET = "test-runner-secret"
 
 
 RUNNER1 = {
@@ -11,8 +20,8 @@ RUNNER1 = {
 }
 
 
-def _internal_h(secret):
-    return {"Authorization": f"Bearer {secret}"}
+def _internal_h(secret, runner_id="runner-1"):
+    return {"Authorization": f"Bearer {secret}", "X-Runner-Id": runner_id}
 
 
 def _org_h(token, org_id):
@@ -27,52 +36,34 @@ async def _enable_plugin_for_org(client: AsyncClient, token: str, org_id: str, p
     assert r.status_code == 200, r.text
 
 
-async def _create_enrollment_token(
-    client: AsyncClient,
-    admin_token: str,
-    runner_id: str = "runner-1",
-    *,
-    name: str = "Test Runner",
-) -> str:
-    response = await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": runner_id, "name": name, "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    assert response.status_code == 200, response.text
-    data = response.json()
-    assert data["enrollment_token"]
-    return data["enrollment_token"]
-
-
 async def _register_runner(
     client: AsyncClient,
-    admin_token: str,
+    _unused=None,
     runner: dict | None = None,
     *,
     plugins: list[dict] | None = None,
 ) -> tuple[dict, str]:
+    """Self-register a runner with the shared secret.
+
+    The second positional arg is ignored (legacy call sites pass ``admin_token``);
+    registration is now authenticated by the shared secret alone. Returns
+    ``(runner_summary, shared_secret)`` — the second element is the shared secret
+    callers use as the Bearer for subsequent internal calls (there is no longer a
+    per-runner credential to return)."""
     runner = runner or RUNNER1
-    token = await _create_enrollment_token(
-        client,
-        admin_token,
-        runner["id"],
-        name=runner.get("name", ""),
-    )
-    body = {**runner, "enrollment_token": token}
+    body = {**runner}
     if plugins is not None:
         body["plugins"] = plugins
-    response = await client.post("/api/internal/plugin-runner/register", json=body)
+    response = await client.post(
+        "/api/internal/plugin-runner/register",
+        json=body,
+        headers={"Authorization": f"Bearer {RUNNER_SECRET}"},
+    )
     assert response.status_code == 200, response.text
-    data = response.json()
-    assert data["runner_credential"]
-    assert data["push_signing_secret"]
-    return data, data["runner_credential"]
+    return response.json(), RUNNER_SECRET
 
 
-async def test_register_requires_valid_enrollment_token(
-    client: AsyncClient, admin_token: str,
-):
+async def test_register_requires_shared_secret(client: AsyncClient):
     body = {
         "id": "runner-1",
         "name": "Test Runner",
@@ -80,54 +71,43 @@ async def test_register_requires_valid_enrollment_token(
         "capabilities": ["container"],
         "isolation_mode": "container",
     }
+    # No secret at all.
     assert (
         await client.post("/api/internal/plugin-runner/register", json=body)
     ).status_code == 401
+    # Wrong secret.
     bad = await client.post(
         "/api/internal/plugin-runner/register",
-        json={**body, "enrollment_token": "nope"},
+        json=body,
+        headers={"Authorization": "Bearer nope"},
     )
     assert bad.status_code == 401
-    token = await _create_enrollment_token(client, admin_token)
+    # Correct secret self-registers; no secrets are returned.
     ok = await client.post(
         "/api/internal/plugin-runner/register",
-        json={**body, "enrollment_token": token},
+        json=body,
+        headers={"Authorization": f"Bearer {RUNNER_SECRET}"},
     )
     assert ok.status_code == 200, ok.text
     data = ok.json()
-    assert data["runner_credential"].startswith("cpr_")
-    assert data["push_signing_secret"].startswith("cps_")
-
-    reused = await client.post(
-        "/api/internal/plugin-runner/register",
-        json={**body, "enrollment_token": token},
-    )
-    assert reused.status_code == 401
+    assert data["id"] == "runner-1"
+    assert data["status"] == "healthy"
+    assert "runner_credential" not in data
+    assert "push_signing_secret" not in data
 
 
-async def test_register_creates_and_upserts_runner(
-    client: AsyncClient, admin_token: str,
-):
-    data, credential = await _register_runner(client, admin_token, RUNNER1)
+async def test_register_creates_and_upserts_runner(client: AsyncClient):
+    data, _ = await _register_runner(client, runner=RUNNER1)
     assert data["id"] == "runner-1"
     assert data["name"] == "Test Runner"
     assert data["status"] == "healthy"
 
-    # Upsert: same id, updated name
-    token = await _create_enrollment_token(
-        client,
-        admin_token,
-        "runner-1",
-        name="Runner One",
-    )
+    # Upsert: same id, updated name.
     updated = {**RUNNER1, "name": "Runner One"}
-    r2 = await client.post(
-        "/api/internal/plugin-runner/register",
-        json={**updated, "enrollment_token": token},
-    )
-    assert r2.status_code == 200
-    assert r2.json()["name"] == "Runner One"
+    data2, _ = await _register_runner(client, runner=updated)
+    assert data2["name"] == "Runner One"
 
+    # The shared secret + X-Runner-Id authenticate internal calls after register.
     heartbeat = await client.post(
         "/api/internal/plugin-runner/heartbeat",
         json={
@@ -137,18 +117,38 @@ async def test_register_creates_and_upserts_runner(
             "installed_plugin_count": 0,
             "health_summary": "ok",
         },
-        headers=_internal_h(credential),
+        headers=_internal_h(RUNNER_SECRET, "runner-1"),
     )
-    assert heartbeat.status_code == 401
+    assert heartbeat.status_code == 200, heartbeat.text
+    assert heartbeat.json()["status"] == "healthy"
 
 
-async def test_heartbeat_updates_liveness(
-    client: AsyncClient, admin_token: str,
-):
-    _, credential = await _register_runner(client, admin_token, RUNNER1)
-    h = _internal_h(credential)
+async def test_internal_call_rejects_wrong_secret(client: AsyncClient):
+    await _register_runner(client, runner=RUNNER1)
+    r = await client.post(
+        "/api/internal/plugin-runner/heartbeat",
+        json={"runner_id": "runner-1", "capacity": 1, "active_run_count": 0,
+              "installed_plugin_count": 0, "health_summary": "ok"},
+        headers=_internal_h("wrong-secret", "runner-1"),
+    )
+    assert r.status_code == 401
 
-    # Heartbeat
+
+async def test_internal_call_unknown_runner_404(client: AsyncClient):
+    """A valid secret but an X-Runner-Id with no row is a 404 (identity routing)."""
+    r = await client.post(
+        "/api/internal/plugin-runner/heartbeat",
+        json={"runner_id": "ghost", "capacity": 1, "active_run_count": 0,
+              "installed_plugin_count": 0, "health_summary": "ok"},
+        headers=_internal_h(RUNNER_SECRET, "ghost"),
+    )
+    assert r.status_code == 404
+
+
+async def test_heartbeat_updates_liveness(client: AsyncClient):
+    await _register_runner(client, runner=RUNNER1)
+    h = _internal_h(RUNNER_SECRET, "runner-1")
+
     heartbeat = {
         "runner_id": "runner-1",
         "capacity": 10,
@@ -164,25 +164,21 @@ async def test_heartbeat_updates_liveness(
     assert data["status"] == "healthy"
 
 
-async def test_heartbeat_rejects_unknown_runner(
-    client: AsyncClient, admin_token: str,
-):
-    _, credential = await _register_runner(client, admin_token, RUNNER1)
-    h = _internal_h(credential)
+async def test_heartbeat_rejects_mismatched_runner(client: AsyncClient):
+    """X-Runner-Id (principal) must match the heartbeat body's runner_id."""
+    await _register_runner(client, runner=RUNNER1)
     r = await client.post(
         "/api/internal/plugin-runner/heartbeat",
-        json={"runner_id": "ghost", "capacity": 1, "active_run_count": 0,
+        json={"runner_id": "runner-2", "capacity": 1, "active_run_count": 0,
               "installed_plugin_count": 0, "health_summary": "ok"},
-        headers=h,
+        headers=_internal_h(RUNNER_SECRET, "runner-1"),
     )
     assert r.status_code == 403
 
 
-async def test_sync_returns_empty_for_new_runner(
-    client: AsyncClient, admin_token: str,
-):
-    _, credential = await _register_runner(client, admin_token, RUNNER1)
-    h = _internal_h(credential)
+async def test_sync_returns_empty_for_new_runner(client: AsyncClient):
+    await _register_runner(client, runner=RUNNER1)
+    h = _internal_h(RUNNER_SECRET, "runner-1")
 
     r = await client.get("/api/internal/plugin-runner/sync", headers=h)
     assert r.status_code == 200, r.text
@@ -208,19 +204,12 @@ SAMPLE_MANIFEST = {
 }
 
 
-async def test_register_reports_plugin_manifests(
-    client: AsyncClient, admin_token: str,
-):
+async def test_register_reports_plugin_manifests(client: AsyncClient):
     """Runner can report installed plugin manifests during registration."""
-    _, credential = await _register_runner(
-        client,
-        admin_token,
-        RUNNER1,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
 
-    # Sync should now include the active plugin
+    # Sync should now include the active plugin.
     sync = await client.get("/api/internal/plugin-runner/sync", headers=h)
     assert sync.status_code == 200
     data = sync.json()
@@ -228,16 +217,14 @@ async def test_register_reports_plugin_manifests(
     assert data["active_plugins"][0]["id"] == "acme-threatintel"
 
 
-async def test_plugin_version_is_stored_on_register(
-    client: AsyncClient, admin_token: str,
-):
+async def test_plugin_version_is_stored_on_register(client: AsyncClient):
     """Each register creates/updates PluginVersion rows."""
-    await _register_runner(client, admin_token, RUNNER1, plugins=[SAMPLE_MANIFEST])
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
 
-    # Re-register with new version
+    # Re-register with new version.
     v2 = {**SAMPLE_MANIFEST, "version": "1.3.0"}
-    _, credential = await _register_runner(client, admin_token, RUNNER1, plugins=[v2])
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[v2])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
 
     sync = await client.get("/api/internal/plugin-runner/sync", headers=h)
     assert sync.status_code == 200
@@ -252,19 +239,9 @@ async def test_two_runners_hosting_same_plugin_claim_one_run(
     """A plugin installed on two runners still creates one run per event/plugin."""
     runner_two = {**RUNNER1, "id": "runner-2", "name": "Runner Two"}
 
-    _, credential = await _register_runner(
-        client,
-        admin_token,
-        RUNNER1,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    _, runner_two_credential = await _register_runner(
-        client,
-        admin_token,
-        runner_two,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
+    await _register_runner(client, runner=runner_two, plugins=[SAMPLE_MANIFEST])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
     await _enable_plugin_for_org(client, admin_token, org_a.id, "acme-threatintel")
 
     run_body = {
@@ -284,7 +261,7 @@ async def test_two_runners_hosting_same_plugin_claim_one_run(
     second = await client.post(
         "/api/internal/plugin-runner/runs",
         json={**run_body, "runner_id": "runner-2"},
-        headers=_internal_h(runner_two_credential),
+        headers=_internal_h(RUNNER_SECRET, "runner-2"),
     )
     assert second.status_code == 409
     assert second.json()["detail"]["existing_run_id"] == first.json()["run_id"]
@@ -293,17 +270,10 @@ async def test_two_runners_hosting_same_plugin_claim_one_run(
 # --- Run lifecycle ---
 
 
-async def test_create_plugin_run(
-    client: AsyncClient, org_a, admin_token,
-):
+async def test_create_plugin_run(client: AsyncClient, org_a, admin_token):
     """Runner creates a PluginRun row when it decides a plugin should receive an event."""
-    _, credential = await _register_runner(
-        client,
-        admin_token,
-        RUNNER1,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
     await _enable_plugin_for_org(client, admin_token, org_a.id, "acme-threatintel")
 
     run_body = {
@@ -329,13 +299,8 @@ async def test_create_plugin_run_requires_org_auto_run(
     client: AsyncClient, org_a, admin_token,
 ):
     """Runner cannot create event runs for plugins not enabled for org auto-run."""
-    _, credential = await _register_runner(
-        client,
-        admin_token,
-        RUNNER1,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
 
     r = await client.post(
         "/api/internal/plugin-runner/runs",
@@ -357,13 +322,8 @@ async def test_create_plugin_run_rejects_undeclared_trigger(
     client: AsyncClient, org_a, admin_token,
 ):
     """Runner cannot create a run for an event type absent from the manifest."""
-    _, credential = await _register_runner(
-        client,
-        admin_token,
-        RUNNER1,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
     await _enable_plugin_for_org(client, admin_token, org_a.id, "acme-threatintel")
 
     r = await client.post(
@@ -382,20 +342,13 @@ async def test_create_plugin_run_rejects_undeclared_trigger(
     assert r.status_code == 409
 
 
-async def test_run_lifecycle(
-    client: AsyncClient, org_a, admin_token,
-):
+async def test_run_lifecycle(client: AsyncClient, org_a, admin_token):
     """Full lifecycle: queued → accepted → started → result."""
-    _, credential = await _register_runner(
-        client,
-        admin_token,
-        RUNNER1,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
     await _enable_plugin_for_org(client, admin_token, org_a.id, "acme-threatintel")
 
-    # Create run
+    # Create run.
     run_body = {
         "event_id": "audit:abc123",
         "event_type": "observable.created",
@@ -408,19 +361,19 @@ async def test_run_lifecycle(
     r = await client.post("/api/internal/plugin-runner/runs", json=run_body, headers=h)
     run_id = r.json()["run_id"]
 
-    # Accept
+    # Accept.
     r = await client.post(
         f"/api/internal/plugin-runner/runs/{run_id}/accepted", headers=h,
     )
     assert r.status_code == 200
 
-    # Start
+    # Start.
     r = await client.post(
         f"/api/internal/plugin-runner/runs/{run_id}/started", headers=h,
     )
     assert r.status_code == 200
 
-    # Result
+    # Result.
     r = await client.post(
         f"/api/internal/plugin-runner/runs/{run_id}/result",
         json={"status": "success", "result_summary": {"verdict": "info"}, "operation_count": 2},
@@ -430,17 +383,10 @@ async def test_run_lifecycle(
     assert r.json()["status"] == "success"
 
 
-async def test_skip_lifecycle(
-    client: AsyncClient, org_a, admin_token,
-):
+async def test_skip_lifecycle(client: AsyncClient, org_a, admin_token):
     """Runner skips when plugin declines the event."""
-    _, credential = await _register_runner(
-        client,
-        admin_token,
-        RUNNER1,
-        plugins=[SAMPLE_MANIFEST],
-    )
-    h = _internal_h(credential)
+    await _register_runner(client, runner=RUNNER1, plugins=[SAMPLE_MANIFEST])
+    h = _internal_h(RUNNER_SECRET, "runner-1")
     await _enable_plugin_for_org(client, admin_token, org_a.id, "acme-threatintel")
 
     run_body = {
@@ -464,11 +410,9 @@ async def test_skip_lifecycle(
     assert r.json()["status"] == "skipped"
 
 
-async def test_run_unknown_plugin_404(
-    client: AsyncClient, org_a, admin_token,
-):
-    _, credential = await _register_runner(client, admin_token, RUNNER1)
-    h = _internal_h(credential)
+async def test_run_unknown_plugin_404(client: AsyncClient, org_a, admin_token):
+    await _register_runner(client, runner=RUNNER1)
+    h = _internal_h(RUNNER_SECRET, "runner-1")
     r = await client.post(
         "/api/internal/plugin-runner/runs",
         json={

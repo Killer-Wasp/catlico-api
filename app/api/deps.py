@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.configs import settings
 from app.core.db import AsyncSessionLocal, get_session
 from app.core.security import TokenPayload, decode_access_token
 from app.crud.api_key import get_key_by_hash, touch_key
@@ -420,41 +422,57 @@ class PluginRuntimePrincipal:
         return f"plugin:{self.plugin_id}@{version}"
 
 
-async def get_plugin_runner_principal(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    authorization: Annotated[str | None, Header()] = None,
-) -> PluginRunnerPrincipal:
+def _verify_shared_secret(authorization: str | None) -> None:
+    """Constant-time compare the Bearer value against the configured shared
+    secret. The shared secret is the whole trust boundary between the API and
+    its runners; raises 401 on any mismatch (or when unconfigured)."""
     presented = ""
     if authorization and authorization.lower().startswith("bearer "):
         presented = authorization[7:]
-    if not presented:
+    expected = settings.PLUGIN_RUNNER_SHARED_SECRET or ""
+    if not presented or not expected or not secrets.compare_digest(presented, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid plugin runner credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    credential_hash = hashlib.sha256(presented.encode()).hexdigest()
-    result = await session.execute(
-        select(PluginRunnerModel).where(
-            PluginRunnerModel.credential_hash == credential_hash,
-            PluginRunnerModel.enrollment_state == "enrolled",
-        )
-    )
-    runner = result.scalar_one_or_none()
-    if runner is None:
+
+async def get_plugin_runner_principal(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    authorization: Annotated[str | None, Header()] = None,
+    x_runner_id: Annotated[str | None, Header()] = None,
+) -> PluginRunnerPrincipal:
+    _verify_shared_secret(authorization)
+    if not x_runner_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid plugin runner credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    runner = await session.get(PluginRunnerModel, x_runner_id)
+    if runner is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Plugin runner not found",
+        )
     return PluginRunnerPrincipal(runner_id=runner.id)
+
+
+async def verify_plugin_runner_secret(
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Shared-secret-only gate for the self-registration route, which creates the
+    runner row and therefore cannot require it to pre-exist (unlike every other
+    internal runner route, which also confirms the ``X-Runner-Id`` row)."""
+    _verify_shared_secret(authorization)
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 SuperAdminUser = Annotated[User, Depends(get_superadmin_user)]
 OrgContext = Annotated[AuthContext, Depends(get_org_context)]
 PluginRunner = Annotated[PluginRunnerPrincipal, Depends(get_plugin_runner_principal)]
+PluginRunnerSecret = Annotated[None, Depends(verify_plugin_runner_secret)]
 
 
 async def get_plugin_runtime_principal(

@@ -1,7 +1,5 @@
-import hashlib
 import json
-import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated
 
 import httpx
@@ -11,7 +9,6 @@ from sqlmodel import select
 
 from app.api.deps import SuperAdminUser
 from app.core.configs import settings
-from app.core.crypto import decrypt_string
 from app.core.db import get_session
 from app.models.plugin_runner import (
     PluginDefinition,
@@ -26,14 +23,6 @@ from app.services.plugin_dispatch import _signature
 
 
 router = APIRouter(prefix="/plugin-runners", tags=["plugin-runners"])
-
-
-def _hash_secret(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
-def _new_enrollment_token() -> str:
-    return f"cpe_{secrets.token_urlsafe(32)}"
 
 
 async def _runner_get_json(base_url: str, path: str) -> dict | list:
@@ -63,7 +52,7 @@ async def _runner_post_signed(
     """
     if not runner.base_url:
         raise httpx.RequestError("runner base_url is empty")
-    secret = decrypt_string(runner.push_signing_secret_encrypted)
+    secret = settings.PLUGIN_RUNNER_SHARED_SECRET or ""
     if not secret:
         raise httpx.RequestError("runner push signing secret is unavailable")
     body = json.dumps(payload).encode()
@@ -165,81 +154,6 @@ async def list_runners(
         }
         for r in rows
     ]
-
-
-@router.post("")
-async def create_runner(
-    body: dict,
-    user: SuperAdminUser,
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> dict:
-    token = _new_enrollment_token()
-    expires_at = datetime.now(UTC) + timedelta(
-        seconds=settings.PLUGIN_RUNNER_ENROLLMENT_TOKEN_TTL_SECONDS
-    )
-    runner = await session.get(PluginRunnerModel, body["id"])
-    if runner is None:
-        runner = PluginRunnerModel(
-            id=body["id"],
-            name=body.get("name", ""),
-            base_url=body.get("base_url", ""),
-            status="unhealthy",
-            enrollment_state="pending",
-            enrollment_token_hash=_hash_secret(token),
-            enrollment_token_expires_at=expires_at,
-            created_by=str(user.id),
-        )
-        session.add(runner)
-    else:
-        runner.name = body.get("name", runner.name)
-        runner.base_url = body.get("base_url", runner.base_url)
-        runner.enrollment_state = "pending"
-        runner.enrollment_token_hash = _hash_secret(token)
-        runner.enrollment_token_expires_at = expires_at
-    await session.flush()
-    return {
-        "id": runner.id,
-        "name": runner.name,
-        "status": runner.status,
-        "enrollment_state": runner.enrollment_state,
-        "enrollment_token": token,
-        "enrollment_token_expires_at": expires_at.isoformat(),
-    }
-
-
-@router.post("/{runner_id}/re-enroll")
-async def re_enroll_runner(
-    runner_id: str,
-    _: SuperAdminUser,
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> dict:
-    """Mint a fresh one-time enrollment token for an existing runner.
-
-    Resets the runner to ``pending`` so the runner can exchange the new token
-    for machine credentials again (used after a lost credential or an admin
-    reset). The old enrollment token, if any, is superseded. Machine
-    credentials are only issued on the runner-side ``/register`` exchange, so
-    this route never returns them.
-    """
-    runner = await session.get(PluginRunnerModel, runner_id)
-    if runner is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runner not found")
-    token = _new_enrollment_token()
-    expires_at = datetime.now(UTC) + timedelta(
-        seconds=settings.PLUGIN_RUNNER_ENROLLMENT_TOKEN_TTL_SECONDS
-    )
-    runner.enrollment_state = "pending"
-    runner.enrollment_token_hash = _hash_secret(token)
-    runner.enrollment_token_expires_at = expires_at
-    await session.flush()
-    return {
-        "id": runner.id,
-        "name": runner.name,
-        "status": runner.status,
-        "enrollment_state": runner.enrollment_state,
-        "enrollment_token": token,
-        "enrollment_token_expires_at": expires_at.isoformat(),
-    }
 
 
 @router.get("/{runner_id}")

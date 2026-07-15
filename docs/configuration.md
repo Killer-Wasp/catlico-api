@@ -15,7 +15,7 @@ secret backup/rotation).
 | Variable | Default | Notes |
 |---|---|---|
 | `ENVIRONMENT` | `local` | `local` \| `staging` \| `production`. Only `local` auto-applies migrations at startup and seeds data; `staging`/`production` require a manual `alembic upgrade head`. `production` also disables `/docs`, `/redoc`, `/openapi.json`. |
-| `SECRET_ENCRYPTION_KEY` | — | **Required.** A valid Fernet key. Encrypts plugin secrets and push-signing secrets at rest. Startup fails if absent or malformed. Must be **identical across every instance** and backed up — see [deployment.md](deployment.md#3-secrets). |
+| `SECRET_ENCRYPTION_KEY` | — | **Required.** A valid Fernet key. Encrypts plugin secrets at rest. Startup fails if absent or malformed. Must be **identical across every instance** and backed up — see [deployment.md](deployment.md#3-secrets). |
 | `SECRET_KEY` | random per process | JWT signing key. **Set this explicitly** in any deployment — the default regenerates on restart (invalidating every token) and differs per instance (breaking multi-instance auth). Must be the **same value on every instance**. |
 | `SEED_PROFILE` | `demo` | JSON seed profile applied on startup, from a directory under `app/core/seed_data/`: `demo` (rich showcase), `dev` (minimal), or `none` (skip). **Only consulted when `ENVIRONMENT=local`** — never seeds in staging/production. |
 | `FRONTEND_HOST` | `http://localhost:5173` | Origin of the web app. Used to build links in outbound email **and** auto-added to the CORS allowlist. Set to your real frontend URL in production. |
@@ -94,13 +94,12 @@ GCS and Azure read ambient credentials instead (`GOOGLE_APPLICATION_CREDENTIALS`
 
 See [plugin-system.md](plugin-system.md) for what these govern.
 
-### Enrollment and tokens
+### Runner auth and tokens
 
 | Variable | Default | Notes |
 |---|---|---|
-| `PLUGIN_RUNNER_ENROLLMENT_TOKEN_TTL_SECONDS` | `900` | One-time enrollment token lifetime. |
-| `PLUGIN_RUNTIME_TOKEN_TTL_SECONDS` | `900` | Per-run token lifetime. |
-| `PLUGIN_RUNNER_SHARED_SECRET` | — | **Deprecated and unread.** Kept as a config knob while the enrollment flow rolled out. Nothing in the codebase reads it; it authenticates nothing. |
+| `PLUGIN_RUNNER_SHARED_SECRET` | — | The single trust boundary between the API and every runner. Set it **identically** on the API and each runner. Runners send it as `Authorization: Bearer <secret>` on every internal call, self-register with it, and it also keys the HMAC on API→runner pushes (both directions). Generate with `python -c "import secrets; print(secrets.token_hex(32))"`. |
+| `PLUGIN_RUNTIME_TOKEN_TTL_SECONDS` | `900` | Per-run token lifetime (plugin sandbox → API). Separate concern from the runner shared secret. |
 
 ### Runtime file limits
 
@@ -175,6 +174,7 @@ notification tables. A background sweep prunes rows past these windows; see
 - [ ] `FRONTEND_HOST` + `BACKEND_CORS_ORIGINS` restricted to your real frontend origin(s)
 - [ ] `STORAGE_PROTOCOL` set to a durable object store (`s3`/`gcs`/`az`) for any multi-instance deployment — `local` is neither shared nor durable
 - [ ] `SEED_PROFILE` irrelevant in production (seeding is skipped unless `ENVIRONMENT=local`)
+- [ ] `PLUGIN_RUNNER_SHARED_SECRET` set (and identical on the API + every runner) if running the plugin subsystem
 - [ ] `ANALYZER_SHARED_SECRET` set if running `catlico-konnect`
 - [ ] Migrations applied deliberately (`make migrate` / `alembic upgrade head`) — auto-apply only happens when `ENVIRONMENT=local`
 

@@ -24,7 +24,7 @@ NOW = datetime(2026, 7, 9, 12, 0, 0, tzinfo=UTC)
 
 
 async def _seed_plugin(session, org_id, *, timeout=60):
-    runner = PluginRunner(id=f"runner-{uuid.uuid4().hex[:8]}", enrollment_state="enrolled")
+    runner = PluginRunner(id=f"runner-{uuid.uuid4().hex[:8]}")
     pdef = PluginDefinition(id=f"plugin-{uuid.uuid4().hex[:8]}", display_name="P")
     session.add(runner)
     session.add(pdef)

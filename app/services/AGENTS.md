@@ -45,9 +45,11 @@ without the loop.
 
 ## `plugin_dispatch.py` — the API→runner seam
 
-Signs the **raw body** with the runner's `push_signing_secret`:
-`x-catlico-signature: sha256=<hmac-sha256(secret, body)>`. The runner recomputes and
-compares in constant time. Events fan out to **every healthy, enrolled runner**.
+Signs the **raw body** with `PLUGIN_RUNNER_SHARED_SECRET` (the same secret runners present
+for inbound auth, used in both directions):
+`x-catlico-signature: sha256=<hmac-sha256(shared_secret, body)>`. The runner recomputes and
+compares in constant time. Events fan out to **every healthy runner** (selected on
+status/heartbeat).
 
 Plugin-actor events are suppressed so a plugin's own writes don't re-trigger it — an
 easy infinite loop to reintroduce. Cron events use a deterministic `_schedule_event_id`

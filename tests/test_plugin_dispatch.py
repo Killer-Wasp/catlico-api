@@ -11,7 +11,6 @@ from sqlmodel import select
 from app.api.deps import PluginRunnerPrincipal
 from app.api.internal.routes.plugin_runner import submit_result
 from app.core.configs import settings
-from app.core.crypto import encrypt_string
 from app.models.audit import AuditOutbox
 from app.models.plugin_runner import (
     PluginDefinition,
@@ -33,14 +32,13 @@ from app.services.plugin_dispatch import (
     schedule_due_events,
 )
 
-PUSH_SECRET = "runner-push-secret"
+# The push signer keys on the shared secret; tests verify against the same value
+# the autouse ``runner_secret`` fixture configures.
+PUSH_SECRET = "test-runner-secret"
 
 
 async def _seed_runner(session, runner_id="r1", *, base_url="http://runner:8090"):
-    runner = PluginRunner(
-        id=runner_id, status="healthy", enrollment_state="enrolled",
-        base_url=base_url, push_signing_secret_encrypted=encrypt_string(PUSH_SECRET),
-    )
+    runner = PluginRunner(id=runner_id, status="healthy", base_url=base_url)
     session.add(runner)
     await session.flush()
     return runner

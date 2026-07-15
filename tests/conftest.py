@@ -203,9 +203,14 @@ async def client(session, tmp_path) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def runner_secret(monkeypatch):
-    """Configure the platform-level plugin-runner shared secret for the test."""
+    """Configure the platform-level plugin-runner shared secret for every test.
+
+    The shared secret is now the whole runner trust boundary (register, internal
+    auth, and HMAC push all key on it), so it must be configured for any test
+    that exercises a runner. Autouse keeps it set to a real value session-wide;
+    harmless for tests that never touch a runner."""
     from app.core.configs import settings
 
     monkeypatch.setattr(settings, "PLUGIN_RUNNER_SHARED_SECRET", "test-runner-secret")

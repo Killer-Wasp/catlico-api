@@ -53,8 +53,12 @@ def test_plugin_run_has_claim_and_liveness_fields():
 
 def test_plugin_foundation_models_match_phase_one_contract():
     runner_columns = PluginRunner.__table__.columns
-    assert "enrollment_state" in runner_columns
-    assert "credential_hash" in runner_columns
+    # The enrollment/credential columns were dropped when runner auth collapsed to
+    # a single shared secret (no per-runner state persisted).
+    assert "enrollment_state" not in runner_columns
+    assert "credential_hash" not in runner_columns
+    assert "enrollment_token_hash" not in runner_columns
+    assert "push_signing_secret_encrypted" not in runner_columns
 
     org_plugin_columns = OrgPlugin.__table__.columns
     assert "schedule_override" in org_plugin_columns
