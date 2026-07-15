@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -8,18 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.api.deps import SuperAdminUser
-from app.core.configs import settings
 from app.core.db import get_session
 from app.models.plugin_runner import (
     PluginDefinition,
-    PluginInstallRequest,
     PluginRunner as PluginRunnerModel,
     PluginVersion,
     RunnerPluginInstallation,
 )
-# Reuse the exact HMAC scheme the event-push loop uses so the runner verifies
-# install triggers the same way it verifies /internal/events pushes.
-from app.services.plugin_dispatch import _signature
 
 
 router = APIRouter(prefix="/plugin-runners", tags=["plugin-runners"])
@@ -31,38 +25,6 @@ async def _runner_get_json(base_url: str, path: str) -> dict | list:
     url = f"{base_url.rstrip('/')}{path}"
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.get(url)
-        response.raise_for_status()
-        return response.json()
-
-
-async def _runner_post_signed(
-    runner: PluginRunnerModel,
-    path: str,
-    payload: dict,
-    *,
-    transport: httpx.AsyncBaseTransport | None = None,
-) -> dict | list:
-    """POST a JSON body to a runner host, HMAC-signed with the runner's push
-    signing secret. Signs the raw body with the SAME scheme/header the event
-    push uses (``x-catlico-signature``) so the runner verifies it identically.
-
-    Raises ``httpx.HTTPError`` on connection failure or a non-2xx response; the
-    caller maps that to ``502 BAD_GATEWAY`` (mirrors ``sync_runner``). The
-    ``transport`` kwarg exists only for tests.
-    """
-    if not runner.base_url:
-        raise httpx.RequestError("runner base_url is empty")
-    secret = settings.PLUGIN_RUNNER_SHARED_SECRET or ""
-    if not secret:
-        raise httpx.RequestError("runner push signing secret is unavailable")
-    body = json.dumps(payload).encode()
-    headers = {
-        "content-type": "application/json",
-        "x-catlico-signature": _signature(body, secret),
-    }
-    url = f"{runner.base_url.rstrip('/')}{path}"
-    async with httpx.AsyncClient(transport=transport, timeout=5.0) as client:
-        response = await client.post(url, content=body, headers=headers)
         response.raise_for_status()
         return response.json()
 
@@ -252,102 +214,20 @@ async def sync_runner(
     return {"status": "synced", "plugin_count": len(plugins)}
 
 
-@router.post(
-    "/{runner_id}/plugins/install",
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def install_plugin(
+@router.post("/{runner_id}/plugins/install")
+async def install_plugin_gone(
     runner_id: str,
-    body: PluginInstallRequest,
-    user: SuperAdminUser,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    _: SuperAdminUser,
 ) -> dict:
-    """Trigger a plugin install on a runner from a git source.
-
-    Records the catalog rows in an *installing/pending* state, then asks the
-    runner host to clone/build the plugin. The runner reports progress back via
-    the internal install-status sink; this route does not wait for completion.
+    """Removed (venv redesign WP4). Plugins are no longer installed at runtime:
+    they are provisioned into the runner's ``/plugins`` directory at image build
+    (``plugin-runner install <source>`` + rebuild/restart the runner image). This
+    endpoint always returns 410 Gone.
     """
-    runner = await session.get(PluginRunnerModel, runner_id)
-    if runner is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runner not found")
-
-    now = datetime.now(UTC)
-
-    # 1. Upsert the plugin definition (name = plugin_id unless already known).
-    pdef = await session.get(PluginDefinition, body.plugin_id)
-    if pdef is None:
-        pdef = PluginDefinition(
-            id=body.plugin_id,
-            display_name=body.plugin_id,
-            description="",
-        )
-        session.add(pdef)
-    await session.flush()
-
-    # 2. Create-or-get the version. Its PK is "{plugin_id}@{version}"; the
-    #    version placeholder falls back to source_ref until the runner pins a
-    #    real commit/tag. An existing row is reset to the installing state.
-    version_str = body.version or body.source_ref or "unknown"
-    version_id = f"{body.plugin_id}@{version_str}"
-    pver = await session.get(PluginVersion, version_id)
-    if pver is None:
-        pver = PluginVersion(
-            id=version_id,
-            plugin_id=body.plugin_id,
-            version=version_str,
-            source_type="github",
-            source_url=body.source_url,
-            source_ref=body.source_ref,
-            commit_sha="",
-            status="installing",
-            installed_at=now,
-        )
-        session.add(pver)
-    else:
-        pver.source_type = "github"
-        pver.source_url = body.source_url
-        pver.source_ref = body.source_ref
-        pver.commit_sha = ""
-        pver.status = "installing"
-        pver.install_log = None
-    await session.flush()
-
-    # 3. Upsert the runner installation row in the pending state.
-    installation = await session.get(
-        RunnerPluginInstallation,
-        (runner_id, version_id),
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=(
+            "Plugin install has been removed; plugins are provisioned at image "
+            "build / via the runner's plugins dir."
+        ),
     )
-    if installation is None:
-        installation = RunnerPluginInstallation(
-            runner_id=runner_id,
-            plugin_version_id=version_id,
-            install_status="pending",
-            created_by=str(user.id),
-        )
-        session.add(installation)
-    else:
-        installation.install_status = "pending"
-    await session.flush()
-
-    # 4. Ask the runner host to perform the install (HMAC-signed).
-    try:
-        await _runner_post_signed(
-            runner,
-            "/internal/plugins/install",
-            {
-                "plugin_version_id": version_id,
-                "plugin_id": body.plugin_id,
-                "source_url": body.source_url,
-                "source_ref": body.source_ref,
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 - surface runner failure as API error.
-        runner.last_error = str(exc)
-        await session.flush()
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Runner install trigger failed",
-        ) from exc
-
-    return {"plugin_version_id": version_id, "status": "installing"}

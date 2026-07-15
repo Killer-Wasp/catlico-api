@@ -25,19 +25,12 @@ from app.models.plugin_runner import (
     PluginRunnerRegister,
     PluginDefinition,
     PluginEventDelivery,
-    PluginInstallStatusUpdate,
     PluginResult,
     PluginVersion,
     RunnerPluginInstallation,
     PluginRun,
     PluginConfig,
     OrgPlugin,
-)
-
-# Install-pipeline states the runner reports; anything not terminal keeps the
-# version in the "installing" bucket.
-_INSTALL_PIPELINE_STATES = frozenset(
-    {"cloning", "validating", "building", "health_checking", "installed", "failed"}
 )
 
 _ACTIVE_RUN_STATUSES = ("queued", "accepted", "running", "cancelling")
@@ -153,67 +146,6 @@ async def register_runner(
         "status": existing.status,
         "version": existing.version,
     }
-
-
-@router.post("/plugins/{plugin_version_id:path}/install-status")
-async def report_install_status(
-    plugin_version_id: str,
-    body: PluginInstallStatusUpdate,
-    principal: PluginRunner,
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> dict:
-    """Runner-reported install progress for a plugin version it is installing.
-
-    Idempotent. The calling runner must OWN the installation
-    (``RunnerPluginInstallation`` for ``(principal.runner_id, plugin_version_id)``
-    must exist) or the version is treated as not found — a runner cannot report
-    status for a version it does not host.
-    """
-    installation = await session.get(
-        RunnerPluginInstallation,
-        (principal.runner_id, plugin_version_id),
-    )
-    if installation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Plugin installation not found for this runner",
-        )
-    if body.state not in _INSTALL_PIPELINE_STATES:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unknown install state: {body.state}",
-        )
-
-    installation.install_status = body.state
-
-    pver = await session.get(PluginVersion, plugin_version_id)
-    if pver is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Plugin version not found",
-        )
-    if body.state == "installed":
-        pver.status = "installed"
-        pver.installed_at = datetime.now(UTC)
-        if body.commit_sha:
-            pver.commit_sha = body.commit_sha
-        if body.image_digest:
-            pver.image_digest = body.image_digest
-    elif body.state == "failed":
-        pver.status = "failed"
-    else:
-        pver.status = "installing"
-
-    # Replace the stored log; on failure fold the error text in so it is visible.
-    if body.error:
-        pver.install_log = (
-            f"{body.install_log}\n{body.error}" if body.install_log else body.error
-        )
-    elif body.install_log is not None:
-        pver.install_log = body.install_log
-
-    await session.flush()
-    return {"ok": True, "status": pver.status}
 
 
 @router.post("/heartbeat")

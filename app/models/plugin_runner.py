@@ -64,20 +64,6 @@ class PluginRunnerHeartbeat(SQLModel):
     health_summary: str = "ok"
 
 
-class PluginInstallRequest(SQLModel):
-    """Body for POST /api/v1/plugin-runners/{runner_id}/plugins/install.
-
-    Admin-triggered install of a plugin from a git source onto a runner.
-    ``version`` is optional; when absent a placeholder is derived from
-    ``source_ref`` (the immutable version is finalized once the runner clones
-    and pins a commit)."""
-
-    plugin_id: str
-    source_url: str
-    source_ref: str = "main"
-    version: str | None = None
-
-
 class RunnablePluginPublic(SQLModel):
     """Slim view for GET /plugins/runnable — the plugins an analyst can dispatch
     on demand right now (would not 409 from a manual run), gated on run:enrichment
@@ -129,19 +115,6 @@ class PluginLatestCheck(SQLModel):
     update_available: bool = False
     status: str = "unknown"  # up_to_date | update_available | unknown
     reason: str | None = None
-
-
-class PluginInstallStatusUpdate(SQLModel):
-    """Body for POST /api/internal/plugin-runner/plugins/{plugin_version_id}/install-status.
-
-    The runner reports install-pipeline progress. ``state`` is one of
-    ``cloning | validating | building | health_checking | installed | failed``."""
-
-    state: str
-    commit_sha: str | None = None
-    image_digest: str | None = None
-    install_log: str | None = None
-    error: str | None = None
 
 
 # --- Plugin definition & versioning ---
