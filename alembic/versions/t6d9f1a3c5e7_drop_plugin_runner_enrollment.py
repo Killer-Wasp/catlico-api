@@ -17,7 +17,7 @@ from alembic import op
 
 revision: str = "t6d9f1a3c5e7"
 # down_revision fixed at merge
-down_revision: Union[str, Sequence[str], None] = "f7a9c1e3b5d2"
+down_revision: Union[str, Sequence[str], None] = "b8e2d4f6a1c3"  # chained behind wave1-a at integration
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
