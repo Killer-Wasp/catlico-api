@@ -68,8 +68,9 @@ services:
       POSTGRES_USER: catlico
       POSTGRES_PASSWORD: catlico
       POSTGRES_DB: catlico
-      # Blob storage -> SeaweedFS S3 gateway
-      STORAGE_PROTOCOL: s3
+      # Blob storage -> SeaweedFS S3 gateway. Setting S3_ENDPOINT_URL is what
+      # selects the S3 backend (see effective_storage_protocol), so an explicit
+      # STORAGE_PROTOCOL: s3 is redundant here and intentionally omitted.
       STORAGE_ROOT: catlico            # bucket name
       S3_ENDPOINT_URL: http://seaweedfs:8333
       S3_ACCESS_KEY: catlico

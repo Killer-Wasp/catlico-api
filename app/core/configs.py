@@ -156,24 +156,47 @@ class Settings(BaseSettings):
 
     # Blob storage for file attachments / file observables.
     # Backed by fsspec, so the same code targets local FS, S3 (incl. SeaweedFS/MinIO),
-    # GCS, or Azure — just install the matching fsspec adapter and set STORAGE_PROTOCOL.
+    # GCS, or Azure — just install the matching fsspec adapter.
+    #
+    # Backend selection: setting S3_ENDPOINT_URL flips the effective protocol to
+    # "s3" (see `effective_storage_protocol`). With no endpoint, STORAGE_PROTOCOL
+    # is used as-is — it defaults to "local" (filesystem at STORAGE_ROOT) and stays
+    # an explicit override for endpoint-less object stores (gcs/az/abfs, plain AWS).
+    # So local dev needs no SeaweedFS: leave S3_ENDPOINT_URL blank and blobs land
+    # under ./dev/uploads. `make dev-s3` sets the endpoint to exercise the S3 path.
     STORAGE_PROTOCOL: Literal["local", "s3", "gcs", "az", "abfs"] = "local"
     # Root container for blobs: a directory for `local`, a bucket (optionally
     # bucket/prefix) for object stores.
-    STORAGE_ROOT: str = "./var/blobs"
+    STORAGE_ROOT: str = "./dev/uploads"
     MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MB
-    # S3 / SeaweedFS knobs (used when STORAGE_PROTOCOL=s3). GCS/Azure read ambient
-    # credentials (GOOGLE_APPLICATION_CREDENTIALS / AZURE_STORAGE_CONNECTION_STRING).
+    # S3 / SeaweedFS knobs. Setting S3_ENDPOINT_URL alone selects the S3 backend.
+    # GCS/Azure instead read ambient credentials (GOOGLE_APPLICATION_CREDENTIALS /
+    # AZURE_STORAGE_CONNECTION_STRING) and are chosen via STORAGE_PROTOCOL.
     S3_ENDPOINT_URL: str | None = None  # e.g. http://seaweedfs:8333
     S3_REGION: str = "us-east-1"
     S3_ACCESS_KEY: str | None = None
     S3_SECRET_KEY: str | None = None
 
+    @property
+    def effective_storage_protocol(self) -> str:
+        """The fsspec protocol actually used, resolving the S3_ENDPOINT_URL opt-in.
+
+        A truthy S3_ENDPOINT_URL selects "s3" (SeaweedFS/MinIO/real S3) regardless
+        of STORAGE_PROTOCOL; otherwise STORAGE_PROTOCOL is used verbatim. This is the
+        single source of truth for backend selection — get_storage, storage_options,
+        and any HA/deployment guards should key off this rather than the raw
+        STORAGE_PROTOCOL field. Plain internal wiring, so not a `computed_field`.
+
+        `env_ignore_empty=True` means a blank `S3_ENDPOINT_URL=` in .env resolves to
+        None, so it correctly falls back to STORAGE_PROTOCOL (local by default).
+        """
+        return "s3" if self.S3_ENDPOINT_URL else self.STORAGE_PROTOCOL
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def storage_options(self) -> dict[str, Any]:
-        """fsspec storage_options for the configured protocol."""
-        if self.STORAGE_PROTOCOL == "s3":
+        """fsspec storage_options for the effective protocol."""
+        if self.effective_storage_protocol == "s3":
             opts: dict[str, Any] = {}
             if self.S3_ENDPOINT_URL:
                 opts["client_kwargs"] = {"endpoint_url": self.S3_ENDPOINT_URL}

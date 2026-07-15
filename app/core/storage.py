@@ -104,7 +104,7 @@ def get_storage() -> BlobStorage:
     global _storage
     if _storage is None:
         _storage = BlobStorage(
-            settings.STORAGE_PROTOCOL,
+            settings.effective_storage_protocol,
             settings.STORAGE_ROOT,
             settings.storage_options,
         )
