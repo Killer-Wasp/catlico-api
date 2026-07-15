@@ -21,9 +21,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlmodel import select
 
-from app.crud import audit as audit_crud
 from app.crud.audit import _consumers, dispatch_pending_outbox
 from app.models.audit import Audit, AuditOutbox
+from app.services.plugin_maintenance import (
+    MAINTENANCE_SWEEP_LOCK_KEY,
+    run_maintenance_sweep,
+)
 
 _DB_URL = os.environ["DATABASE_URL"]
 
@@ -114,3 +117,51 @@ async def test_two_drain_loops_skip_locked_no_double_process():
             assert undelivered == []
     finally:
         await eng.dispose()
+
+
+# --- Maintenance sweep: advisory-lock leader election ---------------------------
+
+
+async def test_maintenance_sweep_skips_when_lock_held(session):
+    """When another replica already holds the maintenance advisory lock, a sweep
+    on this replica returns immediately with ``{"skipped": True}`` and does no work.
+
+    We simulate the peer replica by taking the same session-level advisory lock on
+    an independent connection before invoking the sweep. `pg_try_advisory_lock`
+    then returns false for the sweep, so it must skip."""
+    from sqlalchemy import text
+
+    holder_eng = create_async_engine(_DB_URL, poolclass=NullPool)
+    try:
+        async with holder_eng.connect() as holder:
+            got = (
+                await holder.execute(
+                    text("SELECT pg_try_advisory_lock(:k)"),
+                    {"k": MAINTENANCE_SWEEP_LOCK_KEY},
+                )
+            ).scalar()
+            assert got is True  # the "other replica" is now the leader
+
+            result = await run_maintenance_sweep(session)
+            assert result == {"skipped": True}
+
+            # Release, then a fresh sweep must win the lock and actually run.
+            await holder.execute(
+                text("SELECT pg_advisory_unlock(:k)"),
+                {"k": MAINTENANCE_SWEEP_LOCK_KEY},
+            )
+    finally:
+        await holder_eng.dispose()
+
+    result2 = await run_maintenance_sweep(session)
+    assert result2["skipped"] is False
+    assert "reaped" in result2
+
+
+async def test_maintenance_sweep_releases_lock_between_ticks(session):
+    """Two back-to-back sweeps on the same session both run — the first releases
+    the leader lock so the second can re-acquire it (no self-deadlock/leak)."""
+    first = await run_maintenance_sweep(session)
+    second = await run_maintenance_sweep(session)
+    assert first["skipped"] is False
+    assert second["skipped"] is False

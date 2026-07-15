@@ -8,7 +8,7 @@ injected ``now``.
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, delete
+from sqlalchemy import and_, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlmodel import select
@@ -30,6 +30,34 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_STATUSES = ("queued", "accepted", "running", "cancelling")
 _TERMINAL_STATUSES = ("success", "failure", "timeout", "cancelled", "skipped")
+
+#: Fixed 64-bit key for the maintenance-sweep leader election (§6.2). Only one
+#: replica can hold this session-level Postgres advisory lock at a time, so on any
+#: given tick exactly one replica ("the leader") runs the sweep and the rest see a
+#: `false` from `pg_try_advisory_lock` and skip it — no double reap/rollup/prune.
+#: The lock is non-blocking (try-variant) and session-scoped, so it survives the
+#: internal commit and is released explicitly at the end of the pass; a crashed
+#: leader releases it when its connection drops, so the next tick elects a new one.
+MAINTENANCE_SWEEP_LOCK_KEY = 6210620500620601
+
+
+async def _try_acquire_maintenance_lock(session: AsyncSession) -> bool:
+    """Attempt the leader lock without blocking. True → this replica is the leader
+    for this tick; False → another replica holds it, skip the sweep."""
+    return bool(
+        (
+            await session.execute(
+                text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": MAINTENANCE_SWEEP_LOCK_KEY},
+            )
+        ).scalar()
+    )
+
+
+async def _release_maintenance_lock(session: AsyncSession) -> None:
+    await session.execute(
+        text("SELECT pg_advisory_unlock(:k)"), {"k": MAINTENANCE_SWEEP_LOCK_KEY}
+    )
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -327,20 +355,45 @@ async def scan_orphan_blobs(
 async def run_maintenance_sweep(
     session: AsyncSession, now: datetime | None = None
 ) -> dict:
-    """One maintenance pass. Returns counts for observability/tests."""
+    """One maintenance pass. Returns counts for observability/tests.
+
+    HA (§6.2): the sweep is leader-only. A non-blocking Postgres advisory lock
+    (`pg_try_advisory_lock`) elects a single leader per tick; replicas that fail
+    to acquire it return ``{"skipped": True}`` immediately rather than double
+    reaping/rolling/pruning. A lone replica always wins the lock, so behaviour is
+    unchanged. The lock is session-scoped (survives the internal commit) and is
+    released in a ``finally`` at the end of the pass."""
     from app.services.plugin_dispatch import schedule_due_events
 
     now = now or datetime.now(UTC)
-    reaped = await reap_stuck_runs(session, now)
-    offline = await detect_offline_runners(session, now)
-    rolled = await rollup_terminal_runs(session, now)
-    # Rollup must precede run pruning so stats are captured before rows go.
-    pruned_runs = await prune_old_runs(session, now)
-    pruned_deliveries = await prune_old_deliveries(session, now)
-    pruned_results = await prune_superseded_results(session, now)
-    scheduled = await schedule_due_events(session, now)
-    await session.commit()
+    if not await _try_acquire_maintenance_lock(session):
+        logger.debug(
+            "maintenance sweep skipped: advisory lock held by another replica"
+        )
+        return {"skipped": True}
+    try:
+        reaped = await reap_stuck_runs(session, now)
+        offline = await detect_offline_runners(session, now)
+        rolled = await rollup_terminal_runs(session, now)
+        # Rollup must precede run pruning so stats are captured before rows go.
+        pruned_runs = await prune_old_runs(session, now)
+        pruned_deliveries = await prune_old_deliveries(session, now)
+        pruned_results = await prune_superseded_results(session, now)
+        scheduled = await schedule_due_events(session, now)
+        await session.commit()
+    finally:
+        # Release even on error so a failed sweep doesn't wedge the leader lock on a
+        # pooled connection (session-level advisory locks survive rollback but NOT a
+        # physical connection close — a pooled conn is not closed, so we must unlock
+        # explicitly). Roll back first so the unlock query can run on a clean tx if
+        # the sweep aborted mid-way.
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001 — best-effort; unlock still attempted
+            pass
+        await _release_maintenance_lock(session)
     return {
+        "skipped": False,
         "reaped": reaped,
         "offline": offline,
         "rolled_up": rolled,
