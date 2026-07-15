@@ -151,12 +151,17 @@ async def search_cases(
             .limit(limit)
         )
     ).all()
+    from app.crud import case_status as case_status_crud
+
+    status_refs = await case_status_crud.refs_for_ids(
+        session, [case.status_id for case, _ in rows]
+    )
     hits = [
         CaseHit(
             id=case.id,
             title=case.title,
             snippet=snippet,
-            status=case.status,
+            status=status_refs.get(case.status_id),
             severity=case.severity,
             updated_at=case.updated_at,
             created_at=case.created_at,

@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlmodel import Field, SQLModel
 
+from app.models.case_status import CaseStatusRef
 from app.models.common import (
     MARKDOWN_NOTE,
     AssigneeRef,
@@ -12,12 +13,6 @@ from app.models.common import (
     TimestampMixin,
 )
 from app.models.task import TaskStatus
-
-
-class CaseStatus(str, Enum):
-    open = "Open"
-    resolved = "Resolved"
-    duplicated = "Duplicated"
 
 
 class CaseResolutionStatus(str, Enum):
@@ -43,7 +38,13 @@ class Case(TimestampMixin, SoftDeleteMixin, table=True):
     severity: int = Field(default=2)
     tlp: int = Field(default=2)
     pap: int = Field(default=2)
-    status: CaseStatus = Field(default=CaseStatus.open)
+    #: FK into the org-scoped `case_status` lookup (replaces the old native enum).
+    #: RESTRICT: a status in use cannot be deleted. Every create path (create_case,
+    #: merge) sets it to the owner org's built-in status, so real cases always have
+    #: one; nullable only so status-agnostic fixtures can build a bare subject row.
+    status_id: int | None = Field(
+        default=None, foreign_key="case_status.id", ondelete="RESTRICT"
+    )
     assignee_id: uuid.UUID | None = Field(
         default=None, foreign_key="user.id", ondelete="SET NULL"
     )
@@ -100,7 +101,8 @@ class CasePublic(SQLModel):
     severity: int
     tlp: int
     pap: int
-    status: CaseStatus
+    #: Resolved from status_id at read time (label + colour + stage for the badge).
+    status: CaseStatusRef | None = None
     flagged: bool = False
     assignee_id: uuid.UUID | None
     #: Assignee's email, resolved from assignee_id by a batched lookup at read
@@ -143,7 +145,7 @@ class SimilarCasePublic(SQLModel):
     id: int
     title: str
     severity: int
-    status: CaseStatus
+    status: CaseStatusRef | None = None
     shared_observables: int
 
 
@@ -154,7 +156,7 @@ class LinkedCasePublic(SQLModel):
     id: int
     title: str
     severity: int
-    status: CaseStatus
+    status: CaseStatusRef | None = None
 
 
 class CaseCounts(SQLModel):
@@ -192,7 +194,10 @@ class CaseUpdate(SQLModel):
     start_date: datetime | None = None
     end_date: datetime | None = None
     summary: str | None = None
-    status: CaseStatus | None = None
+    #: Move the case to another org status (by id). Validated against the owner
+    #: org's lookup; transitions are unrestricted except that a duplicated-stage
+    #: case is read-only (enforced in deps).
+    status_id: int | None = None
     resolution_status: CaseResolutionStatus | None = None
     impact_status: CaseImpactStatus | None = None
     duplicate_of_case_id: int | None = None

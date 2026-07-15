@@ -5,7 +5,8 @@ from sqlmodel import select
 
 from app.core.seed import seed_local_demo_data
 from app.models.alert import Alert, AlertStatus
-from app.models.case_ import Case, CaseStatus
+from app.models.case_ import Case
+from app.models.case_status import CaseStage, CaseStatus
 from app.models.dashboard import Dashboard
 from app.models.log import Log
 from app.models.sla import SlaPolicy
@@ -78,9 +79,13 @@ async def test_seed_populates_dashboard_data(session, builtin_roles):
     await seed_local_demo_data(session)
 
     cases = (await session.execute(select(Case))).scalars().all()
+    stage_by_id = {
+        s.id: s.stage
+        for s in (await session.execute(select(CaseStatus))).scalars().all()
+    }
 
-    # Historical resolved cases with recorded dispositions.
-    resolved = [c for c in cases if c.status == CaseStatus.resolved]
+    # Historical resolved (closed-stage) cases with recorded dispositions.
+    resolved = [c for c in cases if stage_by_id.get(c.status_id) == CaseStage.closed]
     assert len(resolved) >= 5
     assert all(c.resolution_status is not None for c in resolved)
     # Backdated so the case-trend / MTTR windows have history to show.
@@ -88,7 +93,8 @@ async def test_seed_populates_dashboard_data(session, builtin_roles):
 
     # Unassigned open cases feed the "New" pipeline bucket.
     assert any(
-        c.status == CaseStatus.open and c.assignee_id is None for c in cases
+        stage_by_id.get(c.status_id) == CaseStage.open and c.assignee_id is None
+        for c in cases
     )
 
     # SLA policies exist for every severity (so breaches can compute).

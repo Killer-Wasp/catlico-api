@@ -7,16 +7,16 @@ from sqlmodel import select
 from app.crud._filters import (
     TAG_PREFIX,
     FilterClause,
-    enum_condition,
     group_by_key,
     group_tag_facets,
     parse_clauses,
     tag_key_condition,
 )
 from app.crud.pagination import paginate
-from app.models.case_ import Case, CaseListFacets, CaseStatus
+from app.models.case_ import Case, CaseListFacets
 from app.models.case_assignee import CaseAssignee
 from app.models.case_share import CaseShare
+from app.models.case_status import CaseStage, CaseStatus
 from app.models.tag import Tag, Tagging, TaggableType
 from app.models.user import User
 
@@ -54,14 +54,42 @@ class CaseListFilter:
         return cls(clauses=parse_clauses(raw_filters), sort=sort, order=order)
 
 
-def _core_clause_cond(key: str, clause: FilterClause):
+def _status_label_cond(organisation_id: str, clause: FilterClause):
+    """Match cases whose status *label* matches, resolved against the org's
+    lookup (labels are dynamic, so this replaces the old native-enum validation).
+    Built-in labels (Open/In progress/Resolved/Duplicated) are stable, so a raw
+    `status~eq~Open` keeps working."""
+    label_col = CaseStatus.label
+    cond = label_col.ilike(f"%{clause.value}%") if clause.contains else label_col == clause.value
+    ids = select(CaseStatus.id).where(
+        CaseStatus.organisation_id == organisation_id, cond
+    )
+    return Case.status_id.in_(ids)
+
+
+def _stage_cond(organisation_id: str, clause: FilterClause):
+    """Match cases by status *stage* (open/in_progress/closed/duplicated) — the
+    stable semantic key, independent of custom labels."""
+    try:
+        stage = CaseStage(clause.value)
+    except ValueError:
+        return false()
+    ids = select(CaseStatus.id).where(
+        CaseStatus.organisation_id == organisation_id, CaseStatus.stage == stage
+    )
+    return Case.status_id.in_(ids)
+
+
+def _core_clause_cond(key: str, clause: FilterClause, organisation_id: str):
     """SQL condition for a non-tag key, or None for an unknown key (ignored).
     A known key with an unusable value yields false() — it matches nothing
     rather than silently dropping the constraint."""
     v = clause.value
     contains = clause.contains
     if key == "status":
-        return enum_condition(Case.status, CaseStatus, clause)
+        return _status_label_cond(organisation_id, clause)
+    if key == "stage":
+        return _stage_cond(organisation_id, clause)
     if key == "severity":
         if contains:
             return cast(Case.severity, String).ilike(f"%{v}%")
@@ -94,7 +122,7 @@ def _core_clause_cond(key: str, clause: FilterClause):
     return None
 
 
-def _apply_case_filters(stmt, f: CaseListFilter):
+def _apply_case_filters(stmt, f: CaseListFilter, organisation_id: str):
     for key, clauses in group_by_key(f.clauses).items():
         if key.startswith(TAG_PREFIX):
             stmt = stmt.where(
@@ -103,7 +131,11 @@ def _apply_case_filters(stmt, f: CaseListFilter):
                 )
             )
             continue
-        conds = [c for c in (_core_clause_cond(key, cl) for cl in clauses) if c is not None]
+        conds = [
+            c
+            for c in (_core_clause_cond(key, cl, organisation_id) for cl in clauses)
+            if c is not None
+        ]
         if conds:
             stmt = stmt.where(or_(*conds))
     return stmt
@@ -132,7 +164,7 @@ async def list_cases_for_org(
             Case.deleted_at.is_(None),
         )
     )
-    base = _apply_case_filters(base, filters)
+    base = _apply_case_filters(base, filters, organisation_id)
 
     return await paginate(
         session, base, *_case_order_by(filters), skip=skip, limit=limit

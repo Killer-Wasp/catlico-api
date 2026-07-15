@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlmodel import SQLModel
 
 from app.models.alert import AlertStatus
-from app.models.case_ import CaseStatus
+from app.models.case_status import CaseStatusRef
 from app.models.comment import CommentEntityType
 from app.models.task import TaskStatus
 
@@ -25,7 +25,7 @@ class CaseHit(SQLModel):
     id: int
     title: str
     snippet: str
-    status: CaseStatus
+    status: CaseStatusRef | None = None
     severity: int
     updated_at: datetime | None
     created_at: datetime

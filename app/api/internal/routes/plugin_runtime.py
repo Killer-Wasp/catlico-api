@@ -152,12 +152,14 @@ async def get_case(
 ) -> dict:
     _require(principal, "read:case")
     case = await _case_for_runtime(session, principal, case_id)
+    from app.crud import case_status as case_status_crud
+
     return {
         "id": case.id,
         "title": case.title,
         "description": case.description,
         "severity": case.severity,
-        "status": case.status,
+        "status": await case_status_crud.label_for_id(session, case.status_id),
         "tlp": case.tlp,
         "pap": case.pap,
     }

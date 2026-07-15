@@ -4,6 +4,7 @@ from app.api.v1.routes import (
     alerts,
     api_keys,
     auth,
+    case_statuses,
     case_templates,
     cases,
     comments,
@@ -45,6 +46,7 @@ api_router.include_router(roles.router)
 api_router.include_router(permissions.router)
 api_router.include_router(tags.router)
 api_router.include_router(cases.router)
+api_router.include_router(case_statuses.router)
 api_router.include_router(tasks.router)
 api_router.include_router(tasks.queue_router)
 api_router.include_router(logs.router)

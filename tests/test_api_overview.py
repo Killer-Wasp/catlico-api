@@ -56,9 +56,10 @@ async def test_overview_empty_org_has_stable_shape(
         "medium",
         "low",
     ]
-    # Pipeline splits open cases (New = unassigned, In progress = assigned).
+    # Pipeline is grouped by the status stage (statuses now carry an explicit
+    # open vs in_progress stage).
     assert [p["label"] for p in body["case_pipeline"]] == [
-        "New",
+        "Open",
         "In progress",
         "Resolved",
         "Duplicated",

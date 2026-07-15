@@ -7,7 +7,7 @@ from app.crud import observable as obs_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
 from app.models.audit import Audit
-from app.models.case_ import CaseCreate, CaseStatus
+from app.models.case_ import CaseCreate
 from app.models.case_merge import CaseMerge
 from app.models.observable import Observable, ObservableCreate
 from app.models.tag import Tagging, TaggableType
@@ -76,7 +76,8 @@ async def test_merge_happy_path_reparents_and_freezes(
     for src in (c1, c2):
         got = await client.get(f"/api/v1/cases/{src.id}", headers=headers)
         assert got.status_code == 200
-        assert got.json()["status"] == CaseStatus.duplicated.value
+        assert got.json()["status"]["stage"] == "duplicated"
+        assert got.json()["status"]["label"] == "Duplicated"
         assert got.json()["merged_into"] == new["id"]
 
     # Tags deduped into the union on the new case.

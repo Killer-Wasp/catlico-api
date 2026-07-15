@@ -17,8 +17,9 @@ from app.core.security import TokenPayload, decode_access_token
 from app.crud.api_key import get_key_by_hash, touch_key
 from app.crud.organisation_member import get_member_permissions
 from app.crud.user import get_user_by_id
-from app.models.case_ import Case, CaseStatus
+from app.models.case_ import Case
 from app.models.case_share import CaseShare
+from app.models.case_status import CaseStage, CaseStatus
 from app.models.plugin_runner import PluginRun, PluginRunner as PluginRunnerModel, PluginVersion
 from app.models.role import (
     ALL_CAPABILITIES,
@@ -342,11 +343,18 @@ async def _resolve_case_context(
     )
 
 
-def _assert_writable(case: Case, permission: str) -> None:
-    """A merged-away (Duplicated) case is a frozen, read-only lineage tombstone.
-    Block write:* operations on it (reads still pass). One chokepoint for every
-    case-scoped write route. See docs/case-merge-design.md."""
-    if permission.startswith("write:") and case.status == CaseStatus.duplicated:
+async def _assert_writable(
+    session: AsyncSession, case: Case, permission: str
+) -> None:
+    """A merged-away (duplicated-stage) case is a frozen, read-only lineage
+    tombstone. Block write:* operations on it (reads still pass). One chokepoint
+    for every case-scoped write route. See docs/case-merge-design.md."""
+    if not permission.startswith("write:"):
+        return
+    stage = await session.scalar(
+        select(CaseStatus.stage).where(CaseStatus.id == case.status_id)
+    )
+    if stage == CaseStage.duplicated:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Case is merged (duplicated) and read-only",
@@ -365,7 +373,7 @@ def require_case_permission(permission: str):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Missing permission: {permission}",
             )
-        _assert_writable(case_ctx.case, permission)
+        await _assert_writable(session, case_ctx.case, permission)
         return case_ctx
 
     return Depends(_dep)
@@ -391,7 +399,7 @@ def require_case_owner(permission: str = "write:case"):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Operation restricted to the owner organisation",
             )
-        _assert_writable(case_ctx.case, permission)
+        await _assert_writable(session, case_ctx.case, permission)
         return case_ctx
 
     return Depends(_dep)

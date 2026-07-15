@@ -10,6 +10,7 @@ from app.models.audit import Audit, AuditOutbox  # noqa: F401
 from app.models.case_ import Case  # noqa: F401
 from app.models.case_assignee import CaseAssignee  # noqa: F401
 from app.models.case_merge import CaseMerge  # noqa: F401
+from app.models.case_status import CaseStatus  # noqa: F401
 from app.models.case_share import CaseShare  # noqa: F401
 from app.models.case_template import CaseTemplate, CaseTemplateTask  # noqa: F401
 from app.models.comment import Comment  # noqa: F401

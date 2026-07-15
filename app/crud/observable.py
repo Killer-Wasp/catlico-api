@@ -14,8 +14,9 @@ from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
 from app.models.alert import Alert
-from app.models.case_ import Case, CaseStatus
+from app.models.case_ import Case
 from app.models.case_share import CaseShare
+from app.models.case_status import CaseStage, CaseStatus
 from app.models.observable import (
     Observable,
     ObservableCreate,
@@ -441,10 +442,11 @@ async def similar_cases_for_case(
             ),
         )
         .join(CaseShare, CaseShare.case_id == Case.id)
+        .join(CaseStatus, CaseStatus.id == Case.status_id)
         .where(
             Case.id != case_id,
             Case.deleted_at.is_(None),
-            Case.status != CaseStatus.duplicated,
+            CaseStatus.stage != CaseStage.duplicated,
             case_obs.deleted_at.is_(None),
             case_obs.ignore_similarity.is_(False),
             CaseShare.organisation_id == organisation_id,

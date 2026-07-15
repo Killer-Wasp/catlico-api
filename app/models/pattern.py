@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import JSON, CheckConstraint, Column
 from sqlmodel import Field, SQLModel
 
+from app.models.case_status import CaseStatusRef
 from app.models.common import TimestampMixin
 
 
@@ -101,7 +102,7 @@ class PatternCaseSummary(SQLModel):
     id: int
     title: str
     severity: int
-    status: str
+    status: CaseStatusRef | None = None
     created_at: datetime
 
 

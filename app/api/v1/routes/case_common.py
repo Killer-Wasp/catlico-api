@@ -12,17 +12,24 @@ from app.crud import organisation_member as member_crud
 from app.crud import sla as sla_crud
 from app.crud import tag as tag_crud
 from app.crud import task as task_crud
+from app.crud import case_status as case_status_crud
 from app.crud import user as user_crud
-from app.models.case_ import Case, CasePublic, CaseStatus, CaseTaskSummary
+from app.models.case_ import Case, CasePublic, CaseTaskSummary
+from app.models.case_status import CaseStage, CaseStatusRef
 from app.models.custom_field import CustomFieldEntityType
 from app.models.tag import TaggableType
 
 OWNER_ROLE_NAME = "org-admin"
 
+#: Stages that count as "the case is live" for SLA purposes (the old enum had a
+#: single open state; open + in_progress now both map onto it).
+_LIVE_STAGES = (CaseStage.open, CaseStage.in_progress)
+
 
 def _apply_sla(
     pub: CasePublic,
     case: Case,
+    status_ref: CaseStatusRef | None,
     sla_targets: dict[int, int] | None,
     now: datetime | None,
 ) -> None:
@@ -30,11 +37,12 @@ def _apply_sla(
     list/detail paths that haven't fetched policies simply leave them None."""
     if sla_targets is None:
         return
+    is_open = status_ref is not None and status_ref.stage in _LIVE_STAGES
     # created_at and now are both tz-aware UTC (see app/models timestamp note).
     pub.sla_due_at, pub.sla_state = sla_crud.compute_case_sla(
         severity=case.severity,
         created_at=case.created_at,
-        is_open=case.status == CaseStatus.open,
+        is_open=is_open,
         resolve_targets=sla_targets,
         now=now or datetime.now(UTC),
     )
@@ -46,15 +54,17 @@ def case_public(
     custom_fields: dict[str, Any] | None = None,
     lineage: tuple[int | None, list[int]] | None = None,
     *,
+    status_ref: CaseStatusRef | None = None,
     sla_targets: dict[int, int] | None = None,
     now: datetime | None = None,
 ) -> CasePublic:
     pub = CasePublic.model_validate(case, from_attributes=True)
     pub.flagged = flagged
+    pub.status = status_ref
     pub.custom_fields = custom_fields or {}
     if lineage is not None:
         pub.merged_into, pub.merged_from = lineage
-    _apply_sla(pub, case, sla_targets, now)
+    _apply_sla(pub, case, status_ref, sla_targets, now)
     return pub
 
 
@@ -74,7 +84,10 @@ async def case_public_resolved(
         if organisation_id is not None
         else None
     )
-    pub = case_public(case, flagged, custom_fields, lineage, sla_targets=sla_targets)
+    status_ref = await case_status_crud.ref_for_id(session, case.status_id)
+    pub = case_public(
+        case, flagged, custom_fields, lineage, status_ref=status_ref, sla_targets=sla_targets
+    )
     if case.assignee_id:
         emails = await user_crud.emails_for_ids(session, [case.assignee_id])
         pub.assignee_email = emails.get(case.assignee_id)

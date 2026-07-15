@@ -51,10 +51,10 @@ from app.models.alert import (
 from app.models.case_ import (
     CaseCreate,
     CasePublic,
-    CaseStatus,
     LinkedCasePublic,
     SimilarCasePublic,
 )
+from app.models.case_status import CaseStage
 from app.models.comment import (
     CommentCreate,
     CommentEntityType,
@@ -473,7 +473,10 @@ async def merge_alerts(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Target case not found"
             )
-        if case.status == CaseStatus.duplicated:
+        from app.crud import case_status as case_status_crud
+
+        target_ref = await case_status_crud.ref_for_id(session, case.status_id)
+        if target_ref is not None and target_ref.stage == CaseStage.duplicated:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Target case is merged (duplicated) and read-only",
@@ -716,12 +719,17 @@ async def list_alert_similar_cases(
         exclude_case_id=alert.case_id,
         limit=limit,
     )
+    from app.crud import case_status as case_status_crud
+
+    status_refs = await case_status_crud.refs_for_ids(
+        session, [case.status_id for case, _ in rows]
+    )
     return [
         SimilarCasePublic(
             id=case.id,
             title=case.title,
             severity=case.severity,
-            status=case.status,
+            status=status_refs.get(case.status_id),
             shared_observables=shared,
         )
         for case, shared in rows
@@ -750,12 +758,14 @@ async def list_alert_linked_cases(
         )
         if share is None:
             return []
+    from app.crud import case_status as case_status_crud
+
     return [
         LinkedCasePublic(
             id=case.id,
             title=case.title,
             severity=case.severity,
-            status=case.status,
+            status=await case_status_crud.ref_for_id(session, case.status_id),
         )
     ]
 

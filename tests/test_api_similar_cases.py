@@ -6,7 +6,8 @@ with the source case and merged/duplicated tombstones excluded."""
 from httpx import AsyncClient
 
 from app.crud import case_ as case_crud
-from app.models.case_ import CaseCreate, CaseStatus
+from app.crud import case_status as case_status_crud
+from app.models.case_ import CaseCreate
 
 
 def _headers(token, org_id):
@@ -82,7 +83,8 @@ async def test_tombstone_excluded(
     await _add_obs(client, h, dup.id, "ip", "3.3.3.3")
 
     # A merged/duplicated case is a tombstone and must not surface.
-    dup.status = CaseStatus.duplicated
+    duplicated = await case_status_crud.duplicated_status(session, org_a.id)
+    dup.status_id = duplicated.id
     session.add(dup)
     await session.commit()
 

@@ -43,12 +43,16 @@ async def create_case(
     owner_role_id: uuid.UUID,
     created_by: str,
 ) -> Case:
+    from app.crud import case_status as case_status_crud
+
+    default = await case_status_crud.default_status(session, owner_org_id)
     case = Case(
         title=case_in.title,
         description=case_in.description,
         severity=case_in.severity,
         tlp=case_in.tlp,
         pap=case_in.pap,
+        status_id=default.id,
         assignee_id=case_in.assignee_id,
         start_date=case_in.start_date,
         summary=case_in.summary,
