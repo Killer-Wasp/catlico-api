@@ -44,3 +44,27 @@ async def send_password_reset_email(email: str, token: str) -> bool:
         logger.warning("password reset email delivery failed", exc_info=True)
         return False
     return True
+
+
+async def send_new_user_invite_email(email: str, token: str) -> bool:
+    """Send the set-password invite for an admin-created account. Reuses the reset
+    link + /reset-password page (the token is an ordinary reset token). Returns
+    False when SMTP is not configured or delivery fails — creation must not depend
+    on delivery state, mirroring send_password_reset_email."""
+    if not settings.SMTP_HOST:
+        return False
+
+    link = build_reset_link(token)
+    body = (
+        "An administrator created a Catlico account for you.\n\n"
+        f"Set your password: {link}\n\n"
+        "This link expires in 1 hour. If you were not expecting this, ignore "
+        "this email."
+    )
+
+    try:
+        await send_email([email], "Set your Catlico password", body)
+    except Exception:  # noqa: BLE001 - creation must not leak delivery state
+        logger.warning("new-user invite email delivery failed", exc_info=True)
+        return False
+    return True

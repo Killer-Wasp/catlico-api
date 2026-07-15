@@ -27,6 +27,7 @@ from app.crud import password_reset as reset_crud
 from app.crud.audit import record_audit
 from app.crud.auth import delete_all_refresh_tokens
 from app.crud.user import get_user_by_email, get_user_by_id
+from app.models.user import User
 from app.services import password_reset_delivery
 
 
@@ -63,6 +64,27 @@ async def request_reset(
     )
 
 
+async def invite_new_user(
+    session: AsyncSession, user: User, background_tasks: BackgroundTasks
+) -> None:
+    """Mint a set-password token for a freshly-created (password-less) user and
+    schedule the invite email. Mirrors `request_reset` minus the throttle/timing
+    guards — a brand-new user has no prior token and no enumeration surface (the
+    admin already knows the account exists). Delivery runs after the response and
+    is a no-op unless SMTP is configured."""
+    raw_token, _ = await reset_crud.create_token(session, user.id)
+    await record_audit(
+        session,
+        action="update",
+        obj=user,
+        actor="system",
+        details={"event": "new_user_invited"},
+    )
+    background_tasks.add_task(
+        password_reset_delivery.send_new_user_invite_email, user.email, raw_token
+    )
+
+
 async def perform_reset(
     session: AsyncSession, raw_token: str, new_password: str
 ) -> None:
@@ -78,6 +100,10 @@ async def perform_reset(
         raise PasswordResetError("Invalid or expired reset token")
 
     user.hashed_password = get_password_hash(new_password)
+    # Completing a reset also clears the force-reset lever: the user has now set a
+    # fresh credential, so the invite/force-reset link both sets the password and
+    # satisfies the must_change_password gate.
+    user.must_change_password = False
     session.add(user)
     await reset_crud.invalidate_user_tokens(session, user.id)
     await delete_all_refresh_tokens(session, user.id)

@@ -110,6 +110,61 @@ async def test_create_user(client: AsyncClient, admin_user, admin_token):
     assert "hashed_password" not in data
 
 
+async def test_create_user_is_passwordless_and_sends_invite(
+    client: AsyncClient, session, admin_user, admin_token, monkeypatch
+):
+    """F.1/F.2: an admin-created account is always password-less and receives a
+    set-password invite email (exactly one, to the new address)."""
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send(email: str, token: str) -> bool:
+        sent.append((email, token))
+        return True
+
+    monkeypatch.setattr(
+        "app.services.password_reset_delivery.send_new_user_invite_email", fake_send
+    )
+
+    response = await client.post(
+        "/api/v1/users/",
+        json={
+            "email": "invitee@test.com",
+            "first_name": "In",
+            "last_name": "Vitee",
+        },
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert response.status_code == 201
+    assert response.json()["must_change_password"] is False
+
+    from app.crud.user import get_user_by_email
+
+    user = await get_user_by_email(session, "invitee@test.com")
+    assert user is not None and user.hashed_password is None
+    assert len(sent) == 1 and sent[0][0] == "invitee@test.com"
+
+
+async def test_update_user_toggles_must_change_password(
+    client: AsyncClient, admin_user, admin_token, viewer_user
+):
+    """F.3: an admin PATCH can flip the force-reset flag (and back)."""
+    on = await client.patch(
+        f"/api/v1/users/{viewer_user.id}",
+        json={"must_change_password": True},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert on.status_code == 200
+    assert on.json()["must_change_password"] is True
+
+    off = await client.patch(
+        f"/api/v1/users/{viewer_user.id}",
+        json={"must_change_password": False},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert off.status_code == 200
+    assert off.json()["must_change_password"] is False
+
+
 async def test_create_user_requires_names(client: AsyncClient, admin_user, admin_token):
     response = await client.post(
         "/api/v1/users/",

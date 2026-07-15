@@ -25,7 +25,11 @@ from app.core.security import (
     create_refresh_token,
     decode_refresh_token,
 )
-from app.crud.auth import issue_refresh_token, rotate_refresh_token
+from app.crud.auth import (
+    issue_refresh_token,
+    password_reset_required_token,
+    rotate_refresh_token,
+)
 from app.crud.organisation_member import get_user_organisations
 from app.crud.user import authenticate_user, get_user_by_id
 from app.models.auth import (
@@ -125,6 +129,16 @@ class Token(BaseModel):
     token_type: str
 
 
+def password_reset_required_response(reset_token: str) -> JSONResponse:
+    """The force-reset login response: a flagged user proved their password but
+    gets NO session — only a single-use reset token to bounce to /reset-password.
+    Shared by the OSS login route and the enterprise MFA/passkey verify paths so
+    every password-path token-issuance point returns the same shape."""
+    return JSONResponse(
+        content={"password_reset_required": True, "reset_token": reset_token}
+    )
+
+
 async def _access_token_for(session: AsyncSession, user: User) -> str:
     """Mint an access token from the user's *current* org membership."""
     organisations = await get_user_organisations(session, user.id)
@@ -170,6 +184,13 @@ async def login(
         return JSONResponse(
             content={"mfa_required": True, "pending_token": challenge.pending_token}
         )
+
+    # Force-reset gate: a flagged user proved their password but must set a new
+    # one before any session is issued. Placed AFTER is_active + the MFA challenge
+    # so the flag is a pure password-path lever and adds no enumeration oracle.
+    reset_token = await password_reset_required_token(session, user)
+    if reset_token is not None:
+        return password_reset_required_response(reset_token)
 
     access_token = await _access_token_for(session, user)
     refresh_row = await issue_refresh_token(

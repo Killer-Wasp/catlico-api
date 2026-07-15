@@ -152,6 +152,32 @@ async def test_reset_password_single_use(client, session, viewer_user, monkeypat
     assert again.status_code == 400
 
 
+async def test_reset_password_clears_must_change_flag(
+    client, session, viewer_user, monkeypatch
+):
+    """Completing a reset clears the force-reset lever (F.3): the user has set a
+    fresh credential, so must_change_password no longer gates their next login."""
+    viewer_user.must_change_password = True
+    session.add(viewer_user)
+    await session.flush()
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.services.password_reset_delivery.send_password_reset_email",
+        _fake_sender(sent),
+    )
+    await client.post("/api/v1/auth/password/forgot", json={"email": viewer_user.email})
+    token = sent[0][1]
+
+    ok = await client.post(
+        "/api/v1/auth/password/reset",
+        json={"token": token, "new_password": VALID_PASSWORD},
+    )
+    assert ok.status_code == 200
+    await session.refresh(viewer_user)
+    assert viewer_user.must_change_password is False
+
+
 async def test_reset_password_expired_token_rejected(client, session, viewer_user):
     raw = "expired-token"
     session.add(
@@ -344,7 +370,17 @@ async def test_forgot_password_purges_dead_tokens(client, session, viewer_user, 
     assert len(rows) == 1 and rows[0].used_at is None
 
 
-async def test_user_create_enforces_password_policy(client, admin_token):
+async def test_user_create_is_passwordless_ignoring_any_password(
+    client, session, admin_token, monkeypatch
+):
+    """Admins can't set passwords: `password` is not a field on UserCreate, so even
+    if a client sends one it is ignored and the account is created password-less
+    (the invite email lets the user set their own)."""
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "app.services.password_reset_delivery.send_new_user_invite_email",
+        _fake_sender(sent),
+    )
     resp = await client.post(
         "/api/v1/users/",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -355,8 +391,13 @@ async def test_user_create_enforces_password_policy(client, admin_token):
             "last_name": "Password",
         },
     )
-    assert resp.status_code == 400
-    assert "at least 12 characters" in resp.json()["detail"]
+    assert resp.status_code == 201
+    from app.crud.user import get_user_by_email
+
+    user = await get_user_by_email(session, "short-pw@test.com")
+    assert user is not None and user.hashed_password is None
+    # And the set-password invite fired exactly once to the new address.
+    assert len(sent) == 1 and sent[0][0] == "short-pw@test.com"
 
 
 async def test_me_update_enforces_password_policy(client, viewer_token):

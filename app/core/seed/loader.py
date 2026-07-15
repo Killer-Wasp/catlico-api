@@ -70,7 +70,7 @@ async def seed_from_profile(session: AsyncSession, profile: str) -> None:
     from app.crud import sla as sla_crud
     from app.crud import tag as tag_crud
     from app.crud import task as task_crud
-    from app.crud.user import create_user, get_user_by_email
+    from app.crud.user import create_user, get_user_by_email, set_password
     from app.models.alert import Alert, AlertCreate
     from app.models.case_ import Case, CaseCreate, CaseResolutionStatus, CaseStatus
     from app.models.comment import CommentCreate, CommentEntityType
@@ -130,11 +130,15 @@ async def seed_from_profile(session: AsyncSession, profile: str) -> None:
                 session,
                 UserCreate(
                     email=seed_user.email,
-                    password=seed_user.password,
                     first_name=seed_user.first_name,
                     last_name=seed_user.last_name,
                 ),
             )
+            # create_user is always password-less; seed profiles ship a known
+            # local password, so set it explicitly (internal caller — bypasses
+            # the admin API's no-password boundary by design).
+            if seed_user.password:
+                await set_password(session, user, seed_user.password)
         if await member_crud.get_member(session, user.id, org.id) is None:
             await member_crud.add_member(
                 session,
