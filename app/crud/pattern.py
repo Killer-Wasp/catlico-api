@@ -117,6 +117,39 @@ async def list_procedures(
     return list(result.scalars().all())
 
 
+async def list_alert_procedures(
+    session: AsyncSession,
+    alert_id: int,
+) -> list[Procedure]:
+    result = await session.execute(
+        select(Procedure)
+        .where(Procedure.alert_id == alert_id)
+        .order_by(Procedure.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def _resolve_pattern(
+    session: AsyncSession, proc_item: PatternImportItem, created_by: str
+) -> Pattern:
+    """Return the catalog pattern for an import item, auto-importing it (by
+    external_id) if the catalog doesn't know it yet."""
+    pattern = await get_pattern_by_external_id(session, proc_item.external_id)
+    if pattern is None:
+        pattern = Pattern(
+            external_id=proc_item.external_id,
+            name=proc_item.name or proc_item.external_id,
+            description=proc_item.description,
+            tactics=proc_item.tactics,
+            url=proc_item.url,
+            parent_external_id=proc_item.parent_external_id,
+            created_by=created_by,
+        )
+        session.add(pattern)
+        await session.flush()
+    return pattern
+
+
 async def replace_procedures(
     session: AsyncSession,
     case_id: int,
@@ -125,27 +158,12 @@ async def replace_procedures(
     created_by: str,
 ) -> list[Procedure]:
     """Replace all procedures for a case atomically."""
-    # Delete existing
     await session.execute(
         sql_delete(Procedure).where(Procedure.case_id == case_id)
     )
-    # Insert new
     out: list[Procedure] = []
     for proc_item in body.procedures:
-        pattern = await get_pattern_by_external_id(session, proc_item.external_id)
-        if pattern is None:
-            # Auto-import if pattern doesn't exist yet
-            pattern = Pattern(
-                external_id=proc_item.external_id,
-                name=proc_item.name or proc_item.external_id,
-                description=proc_item.description,
-                tactics=proc_item.tactics,
-                url=proc_item.url,
-                parent_external_id=proc_item.parent_external_id,
-                created_by=created_by,
-            )
-            session.add(pattern)
-            await session.flush()
+        pattern = await _resolve_pattern(session, proc_item, created_by)
         proc = Procedure(
             case_id=case_id,
             pattern_id=pattern.id,
@@ -156,3 +174,61 @@ async def replace_procedures(
         out.append(proc)
     await session.flush()
     return out
+
+
+async def replace_alert_procedures(
+    session: AsyncSession,
+    alert_id: int,
+    body: ProcedureReplace,
+    *,
+    created_by: str,
+) -> list[Procedure]:
+    """Replace all procedures for an alert atomically (mirror of the case path)."""
+    await session.execute(
+        sql_delete(Procedure).where(Procedure.alert_id == alert_id)
+    )
+    out: list[Procedure] = []
+    for proc_item in body.procedures:
+        pattern = await _resolve_pattern(session, proc_item, created_by)
+        proc = Procedure(
+            alert_id=alert_id,
+            pattern_id=pattern.id,
+            description=proc_item.description,
+            created_by=created_by,
+        )
+        session.add(proc)
+        out.append(proc)
+    await session.flush()
+    return out
+
+
+async def copy_alert_procedures_to_case(
+    session: AsyncSession,
+    *,
+    alert_id: int,
+    case_id: int,
+    created_by: str,
+) -> int:
+    """Carry an alert's TTPs onto its case at promote/merge — additive and
+    deduped by pattern (the case keeps any it already had). Returns the count of
+    procedures newly copied."""
+    alert_procs = await list_alert_procedures(session, alert_id)
+    if not alert_procs:
+        return 0
+    existing = {p.pattern_id for p in await list_procedures(session, case_id)}
+    copied = 0
+    for proc in alert_procs:
+        if proc.pattern_id in existing:
+            continue
+        session.add(
+            Procedure(
+                case_id=case_id,
+                pattern_id=proc.pattern_id,
+                description=proc.description,
+                created_by=created_by,
+            )
+        )
+        existing.add(proc.pattern_id)
+        copied += 1
+    await session.flush()
+    return copied

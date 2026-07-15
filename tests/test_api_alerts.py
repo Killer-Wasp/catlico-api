@@ -165,6 +165,88 @@ async def test_double_promote_conflicts(
     assert second.status_code == 409
 
 
+async def test_promote_carries_procedures_to_case(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """§4.1b: an alert's TTPs are copied onto the case at promote (comments stay
+    on the alert, not carried)."""
+    h = _headers(analyst_a_token, org_a.id)
+    r = await client.post("/api/v1/alerts/", json=_alert_payload(), headers=h)
+    alert_id = r.json()["id"]
+
+    await client.put(
+        f"/api/v1/alerts/{alert_id}/procedures",
+        json={"procedures": [{"external_id": "T1566", "name": "Phishing"}]},
+        headers=h,
+    )
+    await client.post(
+        f"/api/v1/alerts/{alert_id}/comments",
+        json={"message": "triage note"},
+        headers=h,
+    )
+
+    promo = await client.post(f"/api/v1/alerts/{alert_id}/promote", json={}, headers=h)
+    assert promo.status_code == 201, promo.text
+    case_id = promo.json()["id"]
+
+    case_procs = await client.get(f"/api/v1/cases/{case_id}/procedures", headers=h)
+    assert case_procs.status_code == 200, case_procs.text
+    externals = {p["pattern"]["external_id"] for p in case_procs.json()}
+    assert "T1566" in externals
+    assert all(p["case_id"] == case_id for p in case_procs.json())
+
+    # Comments STAY on the alert (readable via the case↔alert link), not moved.
+    alert_comments = await client.get(
+        f"/api/v1/alerts/{alert_id}/comments", headers=h
+    )
+    assert alert_comments.json()["total"] == 1
+    case_comments = await client.get(f"/api/v1/cases/{case_id}/comments", headers=h)
+    assert case_comments.json()["total"] == 0
+
+
+async def test_promote_dedups_procedures_already_on_case(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """Carry-over is additive/deduped by pattern: a technique the case already
+    carries isn't duplicated when the alert brings the same one."""
+    from app.crud import case_ as case_crud
+    from app.models.case_ import CaseCreate
+
+    h = _headers(analyst_a_token, org_a.id)
+    r = await client.post("/api/v1/alerts/", json=_alert_payload(), headers=h)
+    alert_id = r.json()["id"]
+    await client.put(
+        f"/api/v1/alerts/{alert_id}/procedures",
+        json={"procedures": [{"external_id": "T1566", "name": "Phishing"}]},
+        headers=h,
+    )
+
+    # Pre-existing case already carrying T1566, then merge the alert into it.
+    case = await case_crud.create_case(
+        session,
+        CaseCreate(title="target"),
+        owner_org_id=org_a.id,
+        owner_role_id=builtin_roles["org-admin"].id,
+        created_by=str(analyst_a.id),
+    )
+    await session.commit()
+    await client.put(
+        f"/api/v1/cases/{case.id}/procedures",
+        json={"procedures": [{"external_id": "T1566", "name": "Phishing"}]},
+        headers=h,
+    )
+    merged = await client.post(
+        "/api/v1/alerts/merge",
+        json={"alert_ids": [alert_id], "target_case_id": case.id},
+        headers=h,
+    )
+    assert merged.status_code == 201, merged.text
+
+    case_procs = await client.get(f"/api/v1/cases/{case.id}/procedures", headers=h)
+    externals = [p["pattern"]["external_id"] for p in case_procs.json()]
+    assert externals == ["T1566"]  # deduped, not duplicated
+
+
 async def test_detach_unlinks_alert_and_returns_to_new(
     client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token
 ):
