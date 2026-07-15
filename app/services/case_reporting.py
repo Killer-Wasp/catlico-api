@@ -91,6 +91,12 @@ def _render_template(
     return "".join(out)
 
 
+async def _status_label(session: AsyncSession, status_id: int) -> str:
+    from app.crud import case_status as case_status_crud
+
+    return await case_status_crud.label_for_id(session, status_id)
+
+
 async def render_report(
     session: AsyncSession,
     template: ReportTemplate,
@@ -166,7 +172,7 @@ async def render_report(
         "title": esc(case.title or ""),
         "description": esc(case.description or ""),
         "severity": esc(case.severity or ""),
-        "status": case.status.value if case.status else "",
+        "status": esc(await _status_label(session, case.status_id)),
         "tlp": str(case.tlp),
         "pap": str(case.pap),
         "created_at": case.created_at.isoformat() if case.created_at else "",

@@ -61,16 +61,20 @@ async def update_case(
         )
 
     if "assignee_id" in update_data and update_data["assignee_id"] is not None:
-        from app.crud.case_share import list_shares
-
-        shares = await list_shares(session, case_ctx.case.id)
-        owner_org_id = next((s.organisation_id for s in shares if s.is_owner), None)
-        if owner_org_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Case has no owner organisation",
-            )
+        owner_org_id = await _case_owner_org_id(session, case_ctx.case.id)
         await assert_assignee_in_org(session, update_data["assignee_id"], owner_org_id)
+
+    if "status_id" in update_data and update_data["status_id"] is not None:
+        from app.crud import case_status as case_status_crud
+
+        owner_org_id = await _case_owner_org_id(session, case_ctx.case.id)
+        if await case_status_crud.get_status(
+            session, update_data["status_id"], owner_org_id
+        ) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Status not found in this organisation",
+            )
 
     case = await case_crud.update_case(
         session,

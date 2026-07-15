@@ -44,6 +44,7 @@ from app.crud import assignee as assignee_crud
 from app.crud import audit as audit_crud
 from app.crud import attachment as attachment_crud
 from app.crud import case_ as case_crud
+from app.crud import case_status as case_status_crud
 from app.crud import comment as comment_crud
 from app.crud import custom_field as cf_crud
 from app.crud import flag as flag_crud
@@ -128,6 +129,9 @@ async def list_cases(
     emails = await user_crud.emails_for_ids(session, list(all_assignee_ids))
     tasks_map = await task_crud.summaries_for_cases(session, [c.id for c in cases])
     sla_targets = await sla_crud.resolve_targets(session, ctx.organisation_id)
+    status_refs = await case_status_crud.refs_for_ids(
+        session, [c.status_id for c in cases]
+    )
     now = datetime.now(UTC)
 
     def _public(c: Case) -> CasePublic:
@@ -136,6 +140,7 @@ async def list_cases(
             str(c.id) in flagged,
             cfs.get(str(c.id), {}),
             lineage.get(c.id),
+            status_ref=status_refs.get(c.status_id),
             sla_targets=sla_targets,
             now=now,
         )
@@ -698,12 +703,15 @@ async def list_case_similar_cases(
         organisation_id=case_ctx.organisation_id,
         limit=20,
     )
+    status_refs = await case_status_crud.refs_for_ids(
+        session, [case.status_id for case, _ in rows]
+    )
     return [
         SimilarCasePublic(
             id=case.id,
             title=case.title,
             severity=case.severity,
-            status=case.status,
+            status=status_refs.get(case.status_id),
             shared_observables=shared,
         )
         for case, shared in rows

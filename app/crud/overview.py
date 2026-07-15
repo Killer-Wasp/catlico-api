@@ -18,8 +18,9 @@ from sqlmodel import select
 
 from app.models.alert import Alert, AlertStatus
 from app.models.audit import AuditOutbox
-from app.models.case_ import Case, CaseResolutionStatus, CaseStatus
+from app.models.case_ import Case, CaseResolutionStatus
 from app.models.case_share import CaseShare
+from app.models.case_status import CaseStage, CaseStatus
 from app.models.observable import Observable
 from app.models.overview import (
     CaseTrendPoint,
@@ -54,8 +55,24 @@ _RESOLUTION_LABEL = {
 }
 
 
+#: The old single `open` enum state now spans two live stages.
+_LIVE_STAGES = (CaseStage.open, CaseStage.in_progress)
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _stage_ids(org_id: str, stages):
+    """Subquery of the org's status ids whose stage is in `stages` — the
+    stage-based replacement for the old `Case.status == <enum>` predicates."""
+    return select(CaseStatus.id).where(
+        CaseStatus.organisation_id == org_id, CaseStatus.stage.in_(list(stages))
+    )
+
+
+def _in_stage(org_id: str, stages):
+    return Case.status_id.in_(_stage_ids(org_id, stages))
 
 
 def _org_cases(stmt, org_id: str):
@@ -90,7 +107,7 @@ async def _kpi_stats(
     # --- Open cases + 24h net change (opened − resolved) ---
     open_cases = await session.scalar(
         _org_cases(select(func.count()).select_from(Case), org_id).where(
-            Case.status == CaseStatus.open
+            _in_stage(org_id, _LIVE_STAGES)
         )
     )
     opened_24h = await session.scalar(
@@ -100,7 +117,7 @@ async def _kpi_stats(
     )
     resolved_24h = await session.scalar(
         _org_cases(select(func.count()).select_from(Case), org_id).where(
-            Case.status == CaseStatus.resolved, Case.updated_at >= day_ago
+            _in_stage(org_id, [CaseStage.closed]), Case.updated_at >= day_ago
         )
     )
 
@@ -122,7 +139,7 @@ async def _kpi_stats(
             await session.execute(
                 _org_cases(
                     select(Case.severity, Case.created_at), org_id
-                ).where(Case.status == CaseStatus.open)
+                ).where(_in_stage(org_id, _LIVE_STAGES))
             )
         ).all()
         for sev, created_at in open_case_rows:
@@ -158,7 +175,7 @@ async def _mttr_hours(
     rows = (
         await session.execute(
             _org_cases(select(Case.created_at, Case.updated_at), org_id).where(
-                Case.status == CaseStatus.resolved,
+                _in_stage(org_id, [CaseStage.closed]),
                 Case.updated_at >= start,
                 Case.updated_at < end,
             )
@@ -242,31 +259,24 @@ async def _triage_queue(
 
 
 async def _case_pipeline(session: AsyncSession, org_id: str) -> list[TrendPoint]:
-    """Case funnel. Cases have no explicit New/InProgress state, so the open
-    bucket is split by assignment: unassigned open cases read as "New" (not yet
-    picked up), assigned ones as "In progress". Resolved/Duplicated are terminal."""
+    """Case funnel, grouped by the status *stage*. Statuses now carry an explicit
+    open vs in_progress stage, so the funnel reads them directly instead of
+    splitting a single open state by assignment."""
     rows = (
         await session.execute(
-            _org_cases(select(Case.status, func.count()), org_id).group_by(
-                Case.status
+            _org_cases(
+                select(CaseStatus.stage, func.count()), org_id
             )
+            .join(CaseStatus, CaseStatus.id == Case.status_id)
+            .group_by(CaseStatus.stage)
         )
     ).all()
-    counts = {status: n for status, n in rows}
-    open_unassigned = (
-        await session.scalar(
-            _org_cases(select(func.count()).select_from(Case), org_id).where(
-                Case.status == CaseStatus.open, Case.assignee_id.is_(None)
-            )
-        )
-        or 0
-    )
-    open_total = counts.get(CaseStatus.open, 0)
+    counts = {stage: n for stage, n in rows}
     return [
-        TrendPoint(label="New", count=open_unassigned),
-        TrendPoint(label="In progress", count=open_total - open_unassigned),
-        TrendPoint(label="Resolved", count=counts.get(CaseStatus.resolved, 0)),
-        TrendPoint(label="Duplicated", count=counts.get(CaseStatus.duplicated, 0)),
+        TrendPoint(label="Open", count=counts.get(CaseStage.open, 0)),
+        TrendPoint(label="In progress", count=counts.get(CaseStage.in_progress, 0)),
+        TrendPoint(label="Resolved", count=counts.get(CaseStage.closed, 0)),
+        TrendPoint(label="Duplicated", count=counts.get(CaseStage.duplicated, 0)),
     ]
 
 
@@ -399,7 +409,7 @@ async def _case_trend(
     resolved_rows = (
         await session.execute(
             _org_cases(select(Case.updated_at), org_id).where(
-                Case.status == CaseStatus.resolved, Case.updated_at >= start_day
+                _in_stage(org_id, [CaseStage.closed]), Case.updated_at >= start_day
             )
         )
     ).all()
@@ -437,7 +447,7 @@ async def _resolution_breakdown(
             _org_cases(
                 select(Case.resolution_status, func.count()), org_id
             )
-            .where(Case.status == CaseStatus.resolved)
+            .where(_in_stage(org_id, [CaseStage.closed]))
             .group_by(Case.resolution_status)
         )
     ).all()
@@ -516,7 +526,7 @@ async def _sla_compliance(
     open_rows = (
         await session.execute(
             _org_cases(select(Case.severity, Case.created_at), org_id).where(
-                Case.status == CaseStatus.open
+                _in_stage(org_id, _LIVE_STAGES)
             )
         )
     ).all()
@@ -532,7 +542,7 @@ async def _sla_compliance(
         await session.execute(
             _org_cases(
                 select(Case.severity, Case.created_at, Case.updated_at), org_id
-            ).where(Case.status == CaseStatus.resolved, Case.updated_at >= week_ago)
+            ).where(_in_stage(org_id, [CaseStage.closed]), Case.updated_at >= week_ago)
         )
     ).all()
     for sev, created_at, updated_at in resolved_rows:

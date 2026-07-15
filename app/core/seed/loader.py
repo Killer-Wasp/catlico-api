@@ -71,8 +71,10 @@ async def seed_from_profile(session: AsyncSession, profile: str) -> None:
     from app.crud import tag as tag_crud
     from app.crud import task as task_crud
     from app.crud.user import create_user, get_user_by_email, set_password
+    from app.crud import case_status as case_status_crud
     from app.models.alert import Alert, AlertCreate
-    from app.models.case_ import Case, CaseCreate, CaseResolutionStatus, CaseStatus
+    from app.models.case_ import Case, CaseCreate, CaseResolutionStatus
+    from app.models.case_status import CaseStage
     from app.models.comment import CommentCreate, CommentEntityType
     from app.models.custom_field import (
         CustomFieldCreate,
@@ -116,6 +118,11 @@ async def seed_from_profile(session: AsyncSession, profile: str) -> None:
     admin_role = await role_crud.get_role_by_name(session, "org-admin", org.id)
     if admin_role is None:
         raise RuntimeError("Built-in org-admin role must exist before seeding")
+
+    # Ensure the org's built-in case statuses exist (idempotent) so resolved seed
+    # cases can reference the Resolved status.
+    builtin_statuses = await case_status_crud.seed_org_builtin_statuses(session, org.id)
+    resolved_status = builtin_statuses[CaseStage.closed]
 
     # --- Users + memberships -------------------------------------------------
     users_by_email: dict[str, User] = {}
@@ -260,7 +267,7 @@ async def seed_from_profile(session: AsyncSession, profile: str) -> None:
             case.created_at = at(c.created)
             mutated = True
         if c.status == "resolved":
-            case.status = CaseStatus.resolved
+            case.status_id = resolved_status.id
             case.resolution_status = CaseResolutionStatus[c.resolution]
             resolved_at = at(c.resolved)
             case.end_date = resolved_at

@@ -80,14 +80,16 @@ async def ensure_default_superadmin(session: AsyncSession) -> None:
 
 
 async def init_db(session: AsyncSession) -> None:
+    from app.crud.case_status import seed_org_builtin_statuses
     from app.crud.organisation import get_organisations
     from app.crud.role import seed_org_builtin_roles
     from app.models.observable import BUILTIN_OBSERVABLE_TYPES, ObservableType
 
-    # Built-in roles are org-scoped and seeded on org creation; backfill any existing
-    # org that predates that (idempotent).
+    # Built-in roles + case statuses are org-scoped and seeded on org creation;
+    # backfill any existing org that predates that (idempotent).
     for org in await get_organisations(session, limit=10_000):
         await seed_org_builtin_roles(session, org.id)
+        await seed_org_builtin_statuses(session, org.id)
 
     # Seed built-in observable types (idempotent)
     for type_name, is_attachment in BUILTIN_OBSERVABLE_TYPES.items():

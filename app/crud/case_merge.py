@@ -9,7 +9,8 @@ from app.crud._seq import next_attachment_ids, next_task_ids
 from app.crud.audit import record_audit
 from app.models.alert import Alert
 from app.models.attachment import AttachmentLink
-from app.models.case_ import Case, CaseCreate, CaseResolutionStatus, CaseStatus
+from app.models.case_ import Case, CaseCreate, CaseResolutionStatus
+from app.models.case_status import CaseStage, CaseStatus
 from app.models.case_merge import CaseMerge
 from app.models.case_share import CaseShare
 from app.models.comment import Comment, CommentEntityType
@@ -216,11 +217,22 @@ async def merge_cases(
         .all()
     )
     by_id = {c.id: c for c in sources}
+    # Batch-load the sources' stages: a duplicated-stage case is already a merge
+    # tombstone and can't be re-merged.
+    source_stages = dict(
+        (
+            await session.execute(
+                select(CaseStatus.id, CaseStatus.stage).where(
+                    CaseStatus.id.in_({c.status_id for c in sources})
+                )
+            )
+        ).all()
+    )
     for cid in distinct_ids:
         case = by_id.get(cid)
         if case is None or case.deleted_at is not None:
             raise MergeError(404, f"Case {cid} not found")
-        if case.status == CaseStatus.duplicated:
+        if source_stages.get(case.status_id) == CaseStage.duplicated:
             raise MergeError(409, f"Case {cid} is already merged")
 
     owner_rows = (
@@ -245,12 +257,16 @@ async def merge_cases(
             422, "Merged case TLP/PAP cannot be less restrictive than its sources"
         )
 
+    from app.crud import case_status as case_status_crud
+
+    default = await case_status_crud.default_status(session, owner_org_id)
     new_case = Case(
         title=case_in.title,
         description=case_in.description,
         severity=case_in.severity,
         tlp=case_in.tlp,
         pap=case_in.pap,
+        status_id=default.id,
         assignee_id=case_in.assignee_id,
         start_date=case_in.start_date,
         summary=case_in.summary,
@@ -361,9 +377,12 @@ async def merge_cases(
         }
     )
 
+    from app.crud import case_status as case_status_crud
+
+    duplicated = await case_status_crud.duplicated_status(session, owner_org_id)
     now = datetime.now(UTC)
     for case in sources:
-        case.status = CaseStatus.duplicated
+        case.status_id = duplicated.id
         case.resolution_status = CaseResolutionStatus.duplicated
         case.end_date = now
         case.updated_at = now
