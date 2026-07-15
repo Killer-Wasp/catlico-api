@@ -14,13 +14,14 @@ and `v1/` is never reachable with a machine credential.** Keep that boundary.
 
 ## Four authentication paths
 
-Resolved in `deps.py`. The bearer-token **prefix** decides which one you're on:
+Resolved in `deps.py`. The bearer-token **prefix** (or, for runners, the route + shared secret)
+decides which one you're on:
 
 | Prefix | Principal | Dependency |
 |---|---|---|
 | `thp_` | API key | `_try_api_key_auth`, tried **first** |
 | — (JWT) | User | `decode_access_token` fallback |
-| `cpr_` | Plugin runner machine credential | `get_plugin_runner_principal` |
+| `Bearer <shared secret>` + `X-Runner-Id` | Plugin runner | `get_plugin_runner_principal` |
 | — (opaque) | Per-run plugin runtime token | `get_plugin_runtime_principal` |
 
 - **API keys authenticate real requests today.** `_get_auth_context` tries the key
@@ -31,8 +32,11 @@ Resolved in `deps.py`. The bearer-token **prefix** decides which one you're on:
 - **JWT requests require the `X-Organisation-Id` header** — its absence is a `400`, not
   a `401`. Superadmins get the full `Permission` enum and skip the membership check;
   everyone else must be a member of that org.
-- **Runner credentials** are SHA-256 hashed and additionally require
-  `enrollment_state == "enrolled"`, so revocation is immediate.
+- **Runner auth** constant-time-compares the bearer against `PLUGIN_RUNNER_SHARED_SECRET`
+  (the whole trust boundary, shared by the API and every runner); `X-Runner-Id` is identity
+  only and must match an existing `plugin_runner` row, else 404. Runners self-register via
+  `POST /register` (shared secret, no token), which upserts the row + plugin inventory and a
+  self-reported `base_url`, returning only the runner summary.
 - **Runtime tokens** are per-`PluginRun`, hashed, and expiring. At terminal status the
   token stays resolvable; terminal status — not a nulled hash — is what rejects late
   runtime calls (409), which are audited as `rejected_late_result`.
@@ -82,8 +86,9 @@ declare the guard as a dependency so it shows up in the OpenAPI schema.
 
 ## Internal routes
 
-`analyzer.py` and `responder.py` serve the konnect worker; `plugin_runner.py` (enrollment)
-and `plugin_runtime.py` (results, progress, file up/download) serve the plugin runner.
+`analyzer.py` and `responder.py` serve the konnect worker; `plugin_runner.py` (self-registration,
+heartbeat, sync, run claim) and `plugin_runtime.py` (results, progress, file up/download) serve the
+plugin runner.
 
 `plugin_runtime.py` is the **enforcement point** for the eight plugin permissions.
 That vocabulary is duplicated in `catlico-plugin-sdk/manifest.py` and the runner's install

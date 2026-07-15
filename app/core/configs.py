@@ -94,11 +94,11 @@ class Settings(BaseSettings):
     LOGIN_LOCKOUT_MINUTES: int = 15
 
     # Plugin runner engine.
-    # Legacy shared secret kept only as a deprecated config knob while the
-    # enrollment flow rolls out. Internal plugin-runner endpoints authenticate
-    # with per-runner machine credentials.
+    # Single shared secret configured identically on the API and every runner.
+    # It is the whole trust boundary: runners authenticate internal calls with
+    # ``Authorization: Bearer <secret>`` + ``X-Runner-Id``, and the API signs
+    # event/install pushes back to the runner with an HMAC keyed on this secret.
     PLUGIN_RUNNER_SHARED_SECRET: str | None = None
-    PLUGIN_RUNNER_ENROLLMENT_TOKEN_TTL_SECONDS: int = 900
     # Plugin runtime engine.
     # Short-lived tokens minted per PluginRun for plugin-runtime API access.
     PLUGIN_RUNTIME_TOKEN_TTL_SECONDS: int = 900

@@ -70,7 +70,7 @@ The bearer token's prefix decides which principal you are:
 |---|---|---|
 | `thp_` | API key — carries its own scopes, never superadmin | `/api/v1` |
 | *(JWT)* | User — requires the `X-Organisation-Id` header | `/api/v1` |
-| `cpr_` | Plugin-runner machine credential; requires `enrollment_state == "enrolled"` | `/api/internal/plugin-runner` |
+| `Bearer <shared secret>` + `X-Runner-Id` | Plugin runner; shared secret is the trust boundary, `X-Runner-Id` names an existing runner row | `/api/internal/plugin-runner` |
 | *(opaque)* | Per-run plugin runtime token; dies at terminal status | `/api/internal/plugin-runtime` |
 
 API-key auth is tried first; JWT is the fallback. A JWT request without `X-Organisation-Id`

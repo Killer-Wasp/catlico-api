@@ -88,7 +88,7 @@ async def reap_stuck_runs(session: AsyncSession, now: datetime) -> int:
 
 
 async def detect_offline_runners(session: AsyncSession, now: datetime) -> int:
-    """Mark enrolled runners offline after N missed heartbeat intervals."""
+    """Mark runners offline after N missed heartbeat intervals."""
     stale_after = timedelta(
         seconds=settings.PLUGIN_HEARTBEAT_INTERVAL_SECONDS
         * settings.PLUGIN_RUNNER_OFFLINE_MISSED_HEARTBEATS
@@ -98,7 +98,6 @@ async def detect_offline_runners(session: AsyncSession, now: datetime) -> int:
         (
             await session.execute(
                 select(PluginRunner).where(
-                    PluginRunner.enrollment_state == "enrolled",
                     PluginRunner.status != "offline",
                 )
             )

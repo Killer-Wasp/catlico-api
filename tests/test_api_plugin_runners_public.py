@@ -1,11 +1,26 @@
-"""Public API: plugin runner management (admin-only)."""
+"""Public API: plugin runner management (admin-only).
+
+Runners self-register via the internal ``/register`` endpoint (there is no admin
+create/enroll route any more); the admin API here only lists/inspects them and
+drives health-check/sync/install.
+"""
 from httpx import AsyncClient
 
-from tests.test_api_plugin_runners import SAMPLE_MANIFEST
+from tests.test_api_plugin_runners import RUNNER_SECRET, SAMPLE_MANIFEST
 
 
 def _h(token, org_id):
     return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org_id}
+
+
+async def _register(client: AsyncClient, runner_id="runner-1", *, base_url="http://runner:8080"):
+    """Self-register a runner with the shared secret (advertising base_url)."""
+    r = await client.post(
+        "/api/internal/plugin-runner/register",
+        json={"id": runner_id, "name": "Test Runner", "base_url": base_url},
+        headers={"Authorization": f"Bearer {RUNNER_SECRET}"},
+    )
+    assert r.status_code == 200, r.text
 
 
 async def test_list_runners_requires_auth(client: AsyncClient):
@@ -20,44 +35,30 @@ async def test_list_runners_empty(
     assert r.json() == []
 
 
-async def test_superadmin_can_create_runner(
-    client: AsyncClient, admin_token,
-):
-    body = {
-        "id": "runner-1",
-        "name": "Test Runner",
-        "base_url": "http://runner:8080",
-    }
+async def test_create_route_is_gone(client: AsyncClient, admin_token):
+    """The token-minting admin create route was removed; runners self-register."""
     r = await client.post(
         "/api/v1/plugin-runners",
-        json=body,
+        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
         headers={"Authorization": f"Bearer {admin_token}"},
     )
+    assert r.status_code in (404, 405)
+
+
+async def test_list_shows_self_registered_runner(client: AsyncClient, admin_token, org_a):
+    await _register(client)
+    r = await client.get("/api/v1/plugin-runners", headers=_h(admin_token, org_a.id))
     assert r.status_code == 200, r.text
-    data = r.json()
-    assert data["id"] == "runner-1"
-    assert data["name"] == "Test Runner"
-
-
-async def test_non_superadmin_cannot_create_runner(
-    client: AsyncClient, org_a, analyst_a_token,
-):
-    r = await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "r2", "name": "Nope", "base_url": "http://r"},
-        headers=_h(analyst_a_token, org_a.id),
-    )
-    assert r.status_code == 403
+    rows = r.json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "runner-1"
+    assert rows[0]["status"] == "healthy"
 
 
 async def test_get_runner_by_id(
     client: AsyncClient, admin_token,
 ):
-    await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
+    await _register(client)
     r = await client.get(
         "/api/v1/plugin-runners/runner-1",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -72,82 +73,6 @@ async def test_get_unknown_runner_404(client: AsyncClient, admin_token):
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert r.status_code == 404
-
-
-async def test_re_enroll_mints_fresh_token(
-    client: AsyncClient, admin_token,
-):
-    create = await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    assert create.status_code == 200, create.text
-    original_token = create.json()["enrollment_token"]
-
-    r = await client.post(
-        "/api/v1/plugin-runners/runner-1/re-enroll",
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    assert r.status_code == 200, r.text
-    data = r.json()
-    assert data["id"] == "runner-1"
-    assert data["enrollment_state"] == "pending"
-    assert data["enrollment_token"]
-    assert data["enrollment_token"] != original_token
-    assert data["enrollment_token_expires_at"]
-
-
-async def test_re_enroll_unknown_runner_404(client: AsyncClient, admin_token):
-    r = await client.post(
-        "/api/v1/plugin-runners/ghost/re-enroll",
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    assert r.status_code == 404
-
-
-async def test_non_superadmin_cannot_re_enroll(
-    client: AsyncClient, org_a, analyst_a_token, admin_token,
-):
-    await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    r = await client.post(
-        "/api/v1/plugin-runners/runner-1/re-enroll",
-        headers=_h(analyst_a_token, org_a.id),
-    )
-    assert r.status_code == 403
-
-
-async def test_re_enrolled_token_can_register(
-    client: AsyncClient, admin_token,
-):
-    """The freshly minted token completes the runner-side register exchange."""
-    await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    r = await client.post(
-        "/api/v1/plugin-runners/runner-1/re-enroll",
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-    token = r.json()["enrollment_token"]
-    register = await client.post(
-        "/api/internal/plugin-runner/register",
-        json={
-            "id": "runner-1",
-            "name": "Test Runner",
-            "version": "0.1.0",
-            "capabilities": ["container"],
-            "isolation_mode": "container",
-            "enrollment_token": token,
-        },
-    )
-    assert register.status_code == 200, register.text
-    assert register.json()["runner_credential"].startswith("cpr_")
 
 
 async def test_health_check_endpoint(
@@ -168,12 +93,7 @@ async def test_health_check_endpoint(
         fake_runner_get_json,
     )
 
-    # Create a runner first
-    await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
+    await _register(client)
     r = await client.post(
         "/api/v1/plugin-runners/runner-1/health-check",
         headers={"Authorization": f"Bearer {admin_token}"},
@@ -205,11 +125,7 @@ async def test_sync_runner_fetches_plugin_inventory(
         fake_runner_get_json,
     )
 
-    await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
+    await _register(client)
     r = await client.post(
         "/api/v1/plugin-runners/runner-1/sync",
         headers={"Authorization": f"Bearer {admin_token}"},

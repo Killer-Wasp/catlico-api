@@ -27,7 +27,7 @@ another surface's routes. Wiring lives in [`app/api/deps.py`](../app/api/deps.py
 | Surface | Prefix | Authenticated by | Principal |
 |---|---|---|---|
 | **Public** | `/api/v1/*` | User JWT **or** API key (`thp_…`), org via `X-Organisation-Id` | `AuthContext` |
-| **Runner** | `/api/internal/plugin-runner/*` | Per-runner machine credential (`Bearer cpr_…`); `/register` presents a one-time enrollment token instead | `PluginRunnerPrincipal` |
+| **Runner** | `/api/internal/plugin-runner/*` | The shared secret as `Authorization: Bearer <PLUGIN_RUNNER_SHARED_SECRET>`, plus `X-Runner-Id: <runner_id>` for identity/routing | `PluginRunnerPrincipal` |
 | **Runtime** | `/api/internal/plugin-runtime/*` | Short-lived per-run token, minted at claim, dies at terminal status | `PluginRuntimePrincipal` |
 
 The legacy analyzer/responder worker authenticates separately via `ANALYZER_SHARED_SECRET`
@@ -68,9 +68,14 @@ Also: `/api/v1/plugin-runs` (`GET ""`, `GET /{id}`, `POST /{id}/cancel`,
 
 ### Runner — `/api/internal/plugin-runner`
 
-`POST /register` exchanges a one-time enrollment token for a machine credential (`cpr_…`)
-and a push-signing secret (`cps_…`, stored Fernet-encrypted so the API can sign pushes).
-Everything else presents the machine credential.
+Every call authenticates with the shared secret as `Authorization: Bearer <PLUGIN_RUNNER_SHARED_SECRET>`,
+which the API constant-time-compares against its own copy. `X-Runner-Id` names which runner is
+calling — used purely as identity/routing and must match an existing `plugin_runner` row (else 404).
+
+`POST /register` self-registers: authenticated by the shared secret alone, it **upserts** the
+runner row (creating it if missing, marking it `healthy`) plus its plugin inventory, and accepts a
+self-reported `base_url` (the URL the API pushes to). It returns only the runner summary — no
+credential, no signing secret. Admins do not pre-provision runners or mint tokens.
 
 `POST /heartbeat` · `GET /sync` (active plugins + org enablements, **never secrets**) ·
 `POST /runs` (claim) · `POST /runs/{id}/accepted` · `/started` · `/skipped` ·
@@ -93,12 +98,14 @@ the target is in the run's org / case share.
 
 ## Data model
 
-Defined in [`app/models/plugin_runner.py`](../app/models/plugin_runner.py); one Alembic
-migration, `r4b7d9e1f3a5_add_plugin_runner.py`.
+Defined in [`app/models/plugin_runner.py`](../app/models/plugin_runner.py); introduced by the
+`r4b7d9e1f3a5_add_plugin_runner.py` migration, with a later migration dropping the enrollment
+columns (`enrollment_state`, `credential_hash`, `enrollment_token_hash`,
+`enrollment_token_expires_at`, `push_signing_secret_encrypted`).
 
 | Model | Purpose |
 |---|---|
-| `PluginRunner` | A registered runner: enrollment state, `credential_hash`, encrypted push secret, heartbeat/health |
+| `PluginRunner` | A self-registered runner: `base_url`, status, heartbeat/health |
 | `PluginDefinition` | Global catalog row; manifest + `active_version_id` |
 | `PluginVersion` | One immutable installed version, with source/build provenance |
 | `RunnerPluginInstallation` | PK `(runner_id, plugin_version_id)` — which runner hosts which version. Replaces the old single-runner model, enabling multi-runner |
@@ -136,14 +143,17 @@ deliberately split so database work and network I/O never share a transaction.
   to past tense (`case.create` → `case.created`) by `normalize_plugin_event_type`. Manifest
   `triggers` match against the normalized form; a mismatch means nothing fires.
 - If an installed plugin's manifest triggers include the event type, enqueue one
-  `PluginEventDelivery` per **healthy, enrolled** runner, idempotent on `(event_id, runner_id)`.
+  `PluginEventDelivery` per **healthy** runner (selected on status/heartbeat), idempotent on
+  `(event_id, runner_id)`.
 
 **2. `push_pending_deliveries`** (its own poller) POSTs each due envelope to the runner's
-`/internal/events`, signed:
+`/internal/events`, signed with the shared secret:
 
 ```
-x-catlico-signature: sha256=<hmac-sha256(push_signing_secret, raw_body)>
+x-catlico-signature: sha256=<hmac-sha256(PLUGIN_RUNNER_SHARED_SECRET, raw_body)>
 ```
+
+The runner recomputes the HMAC with the same secret to verify.
 
 Failures reschedule with exponential backoff (`PLUGIN_PUSH_BACKOFF_*`) up to
 `PLUGIN_PUSH_MAX_AGE_SECONDS`, after which the delivery is marked `expired`.
@@ -223,7 +233,7 @@ drive it with an injected `now`.
 | Step | Behaviour | Settings |
 |---|---|---|
 | `reap_stuck_runs` | Fail active runs past `start/create + timeout + grace`; invalidate token, set `error_kind="timeout"` | `PLUGIN_RUN_DEFAULT_TIMEOUT_SECONDS`=60, `PLUGIN_RUN_REAP_GRACE_SECONDS`=60 |
-| `detect_offline_runners` | Mark enrolled runners `offline` after N missed heartbeats | `PLUGIN_HEARTBEAT_INTERVAL_SECONDS`=30 × `PLUGIN_RUNNER_OFFLINE_MISSED_HEARTBEATS`=3 |
+| `detect_offline_runners` | Mark runners `offline` after N missed heartbeats | `PLUGIN_HEARTBEAT_INTERVAL_SECONDS`=30 × `PLUGIN_RUNNER_OFFLINE_MISSED_HEARTBEATS`=3 |
 | `rollup_terminal_runs` | Fold terminal runs into `PluginRunDaily`, mark `rolled_up`. Runs **before** pruning | — |
 | `prune_old_runs` | Delete terminal, rolled-up runs past the window | `PLUGIN_RUN_RETENTION_DAYS`=30 |
 | `prune_old_deliveries` | Delete delivered/expired deliveries past the window | `PLUGIN_DELIVERY_RETENTION_DAYS`=7 |
@@ -271,7 +281,7 @@ satisfies it; a required param with neither is `missing`.
 |---|---|
 | `test_plugin_runner_models.py` | Model/migration shape, constraints |
 | `test_api_plugins_public.py` | Public catalog/config/enable routes |
-| `test_api_plugin_runners.py` · `_public.py` | Runner admin + enrollment |
+| `test_api_plugin_runners.py` · `_public.py` | Runner admin + self-registration |
 | `test_api_plugin_run_claim.py` | Claim, skip checks, concurrency cap |
 | `test_api_plugin_runtime.py` | Runtime reads/results/files/progress, token scoping |
 | `test_api_proposed_actions.py` | Proposal apply/approve/reject, auto-apply |

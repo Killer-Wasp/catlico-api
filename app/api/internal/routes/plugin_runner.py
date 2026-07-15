@@ -12,7 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.api.deps import PluginRunner
+from app.api.deps import PluginRunner, PluginRunnerSecret
 from app.core.configs import settings
 from app.core.db import get_session
 from app.crud import alert as alert_crud
@@ -49,18 +49,6 @@ def _hash_runtime_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _hash_secret(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
-
-
-def _new_runner_credential() -> str:
-    return f"cpr_{secrets.token_urlsafe(32)}"
-
-
-def _new_push_signing_secret() -> str:
-    return f"cps_{secrets.token_urlsafe(32)}"
-
-
 def _event_object_from_body(body: dict) -> tuple[str | None, str | None]:
     event_object = body.get("event_object") or {}
     object_type = body.get("event_object_type") or event_object.get("type")
@@ -73,52 +61,24 @@ def _event_object_from_body(body: dict) -> tuple[str | None, str | None]:
 @router.post("/register")
 async def register_runner(
     body: PluginRunnerRegister,
+    _: PluginRunnerSecret,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
-    """Exchange a one-time enrollment token for runner machine credentials."""
+    """Self-register a runner. Authenticated by the shared secret alone; upserts
+    the runner row (creating it if missing, marking it healthy) plus its plugin
+    inventory. No tokens, no minting, no returned secrets."""
     now = datetime.now(UTC)
-    if not body.enrollment_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid plugin runner enrollment token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
 
     existing = await session.get(PluginRunnerModel, body.id)
-    token_expires_at = existing.enrollment_token_expires_at if existing else None
-    if token_expires_at and token_expires_at.tzinfo is None:
-        token_expires_at = token_expires_at.replace(tzinfo=UTC)
-    if (
-        existing is None
-        or existing.enrollment_state != "pending"
-        or not existing.enrollment_token_hash
-        or not secrets.compare_digest(
-            existing.enrollment_token_hash,
-            _hash_secret(body.enrollment_token),
-        )
-        or token_expires_at is None
-        or token_expires_at < now
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid plugin runner enrollment token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    runner_credential = _new_runner_credential()
-    push_signing_secret = _new_push_signing_secret()
+    if existing is None:
+        existing = PluginRunnerModel(id=body.id)
+        session.add(existing)
     existing.name = body.name or existing.name
     existing.version = body.version
+    existing.base_url = body.base_url or existing.base_url
     existing.capabilities = body.capabilities
     existing.isolation_mode = body.isolation_mode
     existing.status = "healthy"
-    existing.enrollment_state = "enrolled"
-    existing.credential_hash = _hash_secret(runner_credential)
-    from app.core.crypto import encrypt_string
-
-    existing.push_signing_secret_encrypted = encrypt_string(push_signing_secret)
-    existing.enrollment_token_hash = None
-    existing.enrollment_token_expires_at = None
     await session.flush()
 
     # Upsert plugin definitions and versions from reported manifests
@@ -192,8 +152,6 @@ async def register_runner(
         "name": existing.name,
         "status": existing.status,
         "version": existing.version,
-        "runner_credential": runner_credential,
-        "push_signing_secret": push_signing_secret,
     }
 
 

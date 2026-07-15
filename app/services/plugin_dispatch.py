@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.configs import settings
-from app.core.crypto import decrypt_string
 from app.models.audit import AuditOutbox
 from app.models.plugin_runner import (
     OrgPlugin,
@@ -93,7 +92,6 @@ async def _enqueue_for_healthy_runners(session: AsyncSession, envelope: dict) ->
             await session.execute(
                 select(PluginRunner).where(
                     PluginRunner.status == "healthy",
-                    PluginRunner.enrollment_state == "enrolled",
                 )
             )
         )
@@ -359,7 +357,7 @@ async def push_pending_deliveries(
     delivered = failed = expired = 0
     for delivery in due:
         runner = await session.get(PluginRunner, delivery.runner_id)
-        secret = decrypt_string(runner.push_signing_secret_encrypted) if runner else None
+        secret = settings.PLUGIN_RUNNER_SHARED_SECRET or ""
         if not runner or not runner.base_url or not secret:
             _reschedule(delivery, now, "runner not reachable/enrolled")
             failed += 1

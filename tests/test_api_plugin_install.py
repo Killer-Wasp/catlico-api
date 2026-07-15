@@ -6,25 +6,25 @@ import pytest
 from httpx import AsyncClient
 
 from app.api.v1.routes import plugin_runners as pr_routes
-from app.core.crypto import encrypt_string
 from app.models.plugin_runner import PluginRunner as PluginRunnerModel
 from app.services.plugin_dispatch import _signature
-from tests.test_api_plugin_runners import _register_runner
+from tests.test_api_plugin_runners import RUNNER_SECRET, _register_runner
 
 
 def _admin_h(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def _internal_h(secret):
-    return {"Authorization": f"Bearer {secret}"}
+def _internal_h(secret, runner_id="runner-1"):
+    return {"Authorization": f"Bearer {secret}", "X-Runner-Id": runner_id}
 
 
-async def _create_runner(client: AsyncClient, admin_token: str, runner_id="runner-1"):
+async def _create_runner(client: AsyncClient, admin_token: str | None = None, runner_id="runner-1"):
+    """Self-register a runner (advertising its base_url) with the shared secret."""
     r = await client.post(
-        "/api/v1/plugin-runners",
+        "/api/internal/plugin-runner/register",
         json={"id": runner_id, "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers=_admin_h(admin_token),
+        headers={"Authorization": f"Bearer {RUNNER_SECRET}"},
     )
     assert r.status_code == 200, r.text
 
@@ -158,7 +158,7 @@ async def test_install_trigger_runner_failure_502(
 
 async def test_runner_post_signed_signs_body_with_push_secret():
     """The POST helper attaches an x-catlico-signature computed over the raw body
-    with the runner's push signing secret — the same scheme /internal/events uses."""
+    with the shared secret — the same scheme /internal/events uses."""
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -169,11 +169,7 @@ async def test_runner_post_signed_signs_body_with_push_secret():
         return httpx.Response(200, json={"accepted": True})
 
     transport = httpx.MockTransport(handler)
-    runner = PluginRunnerModel(
-        id="runner-1",
-        base_url="http://runner:8080",
-        push_signing_secret_encrypted=encrypt_string("cps_test_secret"),
-    )
+    runner = PluginRunnerModel(id="runner-1", base_url="http://runner:8080")
     payload = {"plugin_version_id": "acme-intel@main", "plugin_id": "acme-intel"}
     result = await pr_routes._runner_post_signed(
         runner, "/internal/plugins/install", payload, transport=transport
@@ -183,16 +179,12 @@ async def test_runner_post_signed_signs_body_with_push_secret():
     expected_body = json.dumps(payload).encode()
     assert captured["body"] == expected_body
     assert captured["ct"] == "application/json"
-    assert captured["sig"] == _signature(expected_body, "cps_test_secret")
+    assert captured["sig"] == _signature(expected_body, RUNNER_SECRET)
 
 
 async def test_runner_post_signed_non_2xx_raises():
     transport = httpx.MockTransport(lambda req: httpx.Response(500, json={"e": "x"}))
-    runner = PluginRunnerModel(
-        id="runner-1",
-        base_url="http://runner:8080",
-        push_signing_secret_encrypted=encrypt_string("cps_test_secret"),
-    )
+    runner = PluginRunnerModel(id="runner-1", base_url="http://runner:8080")
     with pytest.raises(httpx.HTTPStatusError):
         await pr_routes._runner_post_signed(
             runner, "/internal/plugins/install", {"a": 1}, transport=transport
@@ -222,28 +214,9 @@ async def test_install_status_building_then_installed(
     client: AsyncClient, admin_token, session, monkeypatch
 ):
     version_id = await _trigger_install(client, admin_token, monkeypatch)
-    # The trigger created the runner credential via _create_runner but not an
-    # enrolled machine credential; register the same runner to get its bearer.
-    # _create_runner already created runner-1 (pending). Enroll it now.
-    # Re-enroll + register to obtain a runner credential for internal auth.
-    re = await client.post(
-        "/api/v1/plugin-runners/runner-1/re-enroll",
-        headers=_admin_h(admin_token),
-    )
-    token = re.json()["enrollment_token"]
-    reg = await client.post(
-        "/api/internal/plugin-runner/register",
-        json={
-            "id": "runner-1",
-            "name": "Test Runner",
-            "version": "0.1.0",
-            "capabilities": ["container"],
-            "isolation_mode": "container",
-            "enrollment_token": token,
-        },
-    )
-    credential = reg.json()["runner_credential"]
-    h = _internal_h(credential)
+    # _trigger_install already self-registered runner-1; internal calls auth with
+    # the shared secret + X-Runner-Id.
+    h = _internal_h(RUNNER_SECRET)
 
     # building -> installing
     r = await client.post(
@@ -277,19 +250,7 @@ async def test_install_status_building_then_installed(
 
 async def test_install_status_failed(client: AsyncClient, admin_token, session, monkeypatch):
     version_id = await _trigger_install(client, admin_token, monkeypatch)
-    re = await client.post(
-        "/api/v1/plugin-runners/runner-1/re-enroll", headers=_admin_h(admin_token)
-    )
-    token = re.json()["enrollment_token"]
-    reg = await client.post(
-        "/api/internal/plugin-runner/register",
-        json={
-            "id": "runner-1", "name": "Test Runner", "version": "0.1.0",
-            "capabilities": ["container"], "isolation_mode": "container",
-            "enrollment_token": token,
-        },
-    )
-    h = _internal_h(reg.json()["runner_credential"])
+    h = _internal_h(RUNNER_SECRET)
 
     r = await client.post(
         f"/api/internal/plugin-runner/plugins/{version_id}/install-status",
@@ -336,7 +297,7 @@ async def test_install_status_rejects_other_runners_installation(
     r = await client.post(
         f"/api/internal/plugin-runner/plugins/{version_id}/install-status",
         json={"state": "building"},
-        headers=_internal_h(credential_b),
+        headers=_internal_h(credential_b, "runner-2"),
     )
     assert r.status_code == 404, r.text
 

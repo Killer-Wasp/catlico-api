@@ -80,7 +80,7 @@ value on every instance** — they are not interchangeable (see the
 | Secret | Generate | If it leaks | If you lose/rotate it |
 |---|---|---|---|
 | `SECRET_KEY` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` | Anyone can forge a session token for any user → full auth bypass | All outstanding tokens fail; every user is logged out. No data migration. |
-| `SECRET_ENCRYPTION_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` | Whoever also has a DB dump can decrypt stored connector/MISP/runner secrets | Existing ciphertext becomes undecryptable — you must re-encrypt stored rows first |
+| `SECRET_ENCRYPTION_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` | Whoever also has a DB dump can decrypt stored connector/MISP/plugin config secrets | Existing ciphertext becomes undecryptable — you must re-encrypt stored rows first |
 
 Consequences of getting these wrong in a multi-instance deployment:
 
@@ -149,12 +149,15 @@ The app serves three route groups on one port, separated by who authenticates:
 | Prefix | Principal | Expose to |
 |---|---|---|
 | `/api/v1/*` | User JWT or API key (`thp_…`) | Your users / the web app |
-| `/api/internal/plugin-runner/*` | Per-runner machine credential (`cpr_…`) | Plugin runners only |
+| `/api/internal/plugin-runner/*` | Shared secret (`Authorization: Bearer`) + `X-Runner-Id` | Plugin runners only |
 | `/api/internal/plugin-runtime/*` | Short-lived per-run token | Plugin runtime only |
 
-If you don't run the plugin subsystem, the `/api/internal/*` routes still exist but authenticate
-nothing external. Where your topology allows, restrict `/api/internal/*` at the proxy to the
-network that hosts runners rather than the public internet.
+If you run the plugin subsystem, set `PLUGIN_RUNNER_SHARED_SECRET` to the same value here and on
+every runner — it is the whole trust boundary: runners send it as `Authorization: Bearer` (with an
+`X-Runner-Id` header) and it also keys the HMAC signature on API→runner pushes. If you don't run
+the subsystem, the `/api/internal/*` routes still exist but authenticate nothing external. Where
+your topology allows, restrict `/api/internal/*` at the proxy to the network that hosts runners
+rather than the public internet.
 
 ## 8. Background workers run in-process
 

@@ -13,7 +13,7 @@ from app.services import plugin_circuit_breaker as cb
 
 
 async def _seed(session, org_id, *, enabled=True):
-    runner = PluginRunner(id=f"runner-{uuid.uuid4().hex[:8]}", enrollment_state="enrolled")
+    runner = PluginRunner(id=f"runner-{uuid.uuid4().hex[:8]}")
     pdef = PluginDefinition(id=f"plugin-{uuid.uuid4().hex[:8]}", display_name="P")
     session.add(runner)
     session.add(pdef)
@@ -115,7 +115,7 @@ async def test_clear_suspension_resets_streak_and_reason(session, org_a):
 
 async def test_no_org_plugin_row_is_a_noop(session, org_a):
     # A run for a plugin the org never enabled has no OrgPlugin row.
-    runner = PluginRunner(id=f"runner-{uuid.uuid4().hex[:8]}", enrollment_state="enrolled")
+    runner = PluginRunner(id=f"runner-{uuid.uuid4().hex[:8]}")
     pdef = PluginDefinition(id=f"plugin-{uuid.uuid4().hex[:8]}", display_name="P")
     session.add(runner)
     session.add(pdef)

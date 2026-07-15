@@ -30,13 +30,6 @@ class PluginRunner(TimestampMixin, table=True):
     version: str = Field(default="")
     capabilities: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     isolation_mode: str = Field(default="container")
-    enrollment_state: str = Field(default="pending")
-    credential_hash: str | None = Field(default=None)
-    enrollment_token_hash: str | None = Field(default=None)
-    enrollment_token_expires_at: datetime | None = Field(default=None)
-    # Encrypted (not hashed): the API must recover the plaintext to sign the HMAC
-    # on event pushes the runner verifies.
-    push_signing_secret_encrypted: str | None = Field(default=None)
     last_health_at: datetime | None = Field(default=None)
     last_heartbeat_at: datetime | None = Field(default=None)
     last_error: str | None = Field(default=None)
@@ -52,9 +45,12 @@ class PluginRunnerRegister(SQLModel):
     id: str
     name: str = ""
     version: str = ""
+    # The URL the API uses to reach this runner for event/install pushes. The
+    # runner self-reports it at registration (there is no admin pre-provisioning
+    # step to set it any more).
+    base_url: str = ""
     capabilities: list[str] = []
     isolation_mode: str = "container"
-    enrollment_token: str | None = None
     plugins: list[dict] = []  # installed plugin manifests
 
 

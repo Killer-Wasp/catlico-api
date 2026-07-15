@@ -43,8 +43,8 @@ def _runtime_h(token: str):
     return {"Authorization": f"Bearer {token}"}
 
 
-def _runner_h(secret: str):
-    return {"Authorization": f"Bearer {secret}"}
+def _runner_h(secret: str, runner_id: str = "runner-1"):
+    return {"Authorization": f"Bearer {secret}", "X-Runner-Id": runner_id}
 
 
 # --- Helpers ---

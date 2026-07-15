@@ -19,8 +19,8 @@ from tests.test_api_plugin_runtime import _create_case_with_observable
 _RUNNER_PREFIX = "/api/internal/plugin-runner"
 
 
-def _runner_h(secret: str) -> dict:
-    return {"Authorization": f"Bearer {secret}"}
+def _runner_h(secret: str, runner_id: str = "runner-1") -> dict:
+    return {"Authorization": f"Bearer {secret}", "X-Runner-Id": runner_id}
 
 
 def _admin_org_h(admin_token: str, org_id: str) -> dict:

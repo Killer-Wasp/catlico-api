@@ -15,8 +15,8 @@ def _h(token, org_id):
     return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org_id}
 
 
-def _internal_h(secret):
-    return {"Authorization": f"Bearer {secret}"}
+def _internal_h(secret, runner_id="runner-1"):
+    return {"Authorization": f"Bearer {secret}", "X-Runner-Id": runner_id}
 
 
 def _runtime_h(token):
@@ -37,7 +37,7 @@ async def _setup_runner_and_plugin(
     _, credential = await _register_runner(
         client,
         admin_token,
-        {**RUNNER1, "id": runner_id},
+        {**RUNNER1, "id": runner_id, "base_url": "http://runner:8080"},
         plugins=[SAMPLE_MANIFEST],
     )
     return SAMPLE_MANIFEST["id"], credential
@@ -107,11 +107,6 @@ async def test_get_unknown_plugin_404(
 async def test_plugin_resource_get_is_proxied_through_api(
     client: AsyncClient, runner_secret, admin_token, org_a, monkeypatch,
 ):
-    await client.post(
-        "/api/v1/plugin-runners",
-        json={"id": "runner-1", "name": "Test Runner", "base_url": "http://runner:8080"},
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
     plugin_id, _ = await _setup_runner_and_plugin(client, admin_token)
 
     async def fake_resource(base_url: str, method: str, path: str, body=None):
