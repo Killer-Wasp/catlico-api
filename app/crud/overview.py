@@ -265,7 +265,7 @@ async def _case_pipeline(session: AsyncSession, org_id: str) -> list[TrendPoint]
     rows = (
         await session.execute(
             _org_cases(
-                select(CaseStatus.stage, func.count()), org_id
+                select(CaseStatus.stage, func.count()).select_from(Case), org_id
             )
             .join(CaseStatus, CaseStatus.id == Case.status_id)
             .group_by(CaseStatus.stage)

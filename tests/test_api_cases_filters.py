@@ -7,8 +7,9 @@ AND across keys. Keys are status, severity, assignee, title, case, and
 from httpx import AsyncClient
 
 from app.crud import case_ as case_crud
+from app.crud import case_status as case_status_crud
 from app.crud import tag as tag_crud
-from app.models.case_ import Case, CaseCreate, CaseStatus
+from app.models.case_ import Case, CaseCreate
 from app.models.tag import TaggableType
 
 
@@ -20,7 +21,7 @@ async def _seed_case(
     *,
     title="case",
     severity=2,
-    status=CaseStatus.open,
+    status="Open",
     assignee_id=None,
     tags=None,
 ) -> Case:
@@ -31,8 +32,9 @@ async def _seed_case(
         owner_role_id=builtin_roles["org-admin"].id,
         created_by=str(created_by),
     )
-    if status is not CaseStatus.open:
-        case.status = status
+    if status != "Open":
+        target = await case_status_crud.get_status_by_label(session, status, org_a.id)
+        case.status_id = target.id
         session.add(case)
         await session.flush()
     if tags:
@@ -67,7 +69,7 @@ async def test_filter_by_status_multi(
         builtin_roles,
         analyst_a.id,
         title="resolved-one",
-        status=CaseStatus.resolved,
+        status="Resolved",
     )
     await _seed_case(
         session,
@@ -75,7 +77,7 @@ async def test_filter_by_status_multi(
         builtin_roles,
         analyst_a.id,
         title="dup-one",
-        status=CaseStatus.duplicated,
+        status="Duplicated",
     )
 
     # Same key, two values → OR.
@@ -247,7 +249,7 @@ async def test_filter_by_status_contains(
         builtin_roles,
         analyst_a.id,
         title="resolved-one",
-        status=CaseStatus.resolved,
+        status="Resolved",
     )
 
     body = await _list(
