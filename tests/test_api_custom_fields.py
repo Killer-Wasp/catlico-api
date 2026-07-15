@@ -227,6 +227,59 @@ async def test_custom_fields_in_case_public(
     assert item["custom_fields"] == {"impact": 7}
 
 
+async def test_url_type_validation(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    await _make_def(client, h, name="ref", field_type="url")
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    url = f"/api/v1/cases/{case.id}/custom-fields"
+
+    ok = await client.put(
+        url, json={"values": {"ref": "https://example.com/x?a=1"}}, headers=h
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["ref"] == "https://example.com/x?a=1"
+
+    # Wrong scheme, no scheme, and a non-string all fail with 422.
+    assert (
+        await client.put(url, json={"values": {"ref": "ftp://x.test"}}, headers=h)
+    ).status_code == 422
+    assert (
+        await client.put(url, json={"values": {"ref": "example.com"}}, headers=h)
+    ).status_code == 422
+    assert (
+        await client.put(url, json={"values": {"ref": 123}}, headers=h)
+    ).status_code == 422
+
+
+async def test_mandatory_enforced_on_put(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    h = _headers(analyst_a_token, org_a.id)
+    await _make_def(client, h, name="impact", field_type="integer", mandatory=True)
+    await _make_def(client, h, name="note", field_type="string")
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    url = f"/api/v1/cases/{case.id}/custom-fields"
+
+    # A PUT that omits the mandatory field is a 422 (replace-semantics).
+    missing = await client.put(url, json={"values": {"note": "hi"}}, headers=h)
+    assert missing.status_code == 422
+
+    # A null value for the mandatory field is also a violation.
+    nulled = await client.put(
+        url, json={"values": {"impact": None, "note": "hi"}}, headers=h
+    )
+    assert nulled.status_code == 422
+
+    # Providing the mandatory field succeeds.
+    ok = await client.put(
+        url, json={"values": {"impact": 3, "note": "hi"}}, headers=h
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["impact"] == 3
+
+
 # --- Alerts ---
 
 async def _make_alert(client, headers, source_ref="r1"):

@@ -158,6 +158,7 @@ class CaseCounts(SQLModel):
     comments: int = 0
     attachments: int = 0
     observables: int = 0
+    similar: int = 0
 
 
 class CaseListFacets(SQLModel):
