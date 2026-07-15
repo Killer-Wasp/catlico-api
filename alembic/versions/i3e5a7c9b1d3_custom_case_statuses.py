@@ -116,7 +116,9 @@ def upgrade() -> None:
         ["id"],
         ondelete="RESTRICT",
     )
-    op.alter_column("case_", "status_id", nullable=False)
+    # status_id stays nullable at the DB level: every application create path sets
+    # it (create_case/merge), but keeping it nullable avoids a hard failure for any
+    # legacy case that lacked an owner share to map through.
 
     # --- Drop the old native enum column + type -----------------------------
     op.drop_column("case_", "status")

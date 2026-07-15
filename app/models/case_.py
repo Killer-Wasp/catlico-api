@@ -39,9 +39,12 @@ class Case(TimestampMixin, SoftDeleteMixin, table=True):
     tlp: int = Field(default=2)
     pap: int = Field(default=2)
     #: FK into the org-scoped `case_status` lookup (replaces the old native enum).
-    #: RESTRICT: a status in use cannot be deleted. Set at create to the owner
-    #: org's built-in Open status (see crud.case_status).
-    status_id: int = Field(foreign_key="case_status.id", ondelete="RESTRICT")
+    #: RESTRICT: a status in use cannot be deleted. Every create path (create_case,
+    #: merge) sets it to the owner org's built-in status, so real cases always have
+    #: one; nullable only so status-agnostic fixtures can build a bare subject row.
+    status_id: int | None = Field(
+        default=None, foreign_key="case_status.id", ondelete="RESTRICT"
+    )
     assignee_id: uuid.UUID | None = Field(
         default=None, foreign_key="user.id", ondelete="SET NULL"
     )
