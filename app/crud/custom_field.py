@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import delete, select
@@ -22,6 +23,8 @@ _VALUE_COLUMN: dict[CustomFieldType, str] = {
     CustomFieldType.float: "float_value",
     CustomFieldType.boolean: "boolean_value",
     CustomFieldType.date: "date_value",
+    # `url` reuses the string column — it's a validated string, not a new column.
+    CustomFieldType.url: "string_value",
 }
 
 
@@ -132,6 +135,18 @@ def _coerce_in(field: CustomField, raw: Any) -> tuple[str, Any]:
                 f"'{raw}' is not an allowed value for '{field.name}'"
             )
         return col, raw
+    if field.field_type == CustomFieldType.url:
+        if not isinstance(raw, str):
+            raise ValueError(f"'{field.name}' expects a URL string")
+        try:
+            parsed = urlparse(raw)
+        except ValueError as exc:
+            raise ValueError(f"'{field.name}' expects a valid URL") from exc
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError(
+                f"'{field.name}' expects an http/https URL"
+            )
+        return col, raw
     if field.field_type == CustomFieldType.boolean:
         if not isinstance(raw, bool):
             raise ValueError(f"'{field.name}' expects a boolean")
@@ -205,6 +220,35 @@ async def values_for_entities(
     return out
 
 
+async def mandatory_fields(
+    session: AsyncSession, organisation_id: str
+) -> list[CustomField]:
+    """The org's live custom fields flagged `mandatory`."""
+    result = await session.execute(
+        select(CustomField).where(
+            CustomField.organisation_id == organisation_id,
+            CustomField.deleted_at.is_(None),
+            CustomField.mandatory.is_(True),
+        )
+    )
+    return list(result.scalars())
+
+
+async def assert_mandatory_present(
+    session: AsyncSession,
+    organisation_id: str,
+    *,
+    provided_names: set[int],
+) -> None:
+    """Raise ValueError if any mandatory org field id is absent from `provided_names`
+    (the field ids that end up with a non-null value)."""
+    for field in await mandatory_fields(session, organisation_id):
+        if field.id not in provided_names:
+            raise ValueError(
+                f"Mandatory custom field '{field.name}' is required"
+            )
+
+
 async def set_values(
     session: AsyncSession,
     entity_type: CustomFieldEntityType,
@@ -213,7 +257,9 @@ async def set_values(
     values: dict[str, Any],
 ) -> dict[str, Any]:
     """Replace-semantics: the entity ends up with exactly the (non-null) values given.
-    Raises ValueError for an unknown field name or a value that fails validation."""
+    Raises ValueError for an unknown field name, a value that fails validation, or a
+    mandatory field left unset (replace-semantics means an omitted or null-valued
+    mandatory field is a violation)."""
     rows: list[CustomFieldValue] = []
     for name, raw in values.items():
         field = await get_field_by_name(session, name, organisation_id)
@@ -230,6 +276,10 @@ async def set_values(
                 **{col: value},
             )
         )
+
+    await assert_mandatory_present(
+        session, organisation_id, provided_names={r.field_id for r in rows}
+    )
 
     await session.execute(
         delete(CustomFieldValue).where(

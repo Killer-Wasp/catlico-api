@@ -506,6 +506,7 @@ async def test_case_counts_endpoint(
         "comments": 0,
         "attachments": 0,
         "observables": 0,
+        "similar": 0,
     }
 
     # Add one task, two comments, and one observable.
@@ -536,4 +537,5 @@ async def test_case_counts_endpoint(
         "comments": 2,
         "attachments": 0,
         "observables": 1,
+        "similar": 0,
     }

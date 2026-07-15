@@ -65,6 +65,7 @@ from app.models.case_ import (
     CaseMergeRequest,
     CasePublic,
     CaseTaskSummary,
+    SimilarCasePublic,
 )
 from app.models.comment import (
     CommentCreate,
@@ -667,13 +668,42 @@ async def get_case_counts(
     custom_fields = await cf_crud.values_for(
         session, CustomFieldEntityType.case, str(case_id)
     )
+    similar = await obs_crud.similar_cases_for_case(
+        session, case_id, organisation_id=case_ctx.organisation_id
+    )
     return CaseCounts(
         tasks=tasks_total,
         custom_fields=len(custom_fields),
         comments=comments_total,
         attachments=attachments_total,
         observables=observables_total,
+        similar=len(similar),
     )
+
+
+@router.get("/{case_id}/similar", response_model=list[SimilarCasePublic])
+async def list_case_similar_cases(
+    case_ctx: Annotated[CaseAuthContext, require_case_permission("read:case")],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[SimilarCasePublic]:
+    """Cases sharing one or more observables with this case (this case itself and
+    merged/duplicated tombstones are excluded). Fixed limit of 20."""
+    rows = await obs_crud.similar_cases_for_case(
+        session,
+        case_ctx.case.id,
+        organisation_id=case_ctx.organisation_id,
+        limit=20,
+    )
+    return [
+        SimilarCasePublic(
+            id=case.id,
+            title=case.title,
+            severity=case.severity,
+            status=case.status,
+            shared_observables=shared,
+        )
+        for case, shared in rows
+    ]
 
 
 @router.put("/{case_id}/custom-fields", response_model=dict[str, Any])

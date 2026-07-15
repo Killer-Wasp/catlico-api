@@ -14,6 +14,7 @@ class CustomFieldType(str, Enum):
     float = "float"
     boolean = "boolean"
     date = "date"
+    url = "url"
 
 
 class CustomFieldEntityType(str, Enum):

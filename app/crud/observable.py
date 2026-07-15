@@ -14,7 +14,7 @@ from app.crud.pagination import paginate
 from app.crud.case_share import list_non_owner_org_ids
 from app.crud.organisation_link import get_link
 from app.models.alert import Alert
-from app.models.case_ import Case
+from app.models.case_ import Case, CaseStatus
 from app.models.case_share import CaseShare
 from app.models.observable import (
     Observable,
@@ -397,6 +397,62 @@ async def similar_cases_for_alert(
     )
     if exclude_case_id is not None:
         stmt = stmt.where(Case.id != exclude_case_id)
+    rows = (await session.execute(stmt)).all()
+    return [(case, count) for case, count in rows]
+
+
+async def similar_cases_for_case(
+    session: AsyncSession,
+    case_id: int,
+    *,
+    organisation_id: str,
+    limit: int = 20,
+) -> list[tuple[Case, int]]:
+    """Cases that share at least one observable (same type + value) with the
+    given case — the case detail's "Similar cases". Mirrors
+    `similar_cases_for_alert` with the source flipped to this case's observables.
+    The source case itself and merged/duplicated tombstones are excluded;
+    observables flagged `ignore_similarity` on either side are ignored, and only
+    cases visible to `organisation_id` (via a CaseShare) are returned, ordered by
+    overlap size then recency. Each result carries its shared-observable count."""
+    source_pairs = (
+        select(
+            Observable.observable_type.label("t"),
+            Observable.data.label("d"),
+        )
+        .where(
+            Observable.case_id == case_id,
+            Observable.deleted_at.is_(None),
+            Observable.ignore_similarity.is_(False),
+        )
+        .distinct()
+        .subquery()
+    )
+    case_obs = aliased(Observable)
+    overlap = func.count(func.distinct(case_obs.id))
+    stmt = (
+        select(Case, overlap)
+        .join(case_obs, case_obs.case_id == Case.id)
+        .join(
+            source_pairs,
+            and_(
+                case_obs.observable_type == source_pairs.c.t,
+                case_obs.data == source_pairs.c.d,
+            ),
+        )
+        .join(CaseShare, CaseShare.case_id == Case.id)
+        .where(
+            Case.id != case_id,
+            Case.deleted_at.is_(None),
+            Case.status != CaseStatus.duplicated,
+            case_obs.deleted_at.is_(None),
+            case_obs.ignore_similarity.is_(False),
+            CaseShare.organisation_id == organisation_id,
+        )
+        .group_by(Case.id)
+        .order_by(overlap.desc(), Case.id.desc())
+        .limit(limit)
+    )
     rows = (await session.execute(stmt)).all()
     return [(case, count) for case, count in rows]
 
