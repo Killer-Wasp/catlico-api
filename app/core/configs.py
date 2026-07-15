@@ -169,6 +169,16 @@ class Settings(BaseSettings):
     # bucket/prefix) for object stores.
     STORAGE_ROOT: str = "./dev/uploads"
     MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MB
+    # Orphan-blob GC (report-only maintenance scan; §6.5.5). Only blobs older than
+    # BLOB_GC_MIN_AGE_DAYS that no Attachment / ObservableAttachmentLink /
+    # PluginRunFile references are considered orphans. Deletion is gated behind
+    # BLOB_GC_DELETE_ENABLED (default OFF): the scan logs and counts first, and a
+    # release of clean reports must land before enabling deletion. Backup ordering
+    # caveat (§6.3): NEVER enable deletion so that a GC pass can run between a backup
+    # blob-sync and the pg_dump — a blob dropped after sync but before dump would
+    # dangle a reference in the restored DB. Schedule GC to never overlap backups.
+    BLOB_GC_MIN_AGE_DAYS: int = 7
+    BLOB_GC_DELETE_ENABLED: bool = False
     # S3 / SeaweedFS knobs. Setting S3_ENDPOINT_URL alone selects the S3 backend.
     # GCS/Azure instead read ambient credentials (GOOGLE_APPLICATION_CREDENTIALS /
     # AZURE_STORAGE_CONNECTION_STRING) and are chosen via STORAGE_PROTOCOL.

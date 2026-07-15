@@ -14,11 +14,14 @@ from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from app.core.configs import settings
+from app.crud.audit import record_audit
+from app.models.attachment import Attachment
 from app.models.plugin_runner import (
     PluginEventDelivery,
     PluginResult,
     PluginRun,
     PluginRunDaily,
+    PluginRunFile,
     PluginRunner,
     PluginVersion,
 )
@@ -82,6 +85,23 @@ async def reap_stuck_runs(session: AsyncSession, now: datetime) -> int:
         run.runtime_token_hash = None
         run.runtime_token_expires_at = None
         reaped += 1
+        # Emit an audit + outbox event per reaped run so the forced terminal state
+        # is attributable (a crashed runner never reports, so this is the only
+        # record). record_audit flushes the run's mutation alongside the audit row.
+        await record_audit(
+            session,
+            action="reaped",
+            obj=run,
+            actor="system:maintenance",
+            organisation_id=run.organisation_id,
+            details={
+                "terminal_state": run.status,
+                "error_kind": run.error_kind,
+                "reason": "runner did not report within deadline",
+                "plugin_id": run.plugin_id,
+                "runner_id": run.runner_id,
+            },
+        )
     if reaped:
         await session.flush()
     return reaped
@@ -232,6 +252,76 @@ async def prune_superseded_results(session: AsyncSession, now: datetime) -> int:
         delete(PluginResult).where(PluginResult.created_at < cutoff, superseded)
     )
     return result.rowcount or 0
+
+
+async def scan_orphan_blobs(
+    session: AsyncSession,
+    storage,
+    now: datetime,
+    *,
+    min_age_days: int | None = None,
+    delete_enabled: bool | None = None,
+) -> dict:
+    """Scan the blob store for orphans: stored blobs referenced by no ``Attachment``,
+    ``ObservableAttachmentLink``, or ``PluginRunFile``, older than ``min_age_days``.
+
+    Report-only by default (``delete_enabled`` falls back to ``BLOB_GC_DELETE_ENABLED``,
+    which defaults OFF): it logs and counts, never deleting, until a release of clean
+    reports justifies flipping the flag. The age floor protects a blob written moments
+    before its referencing row commits, and (with §6.3) means a GC pass must never run
+    between a backup blob-sync and its pg_dump.
+
+    ``ObservableAttachmentLink`` is covered transitively: its ``attachment_id`` is an FK
+    into ``Attachment`` (cascade-deleted with it), so every live link's bytes are already
+    in the Attachment sha set — we still name it in the contract for clarity."""
+    if min_age_days is None:
+        min_age_days = settings.BLOB_GC_MIN_AGE_DAYS
+    if delete_enabled is None:
+        delete_enabled = settings.BLOB_GC_DELETE_ENABLED
+
+    referenced: set[str] = set(
+        (await session.execute(select(Attachment.sha256))).scalars().all()
+    )
+    referenced.update(
+        (await session.execute(select(PluginRunFile.sha256))).scalars().all()
+    )
+
+    blobs = await storage.iter_blobs()
+    cutoff = now - timedelta(days=min_age_days)
+    unreferenced = [b for b in blobs if b.sha256 not in referenced]
+    # Only unreferenced blobs past the age floor are eligible — a blob with no known
+    # mtime is never treated as old enough (conservative: never GC'd).
+    orphans = [b for b in unreferenced if b.mtime is not None and b.mtime < cutoff]
+    orphan_bytes = sum(b.size for b in orphans)
+
+    deleted = 0
+    if delete_enabled and orphans:
+        for b in orphans:
+            await storage.delete(b.sha256)
+            deleted += 1
+
+    report = {
+        "scanned": len(blobs),
+        "referenced": len(referenced),
+        "unreferenced": len(unreferenced),
+        "orphans": len(orphans),
+        "orphan_bytes": orphan_bytes,
+        "min_age_days": min_age_days,
+        "delete_enabled": delete_enabled,
+        "deleted": deleted,
+        "sample": [b.sha256 for b in orphans[:20]],
+    }
+    if orphans:
+        logger.warning(
+            "blob GC: %d orphan blob(s) (%d bytes) unreferenced and older than %d days; "
+            "deletion %s (deleted=%d)",
+            len(orphans),
+            orphan_bytes,
+            min_age_days,
+            "ENABLED" if delete_enabled else "OFF (report-only)",
+            deleted,
+        )
+    return report
 
 
 async def run_maintenance_sweep(
