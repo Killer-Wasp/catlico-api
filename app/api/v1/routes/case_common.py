@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ActiveOrgOrApiKeyContext
+from app.crud import assignee as assignee_crud
 from app.crud import custom_field as cf_crud
 from app.crud import organisation_member as member_crud
 from app.crud import sla as sla_crud
@@ -77,6 +78,10 @@ async def case_public_resolved(
     if case.assignee_id:
         emails = await user_crud.emails_for_ids(session, [case.assignee_id])
         pub.assignee_email = emails.get(case.assignee_id)
+    collaborator_ids = await assignee_crud.list_case_collaborators(session, case.id)
+    pub.assignees = await assignee_crud.build_assignee_refs(
+        session, primary_id=case.assignee_id, collaborator_ids=collaborator_ids
+    )
     pub.tags = await tag_crud.list_tag_strings_for(
         session, TaggableType.case, str(case.id)
     )

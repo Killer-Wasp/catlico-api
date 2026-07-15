@@ -6,13 +6,15 @@ from sqlmodel import select
 
 from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
+from app.crud import assignee as assignee_crud
+from app.crud import audit as audit_crud
 from app.crud import flag as flag_crud
 from app.crud import log as log_crud
 from app.crud import organisation_member as member_crud
 from app.crud import task as task_crud
 from app.crud.case_share import get_share
 from app.models.case_ import Case
-from app.models.common import Page
+from app.models.common import AssigneeSetRequest, Page
 from app.models.flag import FlagEntityType
 from app.models.log import LogCreate, LogPublic
 from app.models.role import RolePermission, expand_permissions
@@ -37,6 +39,19 @@ queue_router = APIRouter(prefix="/task-queue", tags=["tasks"])
 def _task_public(task: Task, flagged: bool) -> TaskPublic:
     pub = TaskPublic.model_validate(task, from_attributes=True)
     pub.flagged = flagged
+    return pub
+
+
+async def _with_task_assignees(
+    session: AsyncSession, pub: TaskPublic, task: Task
+) -> TaskPublic:
+    """Populate a task projection's assignee set (primary + collaborators)."""
+    collab = await assignee_crud.list_task_collaborators(
+        session, task.case_id, task.id
+    )
+    pub.assignees = await assignee_crud.build_assignee_refs(
+        session, primary_id=task.assignee_id, collaborator_ids=collab
+    )
     return pub
 
 
@@ -139,7 +154,12 @@ async def list_task_queue(
     )
     cases_by_id = {case.id: case for case in case_rows}
 
+    collaborators_map = await assignee_crud.collaborators_for_tasks(
+        session, [(task.case_id, task.id) for task in tasks]
+    )
     assignee_ids = {task.assignee_id for task in tasks if task.assignee_id is not None}
+    for collab in collaborators_map.values():
+        assignee_ids.update(collab)
     user_rows = (
         (await session.execute(select(User).where(User.id.in_(assignee_ids))))
         .scalars()
@@ -148,21 +168,28 @@ async def list_task_queue(
         else []
     )
     users_by_id = {user.id: user for user in user_rows}
+    emails_by_id = {uid: user.email for uid, user in users_by_id.items()}
+
+    def _queue_item(task: Task) -> TaskQueuePublic:
+        pub = _task_queue_public(
+            task,
+            flagged=task.public_id in flagged,
+            case=cases_by_id[task.case_id],
+            assignee_email=(
+                users_by_id[task.assignee_id].email
+                if task.assignee_id in users_by_id
+                else None
+            ),
+        )
+        pub.assignees = assignee_crud.assignee_refs(
+            task.assignee_id,
+            collaborators_map.get((task.case_id, task.id), []),
+            emails_by_id,
+        )
+        return pub
 
     return Page(
-        items=[
-            _task_queue_public(
-                task,
-                flagged=task.public_id in flagged,
-                case=cases_by_id[task.case_id],
-                assignee_email=(
-                    users_by_id[task.assignee_id].email
-                    if task.assignee_id in users_by_id
-                    else None
-                ),
-            )
-            for task in tasks
-        ],
+        items=[_queue_item(task) for task in tasks],
         total=total,
         skip=skip,
         limit=limit,
@@ -192,7 +219,54 @@ async def get_task(
     flagged = await flag_crud.is_flagged(
         session, FlagEntityType.task, task.public_id, ctx.organisation_id
     )
-    return _task_public(task, flagged)
+    return await _with_task_assignees(session, _task_public(task, flagged), task)
+
+
+@router.put("/{task_id}/assignees", response_model=TaskPublic)
+async def set_task_assignees(
+    case_id: int,
+    task_id: int,
+    body: AssigneeSetRequest,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TaskPublic:
+    """Replace the task's collaborator (secondary-assignee) set. The primary owner
+    is set separately via PATCH `assignee_id`. Each collaborator must be a member
+    of the task's organisation (mirrors the PATCH assignee check). Newly-added
+    collaborators are stamped into the audit event for `task.assigned` fan-out."""
+    task, _, perms = await _resolve_task_visibility(session, ctx, case_id, task_id)
+    _require("write:task", perms)
+    if body.user_ids:
+        for uid in set(body.user_ids):
+            if not await member_crud.get_member(session, uid, task.organisation_id):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Assignee must be a member of the task's organisation",
+                )
+
+    before = set(await assignee_crud.list_task_collaborators(session, case_id, task_id))
+    added = await assignee_crud.set_task_collaborators(
+        session, case_id, task_id, body.user_ids, primary_id=task.assignee_id
+    )
+    after = set(await assignee_crud.list_task_collaborators(session, case_id, task_id))
+    if before != after:
+        await audit_crud.record_audit(
+            session,
+            action="update",
+            obj=task,
+            context_type="case",
+            context_id=str(case_id),
+            actor=str(ctx.user.id),
+            details={
+                "added_assignee_ids": [str(u) for u in added],
+                "assignee_ids": sorted(str(u) for u in after),
+            },
+            organisation_id=task.organisation_id,
+        )
+    flagged = await flag_crud.is_flagged(
+        session, FlagEntityType.task, task.public_id, ctx.organisation_id
+    )
+    return await _with_task_assignees(session, _task_public(task, flagged), task)
 
 
 @router.patch("/{task_id}", response_model=TaskPublic)
@@ -232,7 +306,7 @@ async def update_task(
     flagged = await flag_crud.is_flagged(
         session, FlagEntityType.task, task.public_id, ctx.organisation_id
     )
-    return _task_public(task, flagged)
+    return await _with_task_assignees(session, _task_public(task, flagged), task)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)

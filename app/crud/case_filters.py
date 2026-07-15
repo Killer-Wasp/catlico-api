@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sqlalchemy import String, cast, false, func, or_
+from sqlalchemy import String, and_, cast, exists, false, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -15,6 +15,7 @@ from app.crud._filters import (
 )
 from app.crud.pagination import paginate
 from app.models.case_ import Case, CaseListFacets, CaseStatus
+from app.models.case_assignee import CaseAssignee
 from app.models.case_share import CaseShare
 from app.models.tag import Tag, Tagging, TaggableType
 from app.models.user import User
@@ -69,10 +70,21 @@ def _core_clause_cond(key: str, clause: FilterClause):
         except ValueError:
             return false()
     if key == "assignee":
+        # Match the primary owner OR any collaborator. UNASSIGNED = neither.
         if v == UNASSIGNED:
-            return Case.assignee_id.is_(None)
+            return and_(
+                Case.assignee_id.is_(None),
+                ~exists().where(CaseAssignee.case_id == Case.id),
+            )
         email_cond = User.email.ilike(f"%{v}%") if contains else User.email == v
-        return Case.assignee_id.in_(select(User.id).where(email_cond))
+        matching = select(User.id).where(email_cond)
+        return or_(
+            Case.assignee_id.in_(matching),
+            exists().where(
+                (CaseAssignee.case_id == Case.id)
+                & CaseAssignee.user_id.in_(matching)
+            ),
+        )
     if key == "title":
         return Case.title.ilike(f"%{v}%") if contains else Case.title == v
     if key == "case":
@@ -143,22 +155,34 @@ async def case_list_facets(
         .subquery()
     )
 
-    emails = list(
-        (
-            await session.execute(
-                select(User.email)
-                .join(org_cases, org_cases.c.assignee_id == User.id)
-                .distinct()
-                .order_by(User.email)
-            )
-        ).scalars()
-    )
+    # Union primary-owner emails and collaborator emails across the org's cases.
+    primary_emails = (
+        await session.execute(
+            select(User.email)
+            .join(org_cases, org_cases.c.assignee_id == User.id)
+            .distinct()
+        )
+    ).scalars()
+    collab_emails = (
+        await session.execute(
+            select(User.email)
+            .select_from(CaseAssignee)
+            .join(org_cases, org_cases.c.id == CaseAssignee.case_id)
+            .join(User, User.id == CaseAssignee.user_id)
+            .distinct()
+        )
+    ).scalars()
+    emails = sorted(set(primary_emails) | set(collab_emails))
+    # Unassigned = no primary owner AND no collaborators.
     unassigned = bool(
         (
             await session.execute(
                 select(func.count())
                 .select_from(org_cases)
-                .where(org_cases.c.assignee_id.is_(None))
+                .where(
+                    org_cases.c.assignee_id.is_(None),
+                    ~exists().where(CaseAssignee.case_id == org_cases.c.id),
+                )
             )
         ).scalar_one()
     )

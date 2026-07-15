@@ -5,7 +5,12 @@ from typing import Any
 
 from sqlmodel import Field, SQLModel
 
-from app.models.common import MARKDOWN_NOTE, SoftDeleteMixin, TimestampMixin
+from app.models.common import (
+    MARKDOWN_NOTE,
+    AssigneeRef,
+    SoftDeleteMixin,
+    TimestampMixin,
+)
 from app.models.task import TaskStatus
 
 
@@ -102,6 +107,9 @@ class CasePublic(SQLModel):
     #: time (None when unassigned). Lets list clients show a name without an
     #: extra round-trip per row.
     assignee_email: str | None = None
+    #: Full assignee set (primary + collaborators), populated by a batched lookup
+    #: at read time. The primary is flagged `is_primary=True`.
+    assignees: list[AssigneeRef] = []
     #: Tag strings, populated by a batched lookup at read time.
     tags: list[str] = []
     #: Task statuses, populated by a batched lookup at read time. The client

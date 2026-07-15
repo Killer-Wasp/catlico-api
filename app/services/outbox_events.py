@@ -121,6 +121,26 @@ async def notify_feed_consumer(session: AsyncSession, row: AuditOutbox) -> None:
                 outbox_id=row.id,
             )
 
+    # Multi-assignee (collaborator) fan-out: a PUT …/assignees replace stamps the
+    # newly-added collaborator ids into audit details. Each gets a targeted
+    # `<obj>.assigned` notification, deduped against the primary-assignee routing
+    # above and on retry by the (outbox_id, user_id) unique index. (Alerts are
+    # single-assignee, so only case/task carry this.)
+    if obj_type in {"case", "task"}:
+        added = (envelope.get("details") or {}).get("added_assignee_ids") or []
+        if isinstance(added, list):
+            object_id = envelope["object"]["id"]
+            for target in added:
+                await _notify_user(
+                    session,
+                    org_id=org_id,
+                    target_user_id=str(target),
+                    envelope=envelope,
+                    event_type=f"{obj_type}.assigned",
+                    title=f"You were assigned {obj_type} {object_id}",
+                    outbox_id=row.id,
+                )
+
     # Mention routing: the write sites (comment/case-description) stamp NEW mention
     # ids into audit details (see app/services/mentions.py for the token format).
     # One targeted notification per mentioned user, deduped on retry — and against

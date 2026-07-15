@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import String, cast, func, or_, tuple_, update
+from sqlalchemy import String, and_, cast, exists, func, or_, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -27,8 +27,14 @@ from app.models.task import (
     TaskStatus,
     TaskUpdate,
 )
+from app.models.task_assignee import TaskAssignee
 from app.models.task_share import TaskShare
 from app.models.user import User
+
+#: Correlated predicate: a TaskAssignee (collaborator) row for the current Task.
+_COLLAB_ON_TASK = (TaskAssignee.case_id == Task.case_id) & (
+    TaskAssignee.task_id == Task.id
+)
 
 
 #: Assignee sentinel meaning "no assignee". #: "General" is the UI kind for tasks
@@ -68,10 +74,18 @@ def _task_clause_cond(key: str, clause: FilterClause):
         # Native enum column: resolve values in Python (see enum_condition).
         return enum_condition(Task.status, TaskStatus, clause)
     if key == "assignee":
+        # Match the primary owner OR any collaborator. UNASSIGNED = neither.
         if v == _UNASSIGNED:
-            return Task.assignee_id.is_(None)
+            return and_(
+                Task.assignee_id.is_(None),
+                ~exists().where(_COLLAB_ON_TASK),
+            )
         email_cond = User.email.ilike(f"%{v}%") if contains else User.email == v
-        return Task.assignee_id.in_(select(User.id).where(email_cond))
+        matching = select(User.id).where(email_cond)
+        return or_(
+            Task.assignee_id.in_(matching),
+            exists().where(_COLLAB_ON_TASK & TaskAssignee.user_id.in_(matching)),
+        )
     if key == "kind":
         # "General" is the UI label for the empty group.
         if v == _GENERAL_KIND and not contains:
@@ -200,26 +214,45 @@ async def task_queue_facets(
     """Distinct assignee/kind values across the org's visible tasks, plus whether
     any is unassigned — powers the queue's filter dropdowns across all pages."""
     visible = (
-        select(Task.id, Task.assignee_id, Task.group)
+        select(Task.case_id, Task.id, Task.assignee_id, Task.group)
         .where(Task.deleted_at.is_(None), _visible_task_condition(organisation_id))
         .subquery()
     )
-    emails = list(
-        (
-            await session.execute(
-                select(User.email)
-                .join(visible, visible.c.assignee_id == User.id)
-                .distinct()
-                .order_by(User.email)
+    # Union primary-owner emails and collaborator emails across visible tasks.
+    primary_emails = (
+        await session.execute(
+            select(User.email)
+            .join(visible, visible.c.assignee_id == User.id)
+            .distinct()
+        )
+    ).scalars()
+    collab_emails = (
+        await session.execute(
+            select(User.email)
+            .select_from(TaskAssignee)
+            .join(
+                visible,
+                (visible.c.case_id == TaskAssignee.case_id)
+                & (visible.c.id == TaskAssignee.task_id),
             )
-        ).scalars()
-    )
+            .join(User, User.id == TaskAssignee.user_id)
+            .distinct()
+        )
+    ).scalars()
+    emails = sorted(set(primary_emails) | set(collab_emails))
+    # Unassigned = no primary owner AND no collaborators.
     unassigned = bool(
         (
             await session.execute(
                 select(func.count())
                 .select_from(visible)
-                .where(visible.c.assignee_id.is_(None))
+                .where(
+                    visible.c.assignee_id.is_(None),
+                    ~exists().where(
+                        (TaskAssignee.case_id == visible.c.case_id)
+                        & (TaskAssignee.task_id == visible.c.id)
+                    ),
+                )
             )
         ).scalar_one()
     )
