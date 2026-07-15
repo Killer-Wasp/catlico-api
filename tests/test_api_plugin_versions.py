@@ -14,7 +14,7 @@ from tests.test_api_plugin_runners import (
     SAMPLE_MANIFEST,
     _register_runner,
 )
-from tests.test_api_plugins_public import _run_only_token, _setup_runner_and_plugin
+from tests.test_api_plugins_public import _setup_runner_and_plugin
 
 
 def _h(token, org_id):
@@ -58,14 +58,15 @@ async def test_versions_unknown_plugin_404(
 
 async def test_versions_requires_read_connector(
     client: AsyncClient, session, runner_secret, admin_token, org_a,
+    builtin_roles, readonly_a, readonly_a_token,
 ):
     """The metadata endpoint is gated on read:connector (same as plugin detail).
-    A run:enrichment-only token has no read:connector and is rejected."""
+    A read-only token has no read:connector (that lives in manage:org) and is
+    rejected."""
     plugin_id, _ = await _setup_runner_and_plugin(client, admin_token)
-    run_only = await _run_only_token(session, org_a.id, email="ver-run-only@test.com")
 
     r = await client.get(
-        f"/api/v1/plugins/{plugin_id}/versions", headers=_h(run_only, org_a.id)
+        f"/api/v1/plugins/{plugin_id}/versions", headers=_h(readonly_a_token, org_a.id)
     )
     assert r.status_code == 403
 
@@ -377,13 +378,11 @@ async def test_check_latest_unknown_plugin_404(
 
 async def test_check_latest_requires_read_connector(
     client: AsyncClient, session, runner_secret, admin_token, org_a,
+    builtin_roles, readonly_a, readonly_a_token,
 ):
     plugin_id, _ = await _setup_runner_and_plugin(client, admin_token)
-    run_only = await _run_only_token(
-        session, org_a.id, email="ver-latest-run-only@test.com"
-    )
     r = await client.get(
         f"/api/v1/plugins/{plugin_id}/versions/check-latest",
-        headers=_h(run_only, org_a.id),
+        headers=_h(readonly_a_token, org_a.id),
     )
     assert r.status_code == 403

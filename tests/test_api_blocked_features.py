@@ -348,9 +348,13 @@ async def test_kb_versions_list_and_revert(client: AsyncClient, org_a, analyst_a
     assert reverted_history[0]["reverted_from_version_id"] == create_version["id"]
 
 
-async def test_kb_readonly_can_view_versions_but_cannot_revert(
-    client: AsyncClient, org_a, analyst_a_token, readonly_a_token
+async def test_kb_version_access_requires_manage_org(
+    client: AsyncClient, org_a, builtin_roles, analyst_a, analyst_a_token,
+    readonly_a, readonly_a_token,
 ):
+    """Finding 3: read:knowledge_base / write:knowledge_base now live only inside
+    manage:org, so the old view-vs-revert split for KB collapsed. A read-only member
+    can no longer view versions; a manage:org member (analyst) can view AND revert."""
     writer_h = _h(analyst_a_token, org_a.id)
     reader_h = _h(readonly_a_token, org_a.id)
     created = await client.post(
@@ -359,14 +363,19 @@ async def test_kb_readonly_can_view_versions_but_cannot_revert(
         headers=writer_h,
     )
     page_id = created.json()["id"]
-    versions = (await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=reader_h)).json()
-    assert len(versions) == 1
 
+    # read-only can no longer view versions (no read:knowledge_base).
+    denied = await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=reader_h)
+    assert denied.status_code == 403, denied.text
+
+    # a manage:org member views and reverts.
+    versions = (await client.get(f"/api/v1/knowledge-base/{page_id}/versions", headers=writer_h)).json()
+    assert len(versions) == 1
     reverted = await client.post(
         f"/api/v1/knowledge-base/{page_id}/versions/{versions[0]['id']}/revert",
-        headers=reader_h,
+        headers=writer_h,
     )
-    assert reverted.status_code == 403
+    assert reverted.status_code == 200, reverted.text
 
 
 async def test_kb_versions_are_org_scoped(

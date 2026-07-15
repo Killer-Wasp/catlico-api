@@ -666,9 +666,9 @@ async def test_approve_requires_write_permission(
     token = await _case_runtime_token(client, runner_secret, admin_token, org_a, case_id)
     action_id = await _propose_case_patch(client, token, case_id, "Needs write:case")
 
-    # Read-only member can list but not approve.
-    listed = await client.get(_ACTIONS, headers=_user_h(readonly_a_token, org_a.id))
-    assert listed.status_code == 200, listed.text
+    # A read-only member cannot approve (no write:case). (Listing proposed actions
+    # now requires read:connector, granted only via manage:org, so read-only can no
+    # longer list them either — Finding 3.)
     denied = await client.post(
         f"{_ACTIONS}/{action_id}/approve",
         headers=_user_h(readonly_a_token, org_a.id),

@@ -41,7 +41,7 @@ async def test_auth_providers_empty_in_oss(client: AsyncClient):
 async def test_system_capabilities_all_false_in_oss(client: AsyncClient):
     response = await client.get("/api/v1/system/capabilities")
     assert response.status_code == 200
-    assert response.json() == {"sso": False, "mfa": False}
+    assert response.json() == {"sso": False, "mfa": False, "dashboard": False}
 
 
 async def test_login_unchanged_without_extension(client: AsyncClient, admin_user):
@@ -83,7 +83,7 @@ async def test_fixture_provider_advertised(client: AsyncClient, installed_extens
 async def test_fixture_capabilities_merged(client: AsyncClient, installed_extension):
     response = await client.get("/api/v1/system/capabilities")
     assert response.status_code == 200
-    assert response.json() == {"sso": True, "mfa": True}
+    assert response.json() == {"sso": True, "mfa": True, "dashboard": False}
 
 
 async def test_login_calls_second_factor_hook(
