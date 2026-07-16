@@ -189,14 +189,7 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
     A row that keeps failing is retried until `attempts` reaches
     `MAX_OUTBOX_ATTEMPTS`, at which point it is dead-lettered (a terminal
     `dead_lettered_at` marker) and excluded from future drains — the same way a
-    delivered row is — so a poison row can't retry forever.
-
-    HA (§6.2): the select takes a `FOR UPDATE SKIP LOCKED` row lock so multiple
-    API replicas can drain the same outbox concurrently without double-processing.
-    Each replica grabs a disjoint slice of undelivered rows (rows another replica
-    already holds are skipped, not blocked on) and holds the locks until this
-    session commits at the end of the pass. A lone replica is unaffected — nothing
-    contends, so it simply locks and drains its batch as before."""
+    delivered row is — so a poison row can't retry forever."""
     rows = (
         (
             await session.execute(
@@ -207,7 +200,6 @@ async def dispatch_pending_outbox(session: AsyncSession, *, limit: int = 100) ->
                 )
                 .order_by(AuditOutbox.id)
                 .limit(limit)
-                .with_for_update(skip_locked=True)
             )
         )
         .scalars()
