@@ -58,8 +58,8 @@ async def test_assignment_creates_targeted_notification_and_pushes(
         details={"assignee_id": [None, str(analyst_a.id)]},
     )
 
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)
 
@@ -72,15 +72,13 @@ async def test_assignment_creates_targeted_notification_and_pushes(
     assert targeted[0].event_type == "case.assigned"
     assert targeted[0].title.startswith("You were assigned case")
 
-    # The cross-replica push is a NOTIFY carrying a *reference* to the notification
-    # row (org, target user, notification id) — the message frame itself is rebuilt
-    # by the receiving EventListener (see test_ha_ws_fanout). The row's event_type
-    # (asserted above) is what the frame carries.
-    mock_pub.assert_awaited_once()
-    _, kwargs = mock_pub.call_args
-    assert kwargs["org_id"] == org_a.id
-    assert kwargs["user_id"] == str(analyst_a.id)
-    assert kwargs["notification_id"] == str(targeted[0].id)
+    mock_hub.send_to_user.assert_awaited_once()
+    args, _ = mock_hub.send_to_user.call_args
+    assert args[0] == org_a.id
+    assert args[1] == str(analyst_a.id)
+    assert args[2]["type"] == "notification"
+    assert args[2]["notification"]["id"] == str(targeted[0].id)
+    assert args[2]["notification"]["event_type"] == "case.assigned"
 
 
 async def test_create_with_bare_assignee_string_is_routed(
@@ -93,14 +91,14 @@ async def test_create_with_bare_assignee_string_is_routed(
         details={"assignee_id": str(analyst_a.id)},
     )
 
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)
 
     notifs = await _user_notifs(session, org_a.id)
     assert any(n.user_id == analyst_a.id for n in notifs)
-    mock_pub.assert_awaited_once()
+    mock_hub.send_to_user.assert_awaited_once()
 
 
 async def test_no_assignee_change_creates_only_org_wide(
@@ -113,15 +111,15 @@ async def test_no_assignee_change_creates_only_org_wide(
         details={"status": ["open", "closed"]},
     )
 
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)
 
     notifs = await _user_notifs(session, org_a.id)
     assert len(notifs) == 1
     assert notifs[0].user_id is None
-    mock_pub.assert_not_called()
+    mock_hub.send_to_user.assert_not_called()
 
 
 async def test_cleared_assignee_is_not_routed(session, org_a, monkeypatch):
@@ -132,15 +130,15 @@ async def test_cleared_assignee_is_not_routed(session, org_a, monkeypatch):
         details={"assignee_id": ["11111111-1111-1111-1111-111111111111", None]},
     )
 
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)
 
     notifs = await _user_notifs(session, org_a.id)
     assert len(notifs) == 1
     assert notifs[0].user_id is None
-    mock_pub.assert_not_called()
+    mock_hub.send_to_user.assert_not_called()
 
 
 async def test_org_less_event_creates_no_notification(session, org_a):
@@ -186,15 +184,15 @@ async def test_malformed_assignee_uuid_is_skipped(session, org_a, monkeypatch):
         details={"assignee_id": [None, "not-a-uuid"]},
     )
 
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)  # must not raise
 
     notifs = await _user_notifs(session, org_a.id)
     assert len(notifs) == 1
     assert notifs[0].user_id is None
-    mock_pub.assert_not_called()
+    mock_hub.send_to_user.assert_not_called()
 
 
 async def test_consumer_rerun_does_not_duplicate_notifications(
@@ -208,8 +206,8 @@ async def test_consumer_rerun_does_not_duplicate_notifications(
         org_id=org_a.id,
         details={"assignee_id": [None, str(analyst_a.id)]},
     )
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
     # Spy on the module logger's `exception`: the WS-push block swallows and logs
     # any error. `caplog` cannot see logs emitted inside async tests under this
     # project's pytest-asyncio setup, so we assert on the logger call directly.
@@ -230,7 +228,7 @@ async def test_consumer_rerun_does_not_duplicate_notifications(
     # Without the guard the retry falls into the push block, `model_validate(None)`
     # raises, and the swallowing `except` logs it — so this pins the guard.
     # (send_to_user alone can't: model_validate throws before it is ever reached.)
-    mock_pub.assert_awaited_once()
+    mock_hub.send_to_user.assert_awaited_once()
     assert logged_errors == []
 
 
@@ -337,8 +335,8 @@ async def test_muted_event_type_creates_row_but_skips_push(
         org_id=org_a.id,
         details={"assignee_id": [None, str(analyst_a.id)]},
     )
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)
 
@@ -347,7 +345,7 @@ async def test_muted_event_type_creates_row_but_skips_push(
     assert len(targeted) == 1  # DB row still created
     assert targeted[0].event_type == "case.assigned"
     # Muted → no live push for this user.
-    mock_pub.assert_not_called()
+    mock_hub.send_to_user.assert_not_called()
 
 
 async def test_muting_a_different_type_does_not_suppress_assignment_push(
@@ -369,20 +367,17 @@ async def test_muting_a_different_type_does_not_suppress_assignment_push(
         org_id=org_a.id,
         details={"assignee_id": [None, str(analyst_a.id)]},
     )
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)
 
     notifs = await _user_notifs(session, org_a.id)
     targeted = [n for n in notifs if n.user_id == analyst_a.id]
     assert len(targeted) == 1
-    mock_pub.assert_awaited_once()
-    # The muted-type check happens before publish; the published row is the
-    # case.assigned notification (its type is asserted on the row above).
-    _, kwargs = mock_pub.call_args
-    assert kwargs["notification_id"] == str(targeted[0].id)
-    assert targeted[0].event_type == "case.assigned"
+    mock_hub.send_to_user.assert_awaited_once()
+    args, _ = mock_hub.send_to_user.call_args
+    assert args[2]["notification"]["event_type"] == "case.assigned"
 
 
 async def test_non_muting_user_still_gets_push(
@@ -394,12 +389,12 @@ async def test_non_muting_user_still_gets_push(
         org_id=org_a.id,
         details={"assignee_id": [None, str(analyst_a.id)]},
     )
-    mock_pub = AsyncMock()
-    monkeypatch.setattr("app.services.event_bus.publish_user", mock_pub)
+    mock_hub = AsyncMock()
+    monkeypatch.setattr("app.services.websocket_hub.get_hub", lambda: mock_hub)
 
     await notify_feed_consumer(session, row)
 
-    mock_pub.assert_awaited_once()
+    mock_hub.send_to_user.assert_awaited_once()
 
 
 async def test_case_and_task_create_stamp_assignee_into_audit(

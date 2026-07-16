@@ -13,7 +13,6 @@ from app.core.context import RequestIdMiddleware
 from app.core.db import AsyncSessionLocal, init_db, run_migrations
 from app.core.extensions import load_and_mount_extensions, registry
 from app.crud.audit import dispatch_pending_outbox, register_consumer
-from app.services.event_bus import EventListener
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
 from app.services.outbox_maintenance import run_outbox_maintenance_sweep
@@ -35,30 +34,6 @@ def validate_runtime_settings() -> None:
         Fernet(key.encode())
     except Exception as exc:
         raise RuntimeError("SECRET_ENCRYPTION_KEY is not a valid Fernet key.") from exc
-
-
-def warn_if_ha_unsafe_storage() -> None:
-    """Deployment guard (§6.2). The poller coordination (SKIP LOCKED + advisory
-    lock) and the LISTEN/NOTIFY WS bus make catlico-api safe to scale past one
-    replica — but ONLY with shared blob storage. With `effective_storage_protocol
-    == "local"` each replica writes attachments to its own local disk, so a blob
-    uploaded to replica A is invisible to replica B: replicas > 1 is NOT supported
-    on local storage regardless of the coordination fixes.
-
-    We refuse the multi-replica *semantics* with a loud startup warning rather than
-    a hard failure, because a single replica on local FS (the default `make dev`
-    setup) is perfectly valid and must keep working. Operators running replicas > 1
-    must configure S3/SeaweedFS/MinIO (set `S3_ENDPOINT_URL`, which flips
-    `effective_storage_protocol` to "s3") — see DEVELOPMENT.md / the Helm chart
-    (§6.1), where the api Deployment stays pinned to one replica until s3+ is set."""
-    if settings.effective_storage_protocol == "local":
-        logger.warning(
-            "HA guard: effective_storage_protocol=local — attachments are written "
-            "to per-replica local disk. Running more than one API replica is NOT "
-            "supported in this configuration (blobs uploaded to one replica are "
-            "invisible to the others). Configure S3-compatible storage "
-            "(set S3_ENDPOINT_URL) before scaling replicas > 1."
-        )
 
 
 async def _outbox_poller() -> None:
@@ -112,20 +87,9 @@ async def _plugin_push_poller() -> None:
         await asyncio.sleep(settings.PLUGIN_PUSH_INTERVAL_SECONDS)
 
 
-async def _event_bus_catch_up() -> None:
-    """Run one outbox drain pass. Handed to the LISTEN/NOTIFY EventListener as its
-    on-(re)connect catch-up (§6.2): any events committed while this replica's LISTEN
-    connection was down get drained here (re-emitting their NOTIFYs), so a transient
-    connection drop can't strand pending WS fan-out. Idempotent + SKIP-LOCKED-safe,
-    so it coexists with the main outbox poller and other replicas."""
-    async with AsyncSessionLocal() as session:
-        await dispatch_pending_outbox(session)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_settings()
-    warn_if_ha_unsafe_storage()
     if settings.ENVIRONMENT == "local":
         # Local dev convenience: bring the schema to head automatically so
         # `make dev` works on a fresh checkout without a manual `make migrate`.
@@ -146,26 +110,18 @@ async def lifespan(app: FastAPI):
     poller = asyncio.create_task(_outbox_poller())
     maintenance_poller = asyncio.create_task(_plugin_maintenance_poller())
     push_poller = asyncio.create_task(_plugin_push_poller())
-    # WS fan-out bus (§6.2): one dedicated LISTEN connection per replica feeds this
-    # process's hub from the shared `catlico_events` channel, so a client connected
-    # to any replica sees events drained by any other. Works standalone too.
-    event_listener = EventListener(catch_up=_event_bus_catch_up)
-    listener_task = asyncio.create_task(event_listener.run())
     try:
         yield
     finally:
         poller.cancel()
         maintenance_poller.cancel()
         push_poller.cancel()
-        listener_task.cancel()
         with suppress(asyncio.CancelledError):
             await poller
         with suppress(asyncio.CancelledError):
             await maintenance_poller
         with suppress(asyncio.CancelledError):
             await push_poller
-        with suppress(asyncio.CancelledError):
-            await listener_task
 
 
 _docs_url = "/docs" if settings.ENVIRONMENT != "production" else None
