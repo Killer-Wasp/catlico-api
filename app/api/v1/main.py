@@ -10,7 +10,6 @@ from app.api.v1.routes import (
     comments,
     custom_fields,
     events,
-    integrity,
     knowledge_bases,
     logs,
     metrics_dashboards,
@@ -57,7 +56,6 @@ api_router.include_router(comments.router)
 api_router.include_router(case_templates.router)
 api_router.include_router(custom_fields.router)
 api_router.include_router(events.router)
-api_router.include_router(integrity.router)
 api_router.include_router(api_keys.router)
 api_router.include_router(slas.router)
 api_router.include_router(knowledge_bases.router)
