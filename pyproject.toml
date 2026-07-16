@@ -20,20 +20,6 @@ dependencies = [
     "croniter>=3.0",
 ]
 
-# Optional attachment-storage providers (Phase 6 §6.4). The core install ships
-# local + s3 (s3fs, in `dependencies` above); S3-compatible stores (SeaweedFS,
-# MinIO) work with the base install via S3_ENDPOINT_URL. GCS and Azure Blob need
-# their fsspec adapter — install the matching extra and set STORAGE_PROTOCOL:
-#
-#   pip install "catlico-backend[gcs]"     # STORAGE_PROTOCOL=gcs
-#   pip install "catlico-backend[azure]"   # STORAGE_PROTOCOL=az | abfs
-#   uv sync --extra gcs --extra azure
-#
-# See docs/storage-providers.md for credential wiring per provider.
-[project.optional-dependencies]
-gcs = ["gcsfs>=2026.4.0"]
-azure = ["adlfs>=2024.7.0"]
-
 [dependency-groups]
 dev = [
     "httpx>=0.28",
