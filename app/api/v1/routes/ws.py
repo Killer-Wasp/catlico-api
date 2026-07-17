@@ -4,7 +4,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Query, WebSocket, status
-from app.core.db import get_session
+from app.core.db import AsyncSessionLocal
 from app.services.websocket_hub import get_hub
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def ws_activity(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
         return
 
-    async with get_session() as session:
+    async with AsyncSessionLocal() as session:
         user = await get_user_by_id(session, payload.user_id)
         if user is None or not user.is_active:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid user")
@@ -54,24 +54,28 @@ async def ws_activity(
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing organisation_id")
             return
 
-        # Verify user is a member of the org
-        from app.models.organisation_member import OrganisationMember
-        from sqlmodel import select
-        result = await session.execute(
-            select(OrganisationMember).where(
-                OrganisationMember.user_id == user.id,
-                OrganisationMember.organisation_id == organisation_id,
-            )
-        )
-        member = result.scalar_one_or_none()
-        if member is None:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Not a member of organisation")
-            return
-
-        # Membership alone isn't enough: the stream broadcasts the org's case/
-        # task/observable/alert activity, so gate it on the same read capability
-        # the REST activity surface checks (expanded from the member's role).
+        # Authorisation mirrors the REST activity surface (`_resolve_org_permissions`):
+        # superadmins bypass both the membership and permission checks and may
+        # subscribe to any org; everyone else must be a member of the org AND hold
+        # the read:case capability (the stream broadcasts the org's case/task/
+        # observable/alert activity). Applying the membership check unconditionally
+        # here — as an earlier version did — wrongly rejected superadmins who have
+        # no explicit membership row, which REST would have allowed.
         if not user.is_superadmin:
+            from app.models.organisation_member import OrganisationMember
+            from sqlmodel import select
+
+            result = await session.execute(
+                select(OrganisationMember).where(
+                    OrganisationMember.user_id == user.id,
+                    OrganisationMember.organisation_id == organisation_id,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if member is None:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Not a member of organisation")
+                return
+
             from app.models.role import RolePermission, expand_permissions
 
             granted = await session.execute(

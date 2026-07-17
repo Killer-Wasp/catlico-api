@@ -144,8 +144,10 @@ class Settings(BaseSettings):
     # Notifier delivery-ledger rows are pruned after this many days.
     NOTIFIER_DELIVERY_RETENTION_DAYS: int = 30
 
-    # Fernet key (urlsafe base64, 32 bytes) used to encrypt connector secrets at
-    # rest. Required at startup.
+    # Passphrase used to encrypt connector secrets at rest. Any non-empty string
+    # works — a Fernet key is derived from it deterministically (see
+    # app.core.crypto.derive_fernet_key). Required at startup. Changing it makes
+    # previously stored secrets undecryptable.
     SECRET_ENCRYPTION_KEY: str | None = None
 
     # MITRE CTI enterprise-attack STIX bundle (ATT&CK catalog import).

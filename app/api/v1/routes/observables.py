@@ -13,6 +13,7 @@ from app.crud import attachment as attachment_crud
 from app.crud import observable as obs_crud
 from app.crud import tag as tag_crud
 from app.crud.case_share import get_share
+from app.models.case_ import SimilarCasePublic
 from app.models.common import Page
 from app.models.observable import (
     Observable,
@@ -133,6 +134,38 @@ async def get_observable(
     obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
     _require("read:observable", perms)
     return await obs_crud.to_public(session, obs)
+
+
+@router.get("/{observable_id}/related-cases", response_model=list[SimilarCasePublic])
+async def list_observable_related_cases(
+    observable_id: uuid.UUID,
+    ctx: ActiveOrgOrApiKeyContext,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: int = 20,
+) -> list[SimilarCasePublic]:
+    """Cases containing this observable's value (same type + value), visible to
+    the active org, newest case first."""
+    obs, _, perms = await _resolve_observable_visibility(session, ctx, observable_id)
+    _require("read:observable", perms)
+    _require("read:case", perms)
+    rows = await obs_crud.related_cases_for_observable(
+        session, obs, organisation_id=ctx.organisation_id, limit=limit
+    )
+    from app.crud import case_status as case_status_crud
+
+    status_refs = await case_status_crud.refs_for_ids(
+        session, [case.status_id for case, _ in rows]
+    )
+    return [
+        SimilarCasePublic(
+            id=case.id,
+            title=case.title,
+            severity=case.severity,
+            status=status_refs.get(case.status_id),
+            shared_observables=count,
+        )
+        for case, count in rows
+    ]
 
 
 @router.patch("/{observable_id}", response_model=ObservablePublic)

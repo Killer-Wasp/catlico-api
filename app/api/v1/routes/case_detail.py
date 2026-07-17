@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
+    AuthContext,
     CaseAuthContext,
     require_case_owner,
     require_case_permission,
@@ -75,6 +76,7 @@ async def update_case(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Status not found in this organisation",
             )
+        await _enforce_transition_policy(session, case_ctx, update_data["status_id"])
 
     case = await case_crud.update_case(
         session,
@@ -90,6 +92,48 @@ async def update_case(
     return await case_public_resolved(
         case, session, flagged, cfs, organisation_id=case_ctx.organisation_id
     )
+
+
+async def _enforce_transition_policy(
+    session: AsyncSession, case_ctx: CaseAuthContext, to_status_id: int
+) -> None:
+    """Give an installed extension's governance policy a say in a status change.
+
+    Inert in OSS: with no extension the registry has no hook to call and returns
+    ``None``, so transitions stay unrestricted (the contract documented on
+    ``CaseUpdate.status_id``). Only an explicit ``Denial`` blocks — a 403 carrying
+    the rule's own reason text.
+
+    A no-op change (same status) never consults the policy, so re-PATCHing a case
+    with its current status can't be denied by a rule about *moving*.
+    """
+    if case_ctx.case.status_id == to_status_id:
+        return
+
+    from app.core.extensions import registry
+    from app.crud import case_status as case_status_crud
+
+    from_status = await case_status_crud.ref_for_id(session, case_ctx.case.status_id)
+    to_status = await case_status_crud.ref_for_id(session, to_status_id)
+    if from_status is None or to_status is None:
+        return
+
+    denial = await registry.case_transition_denial(
+        case=case_ctx.case,
+        from_status=from_status,
+        to_status=to_status,
+        # Project the case-scoped context down to the plain actor the hook needs:
+        # who, which org, what they may do. The case is already a separate arg.
+        actor=AuthContext(
+            user=case_ctx.user,
+            organisation_id=case_ctx.organisation_id,
+            permissions=case_ctx.permissions,
+        ),
+    )
+    if denial is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=denial.reason
+        )
 
 
 async def _case_owner_org_id(session: AsyncSession, case_id: int) -> str:

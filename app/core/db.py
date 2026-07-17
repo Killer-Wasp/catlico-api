@@ -4,6 +4,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.configs import settings
+from app.core.pulse import outbox_pulse
 
 engine = create_async_engine(settings.SQLALCHEMY_DATABASE_URI, echo=settings.DB_ECHO)
 
@@ -38,6 +39,11 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             raise
         else:
             await session.commit()
+            # Now that the audit + outbox rows are visible, wake the outbox poller
+            # so the fan-out (plugin dispatch et al.) starts immediately instead of
+            # on its next fixed tick. Only fires when record_audit wrote a row.
+            if session.info.pop("outbox_dirty", False):
+                outbox_pulse.nudge()
 
 
 async def ensure_default_superadmin(session: AsyncSession) -> None:

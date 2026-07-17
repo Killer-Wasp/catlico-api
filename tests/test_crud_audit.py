@@ -54,6 +54,18 @@ async def test_record_audit_writes_audit_and_outbox(session):
     assert row.payload["action"] == "create"
 
 
+async def test_record_audit_marks_session_outbox_dirty(session):
+    # The flag is how get_session knows to wake the outbox poller post-commit.
+    session.info.pop("outbox_dirty", None)
+    case = await _a_case(session)
+
+    await audit_crud.record_audit(
+        session, action="create", obj=case, context=case, actor="user-123"
+    )
+
+    assert session.info.get("outbox_dirty") is True
+
+
 async def test_record_audit_redacts_secrets(session):
     case = await _a_case(session)
 

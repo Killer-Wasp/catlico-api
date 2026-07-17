@@ -3,7 +3,9 @@ import pytest
 from httpx import AsyncClient
 
 from app.crud import case_ as case_crud
+from app.crud import tag as tag_crud
 from app.models.case_ import CaseCreate
+from app.models.tag import TaggableType
 
 
 def _headers(token, org_id):
@@ -203,6 +205,72 @@ async def test_cases_by_technique(
 
     missing = await client.get("/api/v1/patterns/T0000/cases", headers=h)
     assert missing.status_code == 404
+
+
+async def _import_pattern(client, h, external_id, name):
+    r = await client.post(
+        "/api/v1/patterns/import",
+        json=[{"external_id": external_id, "name": name}],
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+
+async def _tag_case(session, case_id, tags):
+    await tag_crud.set_tags(session, TaggableType.case, str(case_id), tags)
+    await session.commit()
+
+
+async def test_cases_by_technique_matches_tagged_case(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """A case tagged with a bare technique id (no formal TTP procedure) still
+    surfaces as a linked case — analysts commonly tag rather than proceduralise."""
+    h = _headers(analyst_a_token, org_a.id)
+    await _import_pattern(client, h, "T1189", "Drive-by Compromise")
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _tag_case(session, case.id, ["web", "malvertising", "T1189"])
+
+    r = await client.get("/api/v1/patterns/T1189/cases", headers=h)
+    assert r.status_code == 200, r.text
+    assert [c["id"] for c in r.json()] == [case.id]
+
+
+async def test_case_stats_counts_tagged_and_deduped_with_procedure(
+    client: AsyncClient, session, org_a, builtin_roles, analyst_a, analyst_a_token
+):
+    """A tagged case counts in the matrix, and a case linked BOTH by tag and by
+    procedure is counted once (the union collapses the duplicate pair)."""
+    h = _headers(analyst_a_token, org_a.id)
+    await _import_pattern(client, h, "T1189", "Drive-by Compromise")
+    tagged = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _tag_case(session, tagged.id, ["T1189"])
+    both = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _tag_case(session, both.id, ["T1189"])
+    await _link_ttp(client, h, both.id, "T1189", "Drive-by Compromise")
+
+    stats = await client.get("/api/v1/patterns/case-stats", headers=h)
+    assert stats.status_code == 200, stats.text
+    assert stats.json() == {"T1189": 2}
+
+
+async def test_tagged_case_link_is_org_scoped(
+    client: AsyncClient, session, org_a, org_b, builtin_roles,
+    analyst_a, analyst_a_token, analyst_b, analyst_b_token,
+):
+    """Tag-based linking respects org visibility, like the procedure path."""
+    ha = _headers(analyst_a_token, org_a.id)
+    hb = _headers(analyst_b_token, org_b.id)
+    await _import_pattern(client, ha, "T1189", "Drive-by Compromise")
+    case_a = await _make_case(session, org_a, builtin_roles, analyst_a)
+    await _tag_case(session, case_a.id, ["T1189"])
+
+    assert (await client.get("/api/v1/patterns/case-stats", headers=ha)).json() == {
+        "T1189": 1
+    }
+    assert (await client.get("/api/v1/patterns/case-stats", headers=hb)).json() == {}
+    assert [c["id"] for c in
+            (await client.get("/api/v1/patterns/T1189/cases", headers=hb)).json()] == []
 
 
 async def test_case_stats_dedups_one_case_with_repeated_technique(

@@ -1,9 +1,7 @@
 """F1: MITRE ATT&CK pattern and procedure CRUD."""
 
-import uuid
-
+from sqlalchemy import Integer, String, and_, cast, func, or_
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -11,6 +9,26 @@ from app.crud.pagination import paginate
 from app.models.case_ import Case
 from app.models.case_share import CaseShare
 from app.models.pattern import Pattern, PatternImportItem, Procedure, ProcedureReplace
+from app.models.tag import Tag, TaggableType, Tagging
+
+
+def _case_tagged_with_technique(external_id: str):
+    """EXISTS clause: the current-row Case carries a bare technique-id tag
+    (e.g. `T1189`, `T1566.002`) matching `external_id`. Analysts commonly tag a
+    case with the technique id instead of (or as well as) creating a formal TTP
+    procedure, so the matrix treats either as "observed this technique"."""
+    return (
+        select(Tagging.tag_id)
+        .join(Tag, Tag.id == Tagging.tag_id)
+        .where(
+            Tagging.taggable_type == TaggableType.case,
+            Tagging.taggable_id == cast(Case.id, String),
+            Tag.namespace == "",
+            Tag.value == "",
+            Tag.predicate == external_id,
+        )
+        .exists()
+    )
 
 
 # --- Patterns ---
@@ -70,34 +88,82 @@ async def import_patterns(
 
 
 async def case_stats(session: AsyncSession, organisation_id: str) -> dict[str, int]:
-    """Distinct visible-case count per technique external_id for one org."""
-    stmt = (
-        select(Pattern.external_id, func.count(func.distinct(Procedure.case_id)))
-        .join(Procedure, Procedure.pattern_id == Pattern.id)
-        .join(Case, Case.id == Procedure.case_id)
+    """Distinct visible-case count per technique external_id for one org.
+
+    A case counts for a technique if it either links the pattern via a Procedure
+    (formal TTP) or carries the technique id as a plain tag — see
+    `_case_tagged_with_technique`. The two sources are UNION-ed as
+    (external_id, case_id) pairs so a case linked both ways is counted once."""
+    visible = (
+        select(Case.id)
         .join(CaseShare, CaseShare.case_id == Case.id)
         .where(
             CaseShare.organisation_id == organisation_id,
             Case.deleted_at.is_(None),
         )
-        .group_by(Pattern.external_id)
+        .subquery()
     )
+    by_procedure = (
+        select(
+            Pattern.external_id.label("external_id"),
+            Procedure.case_id.label("case_id"),
+        )
+        .join(Procedure, Procedure.pattern_id == Pattern.id)
+        .where(Procedure.case_id.in_(select(visible.c.id)))
+    )
+    by_tag = (
+        select(
+            Pattern.external_id.label("external_id"),
+            cast(Tagging.taggable_id, Integer).label("case_id"),
+        )
+        .join(
+            Tag,
+            and_(
+                Tag.predicate == Pattern.external_id,
+                Tag.namespace == "",
+                Tag.value == "",
+            ),
+        )
+        .join(
+            Tagging,
+            and_(
+                Tagging.tag_id == Tag.id,
+                Tagging.taggable_type == TaggableType.case,
+            ),
+        )
+        .where(cast(Tagging.taggable_id, Integer).in_(select(visible.c.id)))
+    )
+    pairs = by_procedure.union(by_tag).subquery()
+    stmt = select(
+        pairs.c.external_id, func.count(func.distinct(pairs.c.case_id))
+    ).group_by(pairs.c.external_id)
     rows = (await session.execute(stmt)).all()
     return {external_id: count for external_id, count in rows}
 
 
 async def cases_for_pattern(
-    session: AsyncSession, pattern_id: uuid.UUID, organisation_id: str
+    session: AsyncSession, pattern: Pattern, organisation_id: str
 ) -> list[Case]:
-    """Org-visible, non-deleted cases linked to a pattern, newest first."""
+    """Org-visible, non-deleted cases that observed a technique, newest first —
+    linked either by a Procedure (formal TTP) or by a bare technique-id tag."""
+    linked_by_procedure = (
+        select(Procedure.id)
+        .where(
+            Procedure.case_id == Case.id,
+            Procedure.pattern_id == pattern.id,
+        )
+        .exists()
+    )
     stmt = (
         select(Case)
-        .join(Procedure, Procedure.case_id == Case.id)
         .join(CaseShare, CaseShare.case_id == Case.id)
         .where(
-            Procedure.pattern_id == pattern_id,
             CaseShare.organisation_id == organisation_id,
             Case.deleted_at.is_(None),
+            or_(
+                linked_by_procedure,
+                _case_tagged_with_technique(pattern.external_id),
+            ),
         )
         .order_by(Case.id.desc())
         .distinct()

@@ -13,6 +13,7 @@ from app.models.plugin_runner import (
     PluginRunner as PluginRunnerModel,
     PluginVersion,
     RunnerPluginInstallation,
+    normalize_plugin_descriptor,
 )
 
 
@@ -35,7 +36,12 @@ async def _upsert_plugin_inventory(
     plugins: list[dict],
 ) -> None:
     now = datetime.now(UTC)
-    for manifest in plugins:
+    for descriptor in plugins:
+        # Runner reports a load envelope on the sync path; unwrap to the real
+        # manifest and learn whether the plugin actually loaded. A failed plugin
+        # is recorded but never marked installed/active, so it can't be dispatched
+        # (its run would accept but never produce a result).
+        manifest, loaded_ok, load_error = normalize_plugin_descriptor(descriptor)
         plugin_id = manifest["id"]
         version_str = manifest["version"]
         version_id = f"{plugin_id}@{version_str}"
@@ -64,35 +70,40 @@ async def _upsert_plugin_inventory(
                 commit_sha=manifest.get("commit_sha", ""),
                 image_digest=manifest.get("image_digest", ""),
                 installed_at=now,
-                status="active",
+                status="active" if loaded_ok else "failed",
+                install_log=load_error,
             )
             session.add(pver)
         else:
             pver.manifest = manifest
-            pver.status = "active"
+            pver.status = "active" if loaded_ok else "failed"
+            pver.install_log = load_error
         await session.flush()
         installation = await session.get(
             RunnerPluginInstallation,
             (runner.id, version_id),
         )
+        install_status = "installed" if loaded_ok else "failed"
         if installation is None:
             installation = RunnerPluginInstallation(
                 runner_id=runner.id,
                 plugin_version_id=version_id,
-                install_status="installed",
+                install_status=install_status,
                 health_status=manifest.get("health_status"),
                 installed_at=now,
                 last_seen_at=now,
             )
             session.add(installation)
         else:
-            installation.install_status = "installed"
+            installation.install_status = install_status
             installation.health_status = manifest.get(
                 "health_status",
                 installation.health_status,
             )
             installation.last_seen_at = now
-        pdef.active_version_id = version_id
+        # Only a plugin that loaded becomes the dispatchable active version.
+        if loaded_ok:
+            pdef.active_version_id = version_id
     await session.flush()
 
 

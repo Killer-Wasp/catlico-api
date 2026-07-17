@@ -10,7 +10,36 @@ from app.models.plugin_runner import (
     PluginRunDaily,
     PluginRunner,
     RunnerPluginInstallation,
+    normalize_plugin_descriptor,
 )
+
+
+def test_normalize_plugin_descriptor_unwraps_load_envelope():
+    # The /internal/plugins sync shape: real manifest nested under "manifest".
+    inner = {"id": "acme", "version": "1.0.0", "capabilities": ["enrichment"]}
+    envelope = {"id": "acme", "version": "1.0.0", "status": "ready",
+                "error": None, "manifest": inner}
+    manifest, loaded_ok, error = normalize_plugin_descriptor(envelope)
+    assert manifest is inner  # unwrapped — capabilities/triggers now readable
+    assert loaded_ok is True
+    assert error is None
+
+
+def test_normalize_plugin_descriptor_flags_failed_load():
+    envelope = {"id": "acme", "version": "1.0.0", "status": "failed",
+                "error": "venv sync failed", "manifest": {"id": "acme", "version": "1.0.0"}}
+    _, loaded_ok, error = normalize_plugin_descriptor(envelope)
+    assert loaded_ok is False
+    assert error == "venv sync failed"
+
+
+def test_normalize_plugin_descriptor_passes_bare_manifest_through():
+    # The /register shape: a bare manifest, taken as loaded OK.
+    bare = {"id": "acme", "version": "1.0.0", "capabilities": ["enrichment"]}
+    manifest, loaded_ok, error = normalize_plugin_descriptor(bare)
+    assert manifest is bare
+    assert loaded_ok is True
+    assert error is None
 
 
 def _unique_column_sets(table) -> set[tuple[str, ...]]:

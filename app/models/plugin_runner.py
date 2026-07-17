@@ -120,6 +120,27 @@ class PluginLatestCheck(SQLModel):
 # --- Plugin definition & versioning ---
 
 
+def normalize_plugin_descriptor(descriptor: dict) -> tuple[dict, bool, str | None]:
+    """Normalize a runner-reported plugin entry to ``(manifest, loaded_ok, error)``.
+
+    Runners report a plugin in two shapes. The ``/register`` payload sends a bare
+    manifest; the ``/internal/plugins`` sync endpoint wraps it in a *load
+    envelope* — ``{id, version, status, error, manifest}`` — so a plugin that
+    failed to load (e.g. a broken venv sync) still round-trips with its parsed
+    manifest and the failure reason. Callers must unwrap the envelope before
+    storing ``manifest`` (otherwise ``capabilities``/``triggers`` read as null),
+    and must not present a failed plugin as installed/runnable.
+
+    Detect the envelope by its nested ``manifest`` dict; a bare manifest is taken
+    as loaded OK. ``loaded_ok`` is false only when the envelope's ``status`` is
+    ``"failed"``.
+    """
+    inner = descriptor.get("manifest")
+    if isinstance(inner, dict):
+        return inner, descriptor.get("status") != "failed", descriptor.get("error")
+    return descriptor, True, None
+
+
 class PluginDefinition(TimestampMixin, table=True):
     """A plugin known to Catlico. Global catalog row; orgs opt in separately."""
 

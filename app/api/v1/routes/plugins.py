@@ -372,16 +372,18 @@ async def _manual_run_eligibility(
 _MANUAL_ENTITY_TYPES = {"observable", "case", "alert"}
 
 
-async def _assert_manual_entity_visible(
+async def _resolve_manual_entity(
     session: AsyncSession,
     ctx: ActiveOrgOrApiKeyContext,
     entity_type: str,
     entity_id: str,
-) -> None:
+):
     """Raise 404/403 unless the caller may see (and thus enrich/respond on) the
-    target entity, reusing each entity's canonical read-visibility rule. This is
-    the sole visibility check on the generic ``/plugins/{id}/run`` path, so it must
-    stand on its own even though the dedicated per-entity routes also gate."""
+    target entity, reusing each entity's canonical read-visibility rule; return
+    the resolved entity so the caller can snapshot it into the manual envelope.
+    This is the sole visibility check on the generic ``/plugins/{id}/run`` path,
+    so it must stand on its own even though the dedicated per-entity routes also
+    gate."""
     if entity_type == "observable":
         from app.api.v1.routes.observables import _resolve_observable_visibility
 
@@ -391,9 +393,9 @@ async def _assert_manual_entity_visible(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Observable not found"
             )
-        _, _, effective_perms = await _resolve_observable_visibility(session, ctx, oid)
+        obs, _, effective_perms = await _resolve_observable_visibility(session, ctx, oid)
         _require("read:observable", effective_perms)
-        return
+        return obs
     if entity_type == "case":
         from app.api.deps import _resolve_case_context
 
@@ -405,7 +407,7 @@ async def _assert_manual_entity_visible(
             )
         case_ctx = await _resolve_case_context(case_id, ctx, session)
         _require("read:case", case_ctx.permissions)
-        return
+        return case_ctx.case
     # alert
     from app.api.v1.routes.alerts import _resolve_owned_alert
 
@@ -415,8 +417,39 @@ async def _assert_manual_entity_visible(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found"
         )
-    await _resolve_owned_alert(session, ctx, alert_id)
+    alert = await _resolve_owned_alert(session, ctx, alert_id)
     _require("read:alert", ctx.permissions)
+    return alert
+
+
+def _manual_entity_snapshot(entity_type: str, entity) -> dict:
+    """The ``event.data`` payload for a manual run, matching the shape the
+    ``<entity>.created`` event carries so a handler wired to both triggers reads
+    the same fields either way (see ``record_audit`` ``details=`` at each create
+    site). An unrecognised type yields ``{}`` rather than guessing."""
+    if entity_type == "observable":
+        return {
+            "observable_type": entity.observable_type,
+            "data": entity.data,
+            "ioc": entity.ioc,
+        }
+    if entity_type == "case":
+        snapshot = {
+            "title": entity.title,
+            "severity": entity.severity,
+            "tlp": entity.tlp,
+            "pap": entity.pap,
+        }
+        if entity.assignee_id:
+            snapshot["assignee_id"] = str(entity.assignee_id)
+        return snapshot
+    if entity_type == "alert":
+        return {
+            "type": entity.type,
+            "source": entity.source,
+            "title": entity.title,
+        }
+    return {}
 
 
 async def create_manual_plugin_run(
@@ -462,7 +495,7 @@ async def create_manual_plugin_run(
     # only the body): resolve the entity through the same visibility rule its read
     # routes use, so no org can trigger a run — enrichment spend + result writes —
     # against another org's entity by guessing its id.
-    await _assert_manual_entity_visible(session, ctx, entity_type, entity_id)
+    entity = await _resolve_manual_entity(session, ctx, entity_type, entity_id)
 
     from app.services.plugin_dispatch import (
         _enqueue_for_healthy_runners,
@@ -475,6 +508,7 @@ async def create_manual_plugin_run(
         entity_type=entity_type,
         entity_id=entity_id,
         actor=f"user:{ctx.user.id}",
+        data=_manual_entity_snapshot(entity_type, entity),
         force=force,
     )
     await _enqueue_for_healthy_runners(session, envelope)
@@ -774,7 +808,15 @@ async def enable_plugin(
         session, action="enable", object_type="plugin", object_id=plugin_id,
         actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
     )
-    return {"enabled": True}
+    # Return the full plugin view (not just `{enabled}`) so the client has the
+    # updated resource — display name, runner, config-completeness — to render.
+    cfg = await session.get(PluginConfig, (ctx.organisation_id, plugin_id))
+    return _plugin_public(
+        pdef,
+        org_plugin,
+        await _runner_ids_for_definition(session, pdef),
+        cfg,
+    )
 
 
 @router.post("/{plugin_id}/disable")
@@ -784,16 +826,26 @@ async def disable_plugin(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
     _require("write:connector", ctx.permissions)
+    pdef = await session.get(PluginDefinition, plugin_id)
+    if pdef is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plugin not found")
     org_plugin = await session.get(OrgPlugin, (ctx.organisation_id, plugin_id))
-    if org_plugin is None:
-        return {"enabled": False}
-    org_plugin.enabled = False
-    await session.flush()
-    await plugin_audit.record_admin_action(
-        session, action="disable", object_type="plugin", object_id=plugin_id,
-        actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
+    if org_plugin is not None and org_plugin.enabled:
+        org_plugin.enabled = False
+        await session.flush()
+        await plugin_audit.record_admin_action(
+            session, action="disable", object_type="plugin", object_id=plugin_id,
+            actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
+        )
+    # Return the full plugin view (mirrors `enable`) so the client can render the
+    # updated resource rather than infer it from a bare `{enabled}` flag.
+    cfg = await session.get(PluginConfig, (ctx.organisation_id, plugin_id))
+    return _plugin_public(
+        pdef,
+        org_plugin,
+        await _runner_ids_for_definition(session, pdef),
+        cfg,
     )
-    return {"enabled": False}
 
 
 # --- Auto-run ---
@@ -1007,19 +1059,29 @@ async def test_plugin_config(
 async def list_plugin_runs(
     ctx: ActiveOrgOrApiKeyContext,
     session: Annotated[AsyncSession, Depends(get_session)],
+    status: str | None = None,
+    plugin_id: str | None = None,
+    runner_id: str | None = None,
+    skip: int = 0,
+    limit: int = 100,
 ) -> list[dict]:
+    """The org's plugin runs, most-recent first. Optional exact-match filters
+    (status/plugin/runner) are applied server-side so they narrow the whole
+    dataset, not just a fetched page; ``skip``/``limit`` paginate (limit capped at
+    500). The client sorts the returned page."""
     _require("read:connector", ctx.permissions)
-    result = await session.execute(
-        select(PluginRun)
-        .where(PluginRun.organisation_id == ctx.organisation_id)
-        .order_by(PluginRun.created_at.desc())
-        .limit(100)
-    )
-    runs = result.scalars().all()
-    return [
-        _plugin_run_public(r)
-        for r in runs
-    ]
+    limit = max(1, min(limit, 500))
+    skip = max(0, skip)
+    stmt = select(PluginRun).where(PluginRun.organisation_id == ctx.organisation_id)
+    if status:
+        stmt = stmt.where(PluginRun.status == status)
+    if plugin_id:
+        stmt = stmt.where(PluginRun.plugin_id == plugin_id)
+    if runner_id:
+        stmt = stmt.where(PluginRun.runner_id == runner_id)
+    stmt = stmt.order_by(PluginRun.created_at.desc()).offset(skip).limit(limit)
+    runs = (await session.execute(stmt)).scalars().all()
+    return [_plugin_run_public(r) for r in runs]
 
 
 @runs_router.get("/{run_id}")

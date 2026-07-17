@@ -459,6 +459,38 @@ async def similar_cases_for_case(
     return [(case, count) for case, count in rows]
 
 
+async def related_cases_for_observable(
+    session: AsyncSession,
+    observable: Observable,
+    *,
+    organisation_id: str,
+    limit: int = 20,
+) -> list[tuple[Case, int]]:
+    """Cases that contain this observable's value (same type + value) — the
+    observable drawer's "Related cases". Only cases visible to `organisation_id`
+    (via a CaseShare) are returned, ordered by case id descending. Each result
+    carries the count of matching observables in that case."""
+    case_obs = aliased(Observable)
+    overlap = func.count(func.distinct(case_obs.id))
+    stmt = (
+        select(Case, overlap)
+        .join(case_obs, case_obs.case_id == Case.id)
+        .join(CaseShare, CaseShare.case_id == Case.id)
+        .where(
+            case_obs.observable_type == observable.observable_type,
+            case_obs.data == observable.data,
+            case_obs.deleted_at.is_(None),
+            Case.deleted_at.is_(None),
+            CaseShare.organisation_id == organisation_id,
+        )
+        .group_by(Case.id)
+        .order_by(Case.id.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [(case, count) for case, count in rows]
+
+
 async def list_observables_for_org(
     session: AsyncSession,
     *,

@@ -136,3 +136,88 @@ async def test_sync_runner_fetches_plugin_inventory(
     plugins = await client.get("/api/v1/plugins", headers=_h(admin_token, org_a.id))
     assert plugins.status_code == 200, plugins.text
     assert plugins.json()[0]["id"] == SAMPLE_MANIFEST["id"]
+
+
+# The runner's real /internal/plugins response wraps each manifest in a load
+# envelope; these two tests exercise that shape (the sync test above uses a bare
+# manifest, which is why the wrap-not-unwrapped bug slipped through).
+
+# A minimal, config-free manifest so config-completeness never blocks runnable.
+_ENVELOPE_MANIFEST = {
+    "id": "envtest",
+    "name": "Env Test",
+    "version": "0.1.0",
+    "capabilities": ["enrichment"],
+    "triggers": ["observable.created"],
+}
+
+
+def _envelope(status="ready", error=None):
+    return {
+        "id": _ENVELOPE_MANIFEST["id"],
+        "version": _ENVELOPE_MANIFEST["version"],
+        "status": status,
+        "error": error,
+        "manifest": _ENVELOPE_MANIFEST,
+    }
+
+
+async def test_sync_unwraps_load_envelope_and_makes_plugin_runnable(
+    client: AsyncClient, admin_token, org_a, monkeypatch,
+):
+    async def fake_runner_get_json(base_url: str, path: str):
+        return {"plugins": [_envelope(status="ready")]}
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.plugin_runners._runner_get_json", fake_runner_get_json
+    )
+    await _register(client)
+    r = await client.post(
+        "/api/v1/plugin-runners/runner-1/sync",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 200, r.text
+
+    # The stored manifest is unwrapped — capabilities/triggers are readable, not
+    # buried under the envelope (which is what broke the capability filter).
+    plugins = await client.get("/api/v1/plugins", headers=_h(admin_token, org_a.id))
+    stored = next(p for p in plugins.json() if p["id"] == "envtest")
+    assert stored["manifest"]["capabilities"] == ["enrichment"]
+    assert stored["manifest"]["triggers"] == ["observable.created"]
+
+    # Enable it, then it shows up in the capability-filtered runnable list.
+    await client.post("/api/v1/plugins/envtest/enable", headers=_h(admin_token, org_a.id))
+    runnable = await client.get(
+        "/api/v1/plugins/runnable?capability=enrichment", headers=_h(admin_token, org_a.id)
+    )
+    assert runnable.status_code == 200, runnable.text
+    assert any(p["id"] == "envtest" for p in runnable.json())
+
+
+async def test_sync_failed_load_is_recorded_but_not_runnable(
+    client: AsyncClient, admin_token, org_a, monkeypatch,
+):
+    async def fake_runner_get_json(base_url: str, path: str):
+        return {"plugins": [_envelope(status="failed", error="venv sync failed")]}
+
+    monkeypatch.setattr(
+        "app.api.v1.routes.plugin_runners._runner_get_json", fake_runner_get_json
+    )
+    await _register(client)
+    r = await client.post(
+        "/api/v1/plugin-runners/runner-1/sync",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert r.status_code == 200, r.text
+
+    # The plugin is still catalogued (with an unwrapped manifest)...
+    plugins = await client.get("/api/v1/plugins", headers=_h(admin_token, org_a.id))
+    assert any(p["id"] == "envtest" for p in plugins.json())
+
+    # ...but a plugin that failed to load is never dispatchable, even once enabled.
+    await client.post("/api/v1/plugins/envtest/enable", headers=_h(admin_token, org_a.id))
+    runnable = await client.get(
+        "/api/v1/plugins/runnable?capability=enrichment", headers=_h(admin_token, org_a.id)
+    )
+    assert runnable.status_code == 200, runnable.text
+    assert not any(p["id"] == "envtest" for p in runnable.json())

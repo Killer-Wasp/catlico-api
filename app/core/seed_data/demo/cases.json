@@ -29,7 +29,7 @@
         },
         {
           "observable_type": "url",
-          "data": "hxxps://cdn-au-billing[.]net/invoice.php",
+          "data": "https://cdn-au-billing.net/invoice.php",
           "message": "URLscan complete",
           "ioc": true
         },
@@ -89,7 +89,7 @@
         },
         {
           "observable_type": "domain",
-          "data": "update-winsec[.]top",
+          "data": "update-winsec.top",
           "message": "C2 domain resolving to 45.155.205.233",
           "ioc": true,
           "sighted": true
@@ -120,7 +120,7 @@
       "observables": [
         {
           "observable_type": "domain",
-          "data": "tempfileshare[.]io",
+          "data": "tempfileshare.io",
           "message": "Unapproved file-sharing service used for exfiltration",
           "ioc": true,
           "sighted": true
@@ -134,7 +134,7 @@
         },
         {
           "observable_type": "url",
-          "data": "hxxps://tempfileshare[.]io/d/4f8a2c91b3d6",
+          "data": "https://tempfileshare.io/d/4f8a2c91b3d6",
           "message": "Exfiltration download link identified in CASB logs",
           "ioc": true
         }
@@ -266,7 +266,7 @@
       "observables": [
         {
           "observable_type": "url",
-          "data": "hxxps://secure-update-cdn[.]live/patch",
+          "data": "https://secure-update-cdn.live/patch",
           "message": "Recorded during investigation",
           "ioc": true,
           "sighted": true

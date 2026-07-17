@@ -2,7 +2,6 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 
-from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,6 +11,7 @@ from app.core.configs import settings
 from app.core.context import RequestIdMiddleware
 from app.core.db import AsyncSessionLocal, init_db, run_migrations
 from app.core.extensions import load_and_mount_extensions, registry
+from app.core.pulse import outbox_pulse, push_pulse
 from app.crud.audit import dispatch_pending_outbox, register_consumer
 from app.services.notifier_delivery import notifier_delivery_consumer
 from app.services.outbox_events import notify_feed_consumer
@@ -27,13 +27,8 @@ OUTBOX_POLL_INTERVAL = 5.0
 
 
 def validate_runtime_settings() -> None:
-    key = settings.SECRET_ENCRYPTION_KEY
-    if not key:
+    if not settings.SECRET_ENCRYPTION_KEY:
         raise RuntimeError("SECRET_ENCRYPTION_KEY must be set.")
-    try:
-        Fernet(key.encode())
-    except Exception as exc:
-        raise RuntimeError("SECRET_ENCRYPTION_KEY is not a valid Fernet key.") from exc
 
 
 async def _outbox_poller() -> None:
@@ -44,11 +39,16 @@ async def _outbox_poller() -> None:
         try:
             async with AsyncSessionLocal() as session:
                 await dispatch_pending_outbox(session)
+                # A drain that queued plugin deliveries wakes the push poller now,
+                # instead of leaving them to wait for its next fixed tick.
+                if session.info.pop("push_dirty", False):
+                    push_pulse.nudge()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — poller must never die on a transient error
             logger.exception("outbox poller iteration failed")
-        await asyncio.sleep(OUTBOX_POLL_INTERVAL)
+        # Wake early when a request commits an outbox row; else drain on the interval.
+        await outbox_pulse.wait(OUTBOX_POLL_INTERVAL)
 
 
 async def _plugin_maintenance_poller() -> None:
@@ -84,7 +84,8 @@ async def _plugin_push_poller() -> None:
             raise
         except Exception:  # noqa: BLE001 — poller must never die on a transient error
             logger.exception("plugin push poller failed")
-        await asyncio.sleep(settings.PLUGIN_PUSH_INTERVAL_SECONDS)
+        # Wake early when the outbox drain queues a delivery; else push on the interval.
+        await push_pulse.wait(settings.PLUGIN_PUSH_INTERVAL_SECONDS)
 
 
 @asynccontextmanager

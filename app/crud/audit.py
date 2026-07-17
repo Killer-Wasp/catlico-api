@@ -178,6 +178,10 @@ async def record_audit(
         )
     )
     await session.flush()
+    # Signal to the request unit-of-work (get_session) that an outbox row was
+    # written, so it can wake the outbox poller once this transaction commits
+    # rather than leaving the row to wait for the poller's next fixed tick.
+    session.info["outbox_dirty"] = True
     return audit
 
 

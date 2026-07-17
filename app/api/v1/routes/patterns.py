@@ -127,7 +127,7 @@ async def pattern_cases(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Unknown technique"
         )
-    cases = await pattern_crud.cases_for_pattern(session, pattern.id, ctx.organisation_id)
+    cases = await pattern_crud.cases_for_pattern(session, pattern, ctx.organisation_id)
     from app.crud import case_status as case_status_crud
 
     status_refs = await case_status_crud.refs_for_ids(

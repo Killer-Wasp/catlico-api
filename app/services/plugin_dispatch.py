@@ -121,6 +121,11 @@ async def _enqueue_for_healthy_runners(session: AsyncSession, envelope: dict) ->
             )
         )
         created += 1
+    if created:
+        # Tell the outbox poller (which drives this drain) to wake the push poller
+        # once it commits, so a freshly queued delivery is pushed without waiting
+        # for the push poller's next fixed tick.
+        session.info["push_dirty"] = True
     return created
 
 
@@ -150,12 +155,19 @@ def build_manual_envelope(
     entity_type: str,
     entity_id: str,
     actor: str,
+    data: dict | None = None,
     force: bool = False,
 ) -> dict:
     """Synthesize an on-demand manual-run envelope (mirrors the cron precedent in
     ``schedule_due_events``). ``target_plugin_id`` makes the runner execute
     exactly one plugin; ``manual`` is the server-side flag ``create_run`` reads
-    back to grant the analyst-intent relaxations."""
+    back to grant the analyst-intent relaxations.
+
+    ``data`` is the entity snapshot the plugin reads off ``event.data``. A plugin
+    registers the same handler for ``<entity>.created`` and ``<entity>.manual``,
+    so the manual envelope must carry the same-shaped payload the created event
+    does (e.g. ``observable_type``/``data``/``ioc`` for an observable) — otherwise
+    a handler that reads ``event.data`` sees an empty dict and errors."""
     return {
         "event_id": manual_event_id(org_id, plugin_id, entity_type, entity_id, force=force),
         "event_type": f"{entity_type}{MANUAL_EVENT_TYPE_SUFFIX}",
@@ -163,7 +175,7 @@ def build_manual_envelope(
         "actor": actor,
         "object": {"type": entity_type, "id": entity_id},
         "context": {"type": "unknown", "id": ""},
-        "data": {},
+        "data": data or {},
         "manual": True,
         "target_plugin_id": plugin_id,
         "attempt": 1,

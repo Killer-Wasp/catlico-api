@@ -114,6 +114,27 @@ async def test_consumer_skips_events_no_plugin_wants(session, org_a):
     assert (await session.execute(select(PluginEventDelivery))).first() is None
 
 
+async def test_enqueue_marks_session_push_dirty_when_delivery_created(session, org_a):
+    # The flag is how the outbox poller knows to wake the push poller post-commit.
+    session.info.pop("push_dirty", None)
+    await _seed_runner(session)
+    await _seed_subscribed_plugin(session)
+
+    await plugin_event_consumer(session, _outbox_row())
+
+    assert session.info.get("push_dirty") is True
+
+
+async def test_enqueue_leaves_push_dirty_unset_when_nothing_queued(session, org_a):
+    # No healthy runner -> no delivery created -> no reason to wake the push poller.
+    session.info.pop("push_dirty", None)
+    await _seed_subscribed_plugin(session)
+
+    await plugin_event_consumer(session, _outbox_row())
+
+    assert "push_dirty" not in session.info
+
+
 async def test_push_delivers_with_valid_signature(session, org_a):
     runner = await _seed_runner(session)
     envelope = {"event_id": "audit:1", "event_type": "observable.created",

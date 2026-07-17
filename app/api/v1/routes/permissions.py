@@ -12,7 +12,7 @@ class PermissionInfo(SQLModel):
     key: str
     #: Display grouping for the UI matrix (one row per domain).
     domain: str
-    #: read | write | delete | run — the column the checkbox sits in.
+    #: read | write | delete | manage — the column the checkbox sits in.
     kind: str
     label: str
     description: str

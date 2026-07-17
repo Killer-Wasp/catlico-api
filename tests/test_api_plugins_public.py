@@ -153,7 +153,12 @@ async def test_enable_plugin(
 
     r = await client.post(f"/api/v1/plugins/{plugin_id}/enable", headers=h)
     assert r.status_code == 200, r.text
-    assert r.json()["enabled"] is True
+    body = r.json()
+    assert body["enabled"] is True
+    # Returns the full plugin view, not a bare `{enabled}` — the client renders
+    # display_name from it (regression guard for "undefined enabled" toasts).
+    assert body["id"] == plugin_id
+    assert body["display_name"]
 
 
 async def test_disable_plugin(
@@ -466,7 +471,7 @@ async def test_get_plugin_run_detail(
 
 
 async def test_manual_plugin_run_for_observable(
-    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a,
+    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a, session,
 ):
     plugin_id, _ = await _setup_runner_and_plugin(client, admin_token)
     await client.post(
@@ -498,6 +503,26 @@ async def test_manual_plugin_run_for_observable(
     assert data["event_object_type"] == "observable"
     assert data["event_object_id"] == observable.json()["id"]
     assert data["status"] == "queued"
+
+    # The manual envelope must carry the observable snapshot on `event.data`,
+    # same shape as the `observable.created` event — a handler wired to both
+    # triggers (which reads event.data["observable_type"]) errors on an empty
+    # payload otherwise. Regression for R-c9fc38 (InputError: observable event
+    # has no observable_type).
+    from app.models.plugin_runner import PluginEventDelivery
+
+    delivery = (
+        await session.execute(
+            select(PluginEventDelivery).where(
+                PluginEventDelivery.event_id == data["event_id"]
+            )
+        )
+    ).scalar_one()
+    assert delivery.envelope["data"] == {
+        "observable_type": "ip",
+        "data": "1.2.3.4",
+        "ioc": False,
+    }
 
     again = await client.post(
         f"/api/v1/observables/{observable.json()['id']}/plugin-runs",
@@ -1329,6 +1354,44 @@ async def test_list_runs_scoped_to_org(
     r = await client.get("/api/v1/plugin-runs", headers=_h(admin_token, org_b.id))
     assert r.status_code == 200
     assert r.json() == []
+
+
+async def test_list_runs_filters_by_status_plugin_and_runner(
+    client: AsyncClient, runner_secret, admin_token, org_a,
+):
+    """The runs list applies exact-match status/plugin/runner filters server-side
+    so they narrow the whole dataset, not just a fetched page."""
+    plugin_id, credential = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    h = _internal_h(credential)
+    await client.post(
+        "/api/internal/plugin-runner/runs",
+        json={
+            "event_id": "filter:1",
+            "event_type": "observable.created",
+            "organisation_id": org_a.id,
+            "plugin_id": plugin_id,
+            "plugin_version": "1.2.0",
+            "runner_id": "runner-1",
+            "trigger_metadata": {},
+        },
+        headers=h,
+    )
+    oh = _h(admin_token, org_a.id)
+
+    async def ids(query: str) -> list[str]:
+        r = await client.get(f"/api/v1/plugin-runs{query}", headers=oh)
+        assert r.status_code == 200, r.text
+        return [run["plugin_id"] for run in r.json()]
+
+    # A newly created run is queued on runner-1 for this plugin.
+    assert await ids("") == [plugin_id]
+    assert await ids(f"?plugin_id={plugin_id}") == [plugin_id]
+    assert await ids(f"?status=queued&plugin_id={plugin_id}") == [plugin_id]
+    assert await ids("?runner_id=runner-1") == [plugin_id]
+    # Non-matching filters return nothing.
+    assert await ids("?plugin_id=does-not-exist") == []
+    assert await ids("?status=success") == []
+    assert await ids("?runner_id=runner-2") == []
 
 
 # --- Missing runtime APIs (Finding #9) ---

@@ -9,6 +9,8 @@ Two halves:
 import pytest
 from httpx import AsyncClient
 
+from app.core.extensions import Denial
+
 
 @pytest.fixture
 def installed_extension():
@@ -41,7 +43,12 @@ async def test_auth_providers_empty_in_oss(client: AsyncClient):
 async def test_system_capabilities_all_false_in_oss(client: AsyncClient):
     response = await client.get("/api/v1/system/capabilities")
     assert response.status_code == 200
-    assert response.json() == {"sso": False, "mfa": False, "dashboard": False}
+    assert response.json() == {
+        "sso": False,
+        "mfa": False,
+        "dashboard": False,
+        "case_workflow": False,
+    }
 
 
 async def test_login_unchanged_without_extension(client: AsyncClient, admin_user):
@@ -83,7 +90,13 @@ async def test_fixture_provider_advertised(client: AsyncClient, installed_extens
 async def test_fixture_capabilities_merged(client: AsyncClient, installed_extension):
     response = await client.get("/api/v1/system/capabilities")
     assert response.status_code == 200
-    assert response.json() == {"sso": True, "mfa": True, "dashboard": False}
+    # The fixture flips only sso/mfa; keys it doesn't mention keep the OSS default.
+    assert response.json() == {
+        "sso": True,
+        "mfa": True,
+        "dashboard": False,
+        "case_workflow": False,
+    }
 
 
 async def test_login_calls_second_factor_hook(
@@ -102,6 +115,172 @@ async def test_login_calls_second_factor_hook(
     assert "access_token" not in data
     # No refresh cookie is set for a challenge (tokens were never issued).
     assert "set-cookie" not in {k.lower() for k in response.headers}
+
+
+# --- Case-transition policy hook ---------------------------------------------
+#
+# The governance veto point (docs/case-statuses-tiering-decision.md §4). OSS must
+# stay unrestricted; only an installed extension's explicit Denial blocks a move.
+
+
+def _h(token, org_id):
+    return {"Authorization": f"Bearer {token}", "X-Organisation-Id": org_id}
+
+
+async def _case_and_statuses(client, headers):
+    created = await client.post("/api/v1/cases/", json={"title": "c"}, headers=headers)
+    assert created.status_code == 201, created.text
+    statuses = await client.get("/api/v1/case-statuses/", headers=headers)
+    assert statuses.status_code == 200, statuses.text
+    return created.json(), {s["label"]: s for s in statuses.json()}
+
+
+class _TransitionPolicyExtension:
+    """A PARTIAL extension implementing ONLY `case_transition_hook` — no routers,
+    no capabilities, no other hook. Proves the registry duck-types each hook
+    independently. Async on purpose: the real enterprise hook reads rules from the
+    DB, so the aggregate's await path is what needs covering."""
+
+    def __init__(self, deny_to: str | None = None):
+        self.deny_to = deny_to
+        #: (from_label, to_label) per consult — lets a test assert the hook is NOT
+        #: called at all on a no-op change.
+        self.calls: list[tuple[str, str]] = []
+
+    async def case_transition_hook(self, *, case, from_status, to_status, actor):
+        self.calls.append((from_status.label, to_status.label))
+        if self.deny_to is not None and to_status.label == self.deny_to:
+            return Denial(
+                reason=f"Only a team lead may move a case to {to_status.label}",
+                code="transition_forbidden",
+            )
+        return None
+
+
+@pytest.fixture
+def install_policy():
+    """Register a hook-only extension for one test (no routers, so no app mounting
+    needed), restoring the registry afterwards."""
+    from app.core.extensions import registry
+
+    saved = list(registry.extensions)
+
+    def _install(ext):
+        registry.register(ext)
+        return ext
+
+    try:
+        yield _install
+    finally:
+        registry.reset(saved)
+
+
+async def test_transitions_unrestricted_in_oss(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token
+):
+    """THE OSS GUARANTEE: with no extension, any status move is allowed. This is
+    the contract documented on CaseUpdate.status_id."""
+    h = _h(analyst_a_token, org_a.id)
+    case, statuses = await _case_and_statuses(client, h)
+
+    response = await client.patch(
+        f"/api/v1/cases/{case['id']}",
+        json={"status_id": statuses["Resolved"]["id"]},
+        headers=h,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"]["label"] == "Resolved"
+
+
+async def test_transition_hook_can_deny(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token, install_policy
+):
+    """An extension's Denial becomes a 403 carrying the rule's own reason text."""
+    policy = install_policy(_TransitionPolicyExtension(deny_to="Resolved"))
+    h = _h(analyst_a_token, org_a.id)
+    case, statuses = await _case_and_statuses(client, h)
+
+    response = await client.patch(
+        f"/api/v1/cases/{case['id']}",
+        json={"status_id": statuses["Resolved"]["id"]},
+        headers=h,
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "Only a team lead may move a case to Resolved"
+    assert policy.calls == [("Open", "Resolved")]
+
+    # The denial actually blocked the write — the case is still Open.
+    after = await client.get(f"/api/v1/cases/{case['id']}", headers=h)
+    assert after.json()["status"]["label"] == "Open"
+
+
+async def test_transition_hook_allows_when_it_returns_none(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token, install_policy
+):
+    """A hook that returns None means allow — a policy that denies one edge must
+    not accidentally block the others."""
+    policy = install_policy(_TransitionPolicyExtension(deny_to="Resolved"))
+    h = _h(analyst_a_token, org_a.id)
+    case, statuses = await _case_and_statuses(client, h)
+
+    response = await client.patch(
+        f"/api/v1/cases/{case['id']}",
+        json={"status_id": statuses["In progress"]["id"]},
+        headers=h,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"]["label"] == "In progress"
+    assert policy.calls == [("Open", "In progress")]
+
+
+async def test_no_op_status_change_never_consults_policy(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token, install_policy
+):
+    """Re-PATCHing a case with the status it already has isn't a transition, so a
+    rule about *moving* must not be consulted (let alone deny it)."""
+    policy = install_policy(_TransitionPolicyExtension(deny_to="Open"))
+    h = _h(analyst_a_token, org_a.id)
+    case, statuses = await _case_and_statuses(client, h)
+    assert case["status"]["label"] == "Open"
+
+    response = await client.patch(
+        f"/api/v1/cases/{case['id']}",
+        json={"status_id": statuses["Open"]["id"]},
+        headers=h,
+    )
+    assert response.status_code == 200, response.text
+    assert policy.calls == []
+
+
+async def test_patch_without_status_never_consults_policy(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token, install_policy
+):
+    """Editing an unrelated field is not a transition."""
+    policy = install_policy(_TransitionPolicyExtension(deny_to="Open"))
+    h = _h(analyst_a_token, org_a.id)
+    case, _ = await _case_and_statuses(client, h)
+
+    response = await client.patch(
+        f"/api/v1/cases/{case['id']}", json={"title": "renamed"}, headers=h
+    )
+    assert response.status_code == 200, response.text
+    assert policy.calls == []
+
+
+async def test_extension_without_transition_hook_is_skipped(
+    client: AsyncClient, org_a, builtin_roles, analyst_a_token, installed_extension
+):
+    """The shared fixture extension implements no case_transition_hook; the registry
+    must skip it rather than error — the partial-extension contract."""
+    h = _h(analyst_a_token, org_a.id)
+    case, statuses = await _case_and_statuses(client, h)
+
+    response = await client.patch(
+        f"/api/v1/cases/{case['id']}",
+        json={"status_id": statuses["Resolved"]["id"]},
+        headers=h,
+    )
+    assert response.status_code == 200, response.text
 
 
 # --- Entry-point loader: resilience + idempotency ----------------------------

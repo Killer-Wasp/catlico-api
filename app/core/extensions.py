@@ -10,7 +10,17 @@ entry-point group) can:
   * mount its own routers under the versioned API,
   * advertise SSO identity providers to the login page,
   * gate login behind a second factor (MFA),
+  * veto a core write it has a governance policy about (case status transitions),
   * flip capability flags the web reads to decide whether to render enterprise UI.
+
+Mostly-additive, with named veto points. The seam is additive by default — an
+extension adds routers/providers/capabilities. The exceptions are the *policy
+hooks* (``second_factor_hook``, ``case_transition_hook``), which let an extension
+deny something the OSS core would otherwise allow. These are deliberately
+enumerated rather than general: each is a named hook on a specific core write, so
+the set of places an extension can say "no" stays greppable. A hook an extension
+omits is skipped, and an absent hook always means *allow* — never *deny* — so the
+OSS-unchanged guarantee holds by construction.
 
 Extension interface (all hooks OPTIONAL — a partial extension is fine; the
 registry duck-types each hook and skips any that a given extension omits):
@@ -19,6 +29,7 @@ registry duck-types each hook and skips any that a given extension omits):
         def routers(self) -> list[APIRouter]: ...
         def identity_providers(self) -> list[IdentityProvider]: ...
         def second_factor_hook(self, user) -> Challenge | None: ...   # may be async
+        def case_transition_hook(self, **kw) -> Denial | None: ...    # may be async
         def capabilities(self) -> dict[str, bool]: ...
         async def on_startup(self) -> None: ...   # run once at app boot
 
@@ -48,6 +59,9 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from app.api.deps import AuthContext
+    from app.models.case_ import Case
+    from app.models.case_status import CaseStatusRef
     from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -60,7 +74,17 @@ EXTENSION_ROUTER_PREFIX = "/api/v1"
 
 #: The capability keys the platform always reports. An extension may flip these
 #: to ``True`` or add its own keys; OSS reports them all-false.
-DEFAULT_CAPABILITIES: dict[str, bool] = {"sso": False, "mfa": False, "dashboard": False}
+DEFAULT_CAPABILITIES: dict[str, bool] = {
+    "sso": False,
+    "mfa": False,
+    "dashboard": False,
+    #: Case status-transition governance (org-defined who-may-close rules). Unlike
+    #: ``dashboard`` (install-gated), this MUST be flipped by *configured rules*, the
+    #: way ``sso``/``mfa`` are — merely installing the enterprise package must never
+    #: start rejecting transitions that worked yesterday. See
+    #: docs/case-statuses-tiering-decision.md §4.
+    "case_workflow": False,
+}
 
 
 class IdentityProvider(BaseModel):
@@ -95,6 +119,22 @@ class Challenge(BaseModel):
     pending_token: str
 
 
+class Denial(BaseModel):
+    """A policy hook's veto of a core write. The calling route turns it into a 403.
+
+    Returning ``None`` from a policy hook means *allow*; only an explicit ``Denial``
+    blocks. OSS never produces one — with no extension installed no hook exists to
+    call, so every write the core would allow stays allowed.
+    """
+
+    #: Human-readable, surfaced to the client as the 403 detail. This text is the
+    #: point of the feature ("Only a team lead may resolve a case"), so it should
+    #: name the rule, not restate the status codes.
+    reason: str
+    #: Stable machine-readable discriminator, e.g. "transition_forbidden".
+    code: str
+
+
 @runtime_checkable
 class Extension(Protocol):
     """Structural type documenting the full extension surface. Every method is
@@ -105,6 +145,15 @@ class Extension(Protocol):
     def identity_providers(self) -> list[IdentityProvider]: ...
 
     def second_factor_hook(self, user: User) -> Challenge | None: ...
+
+    def case_transition_hook(
+        self,
+        *,
+        case: Case,
+        from_status: CaseStatusRef,
+        to_status: CaseStatusRef,
+        actor: AuthContext,
+    ) -> Denial | None: ...
 
     def capabilities(self) -> dict[str, bool]: ...
 
@@ -188,6 +237,39 @@ class ExtensionRegistry:
             if hook is None:
                 continue
             result = hook(user)
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not None:
+                return result
+        return None
+
+    async def case_transition_denial(
+        self,
+        *,
+        case: Case,
+        from_status: CaseStatusRef,
+        to_status: CaseStatusRef,
+        actor: AuthContext,
+    ) -> Denial | None:
+        """Ask each extension's ``case_transition_hook`` (sync or async) whether this
+        actor may move this case from one status to another. The first non-``None``
+        denial wins; with no extension this returns ``None`` and the transition
+        proceeds — preserving the OSS contract that case status transitions are
+        unrestricted (``CaseUpdate.status_id``).
+
+        Called only when the status actually *changes*, so a no-op PATCH never
+        consults a policy. Same shape as :meth:`second_factor_challenge`.
+        """
+        for ext in self._extensions:
+            hook = getattr(ext, "case_transition_hook", None)
+            if hook is None:
+                continue
+            result = hook(
+                case=case,
+                from_status=from_status,
+                to_status=to_status,
+                actor=actor,
+            )
             if inspect.isawaitable(result):
                 result = await result
             if result is not None:
