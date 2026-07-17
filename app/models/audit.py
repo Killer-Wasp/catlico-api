@@ -59,17 +59,3 @@ class AuditOutbox(SQLModel, table=True):
     #: stops retrying forever, and is pruned on its own longer retention window.
     dead_lettered_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-
-class AuditPublic(SQLModel):
-    id: int
-    request_id: str
-    action: str
-    main_action: bool
-    object_type: str
-    object_id: str
-    context_type: str | None
-    context_id: str | None
-    actor: str
-    details: dict[str, Any] | None
-    created_at: datetime

@@ -14,7 +14,6 @@ from app.api.deps import ActiveOrgContext
 from app.core.db import get_session
 from app.crud import plugin_proposed_action as ppa_crud
 from app.models.plugin_runner import PluginProposedAction
-from app.services import plugin_audit
 
 router = APIRouter(prefix="/proposed-actions", tags=["proposed-actions"])
 
@@ -76,16 +75,6 @@ async def approve_proposed_action(
         approve_action=True,
         approver_user_id=str(ctx.user.id),
     )
-    await plugin_audit.record_admin_action(
-        session, action="approve", object_type="plugin_proposed_action",
-        object_id=str(action.id), actor=str(ctx.user.id),
-        organisation_id=ctx.organisation_id,
-        details={
-            "action_type": action.action_type,
-            "plugin_id": action.plugin_id,
-            "result_status": action.status,
-        },
-    )
     return ppa_crud.public(action)
 
 
@@ -107,11 +96,5 @@ async def reject_proposed_action(
         approve_action=False,
         approver_user_id=str(ctx.user.id),
         reason=(body or {}).get("reason"),
-    )
-    await plugin_audit.record_admin_action(
-        session, action="reject", object_type="plugin_proposed_action",
-        object_id=str(action.id), actor=str(ctx.user.id),
-        organisation_id=ctx.organisation_id,
-        details={"action_type": action.action_type, "plugin_id": action.plugin_id},
     )
     return ppa_crud.public(action)

@@ -59,8 +59,11 @@ per (plugin, org, fire slot), which is what makes scheduling idempotent across r
 
 - **`connector_operations.py`** validates and applies responder operations transactionally
   with audit rows, but responder job queueing and real responder connectors are incomplete.
-- `plugin_audit.py` records admin actions (config changes, approvals) into `Audit`.
-  **Secret values are never recorded** — only the key name and whether it was set. Preserve that.
+- `plugin_audit.py` is **gone** (removed 2026-07-17). It wrote plugin admin actions (enable,
+  config change, approval) straight to `Audit` with no outbox row, so nothing could ever read
+  them — the audit viewers and `/api/v1/audit/` routes were removed by `fix/oos-slimdown.md`.
+  Rebuild it alongside the long-term audit retention + export feature
+  (`docs/FEATURE-ROADMAP.md` §3), not before: until there is a reader, the rows are write-only.
 - `websocket_hub.py` is an **in-memory** hub — it does not survive multiple processes.
   It needs a shared backend before horizontal scaling.
 

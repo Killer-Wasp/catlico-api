@@ -9,7 +9,6 @@ import uuid
 from httpx import AsyncClient
 from sqlalchemy import func, select
 
-from app.models.audit import Audit
 from app.models.plugin_runner import PluginResult
 
 from tests.test_api_plugin_runners import (
@@ -443,13 +442,12 @@ async def test_runtime_token_is_invalid_after_terminal_status(
     assert late.status_code == 409
 
 
-async def test_late_result_after_terminal_is_rejected_and_audited(
+async def test_late_result_after_terminal_is_rejected(
     client: AsyncClient, session, org_a, analyst_a_token, runner_secret, admin_token,
 ):
-    """A runtime call on a terminal run is rejected (409), applies no result, and
-    is recorded as an independent `rejected_late_result` audit that survives the
-    request rollback (proving the audit committed on its own session)."""
-    org_id = org_a.id
+    """A runtime call on a terminal run is rejected (409) and applies no result.
+    The rejection is logged rather than persisted, so the security invariant this
+    guards is the 409 + the untouched PluginResult count, not an audit row."""
     _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
     runtime_token = await _runtime_token_for(
         client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id)
@@ -504,71 +502,6 @@ async def test_late_result_after_terminal_is_rejected_and_audited(
         await session.execute(select(func.count()).select_from(PluginResult))
     ).scalar_one()
     assert count_after == count_before, "late result must not create a PluginResult"
-
-    audits = (
-        (
-            await session.execute(
-                select(Audit).where(
-                    Audit.action == "rejected_late_result",
-                    Audit.object_type == "plugin_run",
-                    Audit.object_id == str(run_id),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert len(audits) == 1, "expected exactly one late-result audit row"
-    audit = audits[0]
-    assert audit.main_action is True
-    assert audit.details["status"] == "success"
-    assert audit.details["organisation_id"] == org_id
-    assert "terminal" in audit.details["reason"]
-
-
-async def test_late_result_still_409_when_audit_write_fails(
-    client: AsyncClient, org_a, analyst_a_token, runner_secret, admin_token, monkeypatch,
-):
-    """Auditing is best-effort: if the independent audit write raises, the late
-    call must still get the designed 409 rejection, never a 500."""
-    _, obs_id = await _create_case_with_observable(client, org_a, analyst_a_token)
-    runtime_token = await _runtime_token_for(
-        client, runner_secret, admin_token, org_a.id, event_object_id=str(obs_id)
-    )
-
-    progress = await client.post(
-        f"{_RUNTIME_PREFIX}/progress",
-        json={"message": "Done", "percent": 100},
-        headers=_runtime_h(runtime_token),
-    )
-    run_id = progress.json()["run_id"]
-    _, runner_credential = await _register_runner(
-        client, admin_token, RUNNER1, plugins=[RUNTIME_MANIFEST],
-    )
-    terminal = await client.post(
-        f"{_RUNNER_PREFIX}/runs/{run_id}/result",
-        json={"status": "success", "result_summary": {"ok": True}},
-        headers=_runner_h(runner_credential),
-    )
-    assert terminal.status_code == 200, terminal.text
-
-    # Force the audit write to blow up; the rejection must be unconditional.
-    async def _boom(*args, **kwargs):
-        raise RuntimeError("audit backend down")
-
-    monkeypatch.setattr("app.api.deps.record_admin_action", _boom)
-
-    late = await client.post(
-        f"{_RUNTIME_PREFIX}/results",
-        json={
-            "entity_type": "observable",
-            "entity_id": str(obs_id),
-            "summary": "Late duplicate",
-            "fingerprint": "late-audit-boom",
-        },
-        headers=_runtime_h(runtime_token),
-    )
-    assert late.status_code == 409, late.text
 
 
 async def test_patch_case(

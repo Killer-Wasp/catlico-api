@@ -1,5 +1,6 @@
 """Public API: plugin catalog, config, enable/disable, and run views."""
 import uuid
+from collections.abc import Sequence
 from typing import Annotated
 
 from datetime import UTC, datetime
@@ -11,8 +12,8 @@ from sqlmodel import SQLModel, delete, select
 
 from app.api.deps import ActiveOrgOrApiKeyContext
 from app.core.db import get_session
+from app.crud import observable as obs_crud
 from app.crud import plugin_stats as stats_crud
-from app.services import plugin_audit
 from app.services import plugin_circuit_breaker as circuit_breaker
 from app.models.plugin_runner import (
     OrgPlugin,
@@ -279,7 +280,12 @@ async def _runners_for_version(
     ]
 
 
-def _plugin_run_public(run: PluginRun) -> dict:
+def _plugin_run_public(
+    run: PluginRun, observable: tuple[str, str] | None = None
+) -> dict:
+    """`observable` is the (type, value) the run was delivered, when its object is an
+    observable the caller may still see — resolve it with `_run_observables`. Absent it,
+    the observable_* fields are null and the client falls back to the raw object id."""
     return {
         "id": str(run.id),
         "event_id": run.event_id,
@@ -290,6 +296,8 @@ def _plugin_run_public(run: PluginRun) -> dict:
         "runner_id": run.runner_id,
         "event_object_type": run.event_object_type,
         "event_object_id": run.event_object_id,
+        "observable_type": observable[0] if observable else None,
+        "observable_value": observable[1] if observable else None,
         "status": run.status,
         "skip_reason": run.skip_reason,
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -315,6 +323,10 @@ def _manual_run_view(envelope: dict, pdef: PluginDefinition, runner_id: str) -> 
         "runner_id": runner_id,
         "event_object_type": envelope["object"]["type"],
         "event_object_id": envelope["object"]["id"],
+        # Left unresolved: this view is a transient placeholder for a row that does
+        # not exist yet, and the runs list resolves the value once the runner claims it.
+        "observable_type": None,
+        "observable_value": None,
         "status": "queued",
         "skip_reason": None,
         "started_at": None,
@@ -804,10 +816,6 @@ async def enable_plugin(
     else:
         org_plugin.enabled = True
     await session.flush()
-    await plugin_audit.record_admin_action(
-        session, action="enable", object_type="plugin", object_id=plugin_id,
-        actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
-    )
     # Return the full plugin view (not just `{enabled}`) so the client has the
     # updated resource — display name, runner, config-completeness — to render.
     cfg = await session.get(PluginConfig, (ctx.organisation_id, plugin_id))
@@ -833,10 +841,6 @@ async def disable_plugin(
     if org_plugin is not None and org_plugin.enabled:
         org_plugin.enabled = False
         await session.flush()
-        await plugin_audit.record_admin_action(
-            session, action="disable", object_type="plugin", object_id=plugin_id,
-            actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
-        )
     # Return the full plugin view (mirrors `enable`) so the client can render the
     # updated resource rather than infer it from a bare `{enabled}` flag.
     cfg = await session.get(PluginConfig, (ctx.organisation_id, plugin_id))
@@ -866,10 +870,6 @@ async def enable_auto_run(
         )
     org_plugin.auto_run_enabled = True
     await session.flush()
-    await plugin_audit.record_admin_action(
-        session, action="auto_run_enable", object_type="plugin", object_id=plugin_id,
-        actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
-    )
     return {"auto_run_enabled": True}
 
 
@@ -885,10 +885,6 @@ async def disable_auto_run(
         return {"auto_run_enabled": False}
     org_plugin.auto_run_enabled = False
     await session.flush()
-    await plugin_audit.record_admin_action(
-        session, action="auto_run_disable", object_type="plugin", object_id=plugin_id,
-        actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
-    )
     return {"auto_run_enabled": False}
 
 
@@ -920,11 +916,6 @@ async def set_auto_apply_policy(
         )
     org_plugin.auto_apply_actions = list(requested)
     await session.flush()
-    await plugin_audit.record_admin_action(
-        session, action="auto_apply_policy", object_type="plugin", object_id=plugin_id,
-        actor=str(ctx.user.id), organisation_id=ctx.organisation_id,
-        details={"actions": list(requested)},
-    )
     return {"auto_apply_actions": org_plugin.auto_apply_actions}
 
 
@@ -945,7 +936,6 @@ async def set_plugin_config(
 
     org_id = ctx.organisation_id
     cfg = await session.get(PluginConfig, (org_id, plugin_id))
-    old_settings = dict(cfg.settings) if cfg is not None else {}
     if cfg is None:
         cfg = PluginConfig(organisation_id=org_id, plugin_id=plugin_id)
         session.add(cfg)
@@ -967,15 +957,6 @@ async def set_plugin_config(
                 merged[key] = value
         cfg.secrets_encrypted = encrypt_secrets(merged)
     await session.flush()
-
-    audit_details = plugin_audit.summarize_config_change(
-        pdef.manifest or {}, old_settings, new_settings, set(secrets.keys())
-    )
-    await plugin_audit.record_admin_action(
-        session, action="config_update", object_type="plugin_config",
-        object_id=plugin_id, actor=str(ctx.user.id), organisation_id=org_id,
-        details=audit_details,
-    )
 
     return {
         "settings": cfg.settings,
@@ -1055,6 +1036,39 @@ async def test_plugin_config(
 # --- Plugin runs ---
 
 
+async def _run_observables(
+    session: AsyncSession,
+    organisation_id: str,
+    runs: Sequence[PluginRun],
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """Map run.id -> (observable type, value) for the runs that were delivered an
+    observable the org may see. One batch query regardless of page size — the runs
+    list is capped at 500, so per-run resolution would be a 500-query page.
+
+    Runs whose object isn't an observable, or whose observable is deleted or no longer
+    visible to the org, are simply absent from the map."""
+    wanted: dict[uuid.UUID, uuid.UUID] = {}
+    for run in runs:
+        if run.event_object_type != "observable" or not run.event_object_id:
+            continue
+        try:
+            wanted[run.id] = uuid.UUID(run.event_object_id)
+        except ValueError:
+            continue  # non-uuid object id — nothing to resolve against
+    if not wanted:
+        return {}
+    resolved = await obs_crud.visible_values_for_ids(
+        session,
+        organisation_id=organisation_id,
+        observable_ids=list(set(wanted.values())),
+    )
+    return {
+        run_id: resolved[obs_id]
+        for run_id, obs_id in wanted.items()
+        if obs_id in resolved
+    }
+
+
 @runs_router.get("")
 async def list_plugin_runs(
     ctx: ActiveOrgOrApiKeyContext,
@@ -1081,7 +1095,8 @@ async def list_plugin_runs(
         stmt = stmt.where(PluginRun.runner_id == runner_id)
     stmt = stmt.order_by(PluginRun.created_at.desc()).offset(skip).limit(limit)
     runs = (await session.execute(stmt)).scalars().all()
-    return [_plugin_run_public(r) for r in runs]
+    observables = await _run_observables(session, ctx.organisation_id, runs)
+    return [_plugin_run_public(r, observables.get(r.id)) for r in runs]
 
 
 @runs_router.get("/{run_id}")
@@ -1096,7 +1111,8 @@ async def get_plugin_run(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     if run.organisation_id != ctx.organisation_id and not ctx.user.is_superadmin:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    return _plugin_run_public(run)
+    observables = await _run_observables(session, ctx.organisation_id, [run])
+    return _plugin_run_public(run, observables.get(run.id))
 
 
 @runs_router.post("/{run_id}/cancel")

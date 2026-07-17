@@ -1,17 +1,20 @@
 # The plugin system
 
-How Catlico runs third-party plugins without ever letting them near the database.
+How Catlico runs trusted **first-party** plugins without ever letting them near the database.
 
 For the plugin **authoring** contract, see the [plugin SDK](https://github.com/Killer-Wasp/catlico-plugin-sdk).
-For the **sandbox** that executes plugins, see the [plugin runner](https://github.com/Killer-Wasp/catlico-plugin-runner).
+For the **execution host** (a plain-subprocess runner — no sandbox, by design; see its
+`docs/security.md` for why), see the [plugin runner](https://github.com/Killer-Wasp/catlico-plugin-runner).
 
 > **Status.** This documents what the code does today. Sections marked *Not yet wired*
-> describe deliberate gaps. The legacy connector worker (`catlico-konnect`, ~35
-> connectors) is **still the production enrichment path** and runs alongside this system.
+> describe deliberate gaps. The legacy connector worker (`catlico-konnect`) was **retired
+> on 2026-07-10** — the plugin system is the only enrichment path.
 
 ## The trust model
 
-Three rules, each enforced in code:
+Plugins are trusted first-party code; there is no sandbox around them. The boundaries below
+are enforced at the API — via surfaces, tokens, and permissions — not by isolating plugin
+code. Three rules, each enforced in code:
 
 - **Plugins never touch the database.** They call the runtime HTTP API with a per-run token.
 - **The runner holds no database credentials.** It reaches Catlico only over the internal HTTP API.
@@ -30,8 +33,9 @@ another surface's routes. Wiring lives in [`app/api/deps.py`](../app/api/deps.py
 | **Runner** | `/api/internal/plugin-runner/*` | The shared secret as `Authorization: Bearer <PLUGIN_RUNNER_SHARED_SECRET>`, plus `X-Runner-Id: <runner_id>` for identity/routing | `PluginRunnerPrincipal` |
 | **Runtime** | `/api/internal/plugin-runtime/*` | Short-lived per-run token, minted at claim, dies at terminal status | `PluginRuntimePrincipal` |
 
-The legacy analyzer/responder worker authenticates separately via `ANALYZER_SHARED_SECRET`
-on `/api/internal/analyzer/*` and `/api/internal/responder/*`.
+(The legacy analyzer/responder surface — `ANALYZER_SHARED_SECRET`, `/api/internal/analyzer/*`,
+`/api/internal/responder/*` — was deleted with the konnect retirement; these three are the
+only internal surfaces.)
 
 ### Public — `/api/v1/plugins`
 
@@ -44,7 +48,7 @@ The plugin system reuses the connector permission vocabulary.
 | GET | `/plugins/{id}` | Single plugin DTO |
 | GET | `/plugins/{id}/stats` | Usage stats (`window=7d\|30d\|90d`) |
 | GET/POST | `/plugins/{id}/resources/{path}` | Proxy to the runner. **See caveat below.** |
-| POST | `/plugins/{id}/run` | Queue a manual run (observables only) |
+| POST | `/plugins/{id}/run` | Dispatch a manual run (observable, case, or alert; `force` re-runs) |
 | POST | `/plugins/{id}/enable` · `/disable` | Per-org enablement |
 | POST | `/plugins/{id}/auto-run/enable` · `/disable` | Event-driven auto-run toggle |
 | PUT | `/plugins/{id}/auto-apply` | Which low-risk proposal types auto-apply |
@@ -171,9 +175,14 @@ auto-run on. Firing is **API-side only**, with a deterministic slot id
 (`schedule:<plugin>:<org>:<epoch>`), so N runners cannot fire N times. It uses the
 most-recent slot only — at most one catch-up after an outage.
 
-> *Not yet wired:* `POST /plugins/{id}/run` inserts a `queued` `PluginRun` directly, but the
-> runner-facing push path is driven by `PluginEventDelivery`, not by manually-inserted run
-> rows. **Treat manual runs as create-only.**
+**Manual runs ride the same path.** `POST /plugins/{id}/run` no longer inserts a `queued` run
+nothing executes (that old scaffold is gone — see `create_manual_plugin_run`): it synthesizes a
+manual envelope (`event_id = manual:<org>:<plugin>:<entity_type>:<entity_id>`, deterministic so
+repeat clicks dedup; `force=true` salts it with a time component so a real re-run dispatches) and
+enqueues a `PluginEventDelivery` per healthy runner. The runner claims through the normal path;
+`create_run` reads the stored envelope's server-side `manual` flag and relaxes trigger-match,
+auto-run, and freshness-cache checks — analyst intent — while keeping the TLP/PAP ceilings and
+the concurrency cap.
 
 ## Proposed actions
 
@@ -189,8 +198,9 @@ behaviour match a human edit.
 `execute_responder_action`.
 
 All of these apply on approval **except `execute_responder_action`**, which is deliberately
-excluded — there is no post-approval path from a proposed action to a responder (responders
-run through the separate connector-job pipeline in `catlico-konnect`).
+excluded — there is no post-approval path from a proposed action to a responder. (The
+connector-job pipeline in `catlico-konnect` that once executed responders was retired
+2026-07-10; nothing has replaced it yet.)
 
 > **Approving an `execute_responder_action` returns HTTP 200 with `status: "failed"`** and an
 > informative `decision_reason` — not a 422. `decide()` catches the internal error, marks the

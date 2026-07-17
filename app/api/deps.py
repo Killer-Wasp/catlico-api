@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.configs import settings
-from app.core.db import AsyncSessionLocal, get_session
+from app.core.db import get_session
 from app.core.security import TokenPayload, decode_access_token
 from app.crud.api_key import get_key_by_hash, touch_key
 from app.crud.organisation_member import get_member_permissions
@@ -28,7 +28,6 @@ from app.models.role import (
     expand_permissions,
 )
 from app.models.user import User
-from app.services.plugin_audit import record_admin_action
 
 logger = logging.getLogger(__name__)
 
@@ -528,33 +527,19 @@ async def get_plugin_runtime_principal(
     if run.status not in {"accepted", "running"}:
         # Late result: the token still resolves to its run (we deliberately no
         # longer null the hash at terminal status) so we can attribute the call,
-        # but the run is terminal/inactive and must accept no work. Audit the
-        # rejection in an INDEPENDENT session that commits on its own — the
-        # request session is rolled back when this raises (get_session rolls back
-        # on any exception), which would otherwise discard the audit row.
-        # Auditing is best-effort: a DB hiccup in the independent-session write
-        # must never turn the designed 409 rejection into a 500. Swallow any
-        # failure (logged) and ALWAYS fall through to the 409 — the security
-        # invariant (no route body runs) holds regardless of whether we logged.
-        try:
-            async with AsyncSessionLocal() as audit_session:
-                await record_admin_action(
-                    audit_session,
-                    action="rejected_late_result",
-                    object_type="plugin_run",
-                    object_id=str(run.id),
-                    actor=f"plugin:{run.plugin_id}@{run.plugin_version_id}",
-                    organisation_id=run.organisation_id,
-                    details={
-                        "status": run.status,
-                        "reason": "runtime token used after run reached terminal/inactive status",
-                    },
-                )
-                await audit_session.commit()
-        except Exception:  # noqa: BLE001 — audit is best-effort, rejection is not
-            logger.warning(
-                "failed to audit late result for run %s", run.id, exc_info=True
-            )
+        # but the run is terminal/inactive and must accept no work. Log rather
+        # than persist: the request session is rolled back when this raises
+        # (get_session rolls back on any exception), so a DB write here would
+        # need its own session and would only reach a table nothing reads.
+        logger.warning(
+            "rejected late result for run %s (status=%s, actor=plugin:%s@%s, org=%s): "
+            "runtime token used after run reached terminal/inactive status",
+            run.id,
+            run.status,
+            run.plugin_id,
+            run.plugin_version_id,
+            run.organisation_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Plugin runtime token is not active for this run",

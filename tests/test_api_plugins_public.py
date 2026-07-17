@@ -470,6 +470,113 @@ async def test_get_plugin_run_detail(
     assert r.json()["id"] == run_id
 
 
+async def _run_on_observable(
+    client: AsyncClient,
+    credential: str,
+    *,
+    org_id: str,
+    plugin_id: str,
+    observable_id: str,
+    event_id: str,
+) -> str:
+    """Queue a run delivered an observable, via the runner's internal API."""
+    r = await client.post(
+        "/api/internal/plugin-runner/runs",
+        json={
+            "event_id": event_id,
+            "event_type": "observable.created",
+            "organisation_id": org_id,
+            "plugin_id": plugin_id,
+            "plugin_version": "1.2.0",
+            "runner_id": "runner-1",
+            "event_object_type": "observable",
+            "event_object_id": observable_id,
+            "trigger_metadata": {},
+        },
+        headers=_internal_h(credential),
+    )
+    assert r.status_code in (200, 201), r.text
+    return r.json()["run_id"]
+
+
+async def test_plugin_run_views_resolve_observable_value(
+    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a,
+):
+    """The runs queue shows *what* each run analysed, but the run row holds only the
+    object's uuid — so the list and detail views resolve its type + value."""
+    plugin_id, credential = await _setup_enabled_plugin(client, admin_token, org_a.id)
+
+    h = _h(analyst_a_token, org_a.id)
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "Runs", "description": ""}, headers=h
+    )
+    observable = await client.post(
+        f"/api/v1/cases/{case.json()['id']}/observables",
+        json={"observable_type": "ip", "data": "8.8.8.8"},
+        headers=h,
+    )
+    run_id = await _run_on_observable(
+        client,
+        credential,
+        org_id=org_a.id,
+        plugin_id=plugin_id,
+        observable_id=observable.json()["id"],
+        event_id="audit:obs-value",
+    )
+
+    listed = await client.get("/api/v1/plugin-runs", headers=_h(admin_token, org_a.id))
+    assert listed.status_code == 200, listed.text
+    assert [(r["observable_type"], r["observable_value"]) for r in listed.json()] == [
+        ("ip", "8.8.8.8")
+    ]
+
+    detail = await client.get(
+        f"/api/v1/plugin-runs/{run_id}", headers=_h(admin_token, org_a.id)
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["observable_value"] == "8.8.8.8"
+
+
+async def test_plugin_run_hides_value_of_invisible_observable(
+    client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a, org_b,
+):
+    """The runs list is gated on read:connector and the run's own org, but an
+    observable rides case visibility — so resolving the value must re-check it,
+    or watching the queue would leak values off cases the org cannot open."""
+    plugin_id, credential = await _setup_enabled_plugin(client, admin_token, org_a.id)
+    await _enable_plugin_for_org(client, admin_token, org_b.id, plugin_id)
+
+    # Observable on a case owned by org_a, never shared with org_b.
+    h = _h(analyst_a_token, org_a.id)
+    case = await client.post(
+        "/api/v1/cases/", json={"title": "Private", "description": ""}, headers=h
+    )
+    observable = await client.post(
+        f"/api/v1/cases/{case.json()['id']}/observables",
+        json={"observable_type": "ip", "data": "10.9.9.9"},
+        headers=h,
+    )
+
+    # ...delivered to a run owned by org_b (the shape left behind when a share is
+    # revoked after the run).
+    await _run_on_observable(
+        client,
+        credential,
+        org_id=org_b.id,
+        plugin_id=plugin_id,
+        observable_id=observable.json()["id"],
+        event_id="audit:obs-hidden",
+    )
+
+    listed = await client.get("/api/v1/plugin-runs", headers=_h(admin_token, org_b.id))
+    assert listed.status_code == 200, listed.text
+    (run,) = listed.json()
+    # The run is org_b's to see; the value behind it is not.
+    assert run["event_object_id"] == observable.json()["id"]
+    assert run["observable_value"] is None
+    assert run["observable_type"] is None
+
+
 async def test_manual_plugin_run_for_observable(
     client: AsyncClient, runner_secret, admin_token, analyst_a_token, org_a, session,
 ):
