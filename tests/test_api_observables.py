@@ -1,9 +1,12 @@
 """Tests for the Observables milestone: string observables, within-case dedup,
 attachment-type rejection, case/alert parenting, soft-delete, import-on-promote."""
 from httpx import AsyncClient
+from sqlmodel import select
 
 from app.crud import case_ as case_crud
+from app.models.audit import AuditOutbox
 from app.models.case_ import CaseCreate
+from app.services.outbox_events import build_event_envelope
 
 
 def _headers(token, org_id):
@@ -294,3 +297,64 @@ async def test_create_case_observable_non_dedup_integrity_not_swallowed(
             json={"observable_type": "ip", "data": "7.7.7.7"},
             headers=h,
         )
+
+
+# --- Plugin event emission --------------------------------------------------
+# Plugin dispatch is derived from the audit outbox: record_audit writes the row,
+# and plugin_event_consumer normalises (object_type, action) into the trigger name
+# plugins subscribe to. A create that skips record_audit is invisible to plugins,
+# so these assert the observable.created trigger reaches the outbox at all.
+
+
+async def _observable_events(session):
+    rows = (await session.execute(select(AuditOutbox))).scalars().all()
+    envelopes = [build_event_envelope(r) for r in rows]
+    return [e for e in envelopes if e["event_type"].startswith("observable.")]
+
+
+async def test_case_observable_create_emits_observable_created(
+    client: AsyncClient, session, org_a, builtin_roles, observable_types, analyst_a, analyst_a_token
+):
+    case = await _make_case(session, org_a, builtin_roles, analyst_a)
+    h = _headers(analyst_a_token, org_a.id)
+    r = await client.post(
+        f"/api/v1/cases/{case.id}/observables",
+        json={"observable_type": "ip", "data": "1.2.3.4", "ioc": True},
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+
+    events = await _observable_events(session)
+    assert [e["event_type"] for e in events] == ["observable.created"]
+    assert events[0]["context"] == {"type": "case", "id": str(case.id)}
+    assert events[0]["data"]["data"] == "1.2.3.4"
+
+
+async def test_alert_observable_create_emits_observable_created(
+    client: AsyncClient, session, org_a, builtin_roles, observable_types, analyst_a, analyst_a_token
+):
+    """Alert observables are observables: adding one manually must trigger the same
+    observable.created analysis plugins get for a case observable."""
+    h = _headers(analyst_a_token, org_a.id)
+    alert = await client.post(
+        "/api/v1/alerts/",
+        json={"type": "phishing", "source": "gw", "source_ref": "g1", "title": "a"},
+        headers=h,
+    )
+    assert alert.status_code == 201, alert.text
+    alert_id = alert.json()["id"]
+
+    r = await client.post(
+        f"/api/v1/alerts/{alert_id}/observables",
+        json={"observable_type": "domain", "data": "evil.example", "ioc": True},
+        headers=h,
+    )
+    assert r.status_code == 201, r.text
+
+    events = await _observable_events(session)
+    assert [e["event_type"] for e in events] == ["observable.created"]
+    # Context is the parent alert, not a case — the enrichment plugins key off the
+    # object, but the feed and any case-scoped consumer need the right parent.
+    assert events[0]["context"] == {"type": "alert", "id": str(alert_id)}
+    assert events[0]["data"]["data"] == "evil.example"
+    assert events[0]["organisation_id"] == org_a.id

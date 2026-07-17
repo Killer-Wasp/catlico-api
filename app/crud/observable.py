@@ -514,6 +514,29 @@ async def list_observables_for_org(
     )
 
 
+async def visible_values_for_ids(
+    session: AsyncSession,
+    *,
+    organisation_id: str,
+    observable_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """Map observable_id -> (type, data) for the ids the org may see, in one query.
+    Rides the same visibility predicate as the org list, so an observable that was
+    soft-deleted or whose share was revoked drops out of the map rather than leaking
+    its value through a caller that only checked its own scope. Unknown ids are
+    absent — callers render them as unresolved rather than erroring."""
+    if not observable_ids:
+        return {}
+    rows = await session.execute(
+        select(Observable.id, Observable.observable_type, Observable.data).where(
+            Observable.id.in_(observable_ids),
+            Observable.deleted_at.is_(None),
+            _visible_observable_condition(organisation_id),
+        )
+    )
+    return {row[0]: (row[1], row[2]) for row in rows.all()}
+
+
 async def observable_facets(
     session: AsyncSession, organisation_id: str
 ) -> ObservableFacets:
@@ -636,6 +659,20 @@ async def create_alert_observable(
     )
     session.add(observable)
     await session.flush()
+    await record_audit(
+        session,
+        action="create",
+        obj=observable,
+        context_type="alert",
+        context_id=str(alert_id),
+        actor=created_by,
+        details={
+            "observable_type": observable.observable_type,
+            "data": observable.data,
+            "ioc": observable.ioc,
+        },
+        organisation_id=observable.organisation_id,
+    )
     return observable
 
 
